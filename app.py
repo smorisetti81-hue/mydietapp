@@ -86,37 +86,46 @@ if menu == "Dashboard Progressi":
             """, unsafe_allow_html=True)
 
 
-# --- SEZIONE 2: CARICA DATI (HEALTH) ---
+# --- SEZIONE: CARICA DATI (HEALTH) ---
 elif menu == "Carica Dati (Health)":
-    st.title("Sincronizzazione Dati ☁️")
-    st.write("Carica i file JSON esportati da Samsung Health (es. i file del peso o degli allenamenti).")
-    
-    file_health = st.file_uploader("Seleziona il file JSON di Samsung Health", type=["json"])
-    
-    if file_health is not None:
-        try:
-            # Carichiamo il file JSON grezzo
-            contenuto_json = json.load(file_health)
-            
-            # Samsung Health salva i dati dentro una lista sotto la radice o in chiavi specifiche
-            # Proviamo a convertirlo direttamente in una Tabella DataFrame di pandas
-            if isinstance(contenuto_json, list):
-                df_caricato = pd.DataFrame(contenuto_json)
-            elif isinstance(contenuto_json, dict):
-                # Se è un dizionario, cerchiamo la chiave principale se esiste, altrimenti prendiamo il dict
-                chiavi = list(contenuto_json.keys())
-                st.write(chiavi)
-                df_caricato = pd.DataFrame([contenuto_json])
-            
-            st.success("File JSON di Samsung Health letto con successo!")
-            st.subheader("📋 Anteprima dei dati estratti:")
-            st.dataframe(df_caricato.head(10), use_container_width=True)
-            
-            if st.button("Salva nel sistema", type="primary"):
-                st.success("Dati importati correttamente nel database!")
-                
-        except Exception as e:
-            st.error(f"Errore nella lettura del file JSON: {e}. Assicurati che sia un file supportato.")
+    st.title("📥 Importa Dati Samsung Health")
+    st.write("Carica i file JSON esportati dal tuo smartphone per aggiornare automaticamente i dati di allenamento e composizione corporea.")
+
+    col_up1, col_up2 = st.columns(2)
+
+    with col_up1:
+        st.subheader("🏋️ Allenamenti")
+        st.write("Seleziona il file dalla cartella `com.samsung.shealth.exercise`")
+        uploaded_exercise = st.file_uploader("JSON Allenamenti", type=["json"], key="ex")
+        
+        if uploaded_exercise is not None:
+            try:
+                data_ex = json.load(uploaded_exercise)
+                st.success("File allenamenti caricato!")
+                if isinstance(data_ex, list) and len(data_ex) > 0:
+                    df_ex_loaded = pd.DataFrame(data_ex)
+                    st.dataframe(df_ex_loaded.head(10), use_container_width=True)
+                else:
+                    st.json(data_ex)
+            except Exception as e:
+                st.error(f"Errore nella lettura del file: {e}")
+
+    with col_up2:
+        st.subheader("⚖️ Composizione Corporea")
+        st.write("Seleziona il file dalla cartella `com.samsung.shealth.body_composition`")
+        uploaded_body = st.file_uploader("JSON Composizione Corporea", type=["json"], key="body")
+        
+        if uploaded_body is not None:
+            try:
+                data_body = json.load(uploaded_body)
+                st.success("File composizione corporea caricato!")
+                if isinstance(data_body, list) and len(data_body) > 0:
+                    df_body_loaded = pd.DataFrame(data_body)
+                    st.dataframe(df_body_loaded.head(10), use_container_width=True)
+                else:
+                    st.json(data_body)
+            except Exception as e:
+                st.error(f"Errore nella lettura del file: {e}")
 
 # --- SEZIONE 3: MENSA SMART ---
 elif menu == "Mensa Smart":
