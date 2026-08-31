@@ -89,43 +89,53 @@ if menu == "Dashboard Progressi":
 # --- SEZIONE: CARICA DATI (HEALTH) ---
 elif menu == "Carica Dati (Health)":
     st.title("📥 Importa Dati Samsung Health")
-    st.write("Carica i file JSON esportati dal tuo smartphone per aggiornare automaticamente i dati di allenamento e composizione corporea.")
+    st.write("Puoi selezionare **anche più file contemporaneamente** dalle cartelle del telefono per unificarli.")
 
     col_up1, col_up2 = st.columns(2)
 
     with col_up1:
         st.subheader("🏋️ Allenamenti")
-        st.write("Seleziona il file dalla cartella `com.samsung.shealth.exercise`")
-        uploaded_exercise = st.file_uploader("JSON Allenamenti", type=["json"], key="ex")
+        st.write("Seleziona i file JSON dalla cartella `com.samsung.shealth.exercise`")
+        uploaded_exercises = st.file_uploader("JSON Allenamenti (puoi sceglierne più di uno)", type=["json"], accept_multiple_files=True, key="ex_multi")
         
-        if uploaded_exercise is not None:
-            try:
-                data_ex = json.load(uploaded_exercise)
-                st.success("File allenamenti caricato!")
-                if isinstance(data_ex, list) and len(data_ex) > 0:
-                    df_ex_loaded = pd.DataFrame(data_ex)
-                    st.dataframe(df_ex_loaded.head(10), use_container_width=True)
-                else:
-                    st.json(data_ex)
-            except Exception as e:
-                st.error(f"Errore nella lettura del file: {e}")
+        if uploaded_exercises:
+            all_ex_data = []
+            for file in uploaded_exercises:
+                try:
+                    content = json.load(file)
+                    if isinstance(content, list):
+                        all_ex_data.extend(content)
+                    elif isinstance(content, dict):
+                        all_ex_data.append(content)
+                except Exception as e:
+                    st.error(f"Errore nel file {file.name}: {e}")
+            
+            if all_ex_data:
+                df_ex = pd.DataFrame(all_ex_data)
+                st.success(caricato con successo! {len(df_ex)} record totali.")
+                st.dataframe(df_ex.head(10), use_container_width=True)
 
     with col_up2:
         st.subheader("⚖️ Composizione Corporea")
-        st.write("Seleziona il file dalla cartella `com.samsung.shealth.body_composition`")
-        uploaded_body = st.file_uploader("JSON Composizione Corporea", type=["json"], key="body")
+        st.write("Seleziona i file JSON dalla cartella `com.samsung.shealth.body_composition`")
+        uploaded_bodies = st.file_uploader("JSON Composizione (puoi sceglierne più di uno)", type=["json"], accept_multiple_files=True, key="body_multi")
         
-        if uploaded_body is not None:
-            try:
-                data_body = json.load(uploaded_body)
-                st.success("File composizione corporea caricato!")
-                if isinstance(data_body, list) and len(data_body) > 0:
-                    df_body_loaded = pd.DataFrame(data_body)
-                    st.dataframe(df_body_loaded.head(10), use_container_width=True)
-                else:
-                    st.json(data_body)
-            except Exception as e:
-                st.error(f"Errore nella lettura del file: {e}")
+        if uploaded_bodies:
+            all_body_data = []
+            for file in uploaded_bodies:
+                try:
+                    content = json.load(file)
+                    if isinstance(content, list):
+                        all_body_data.extend(content)
+                    elif isinstance(content, dict):
+                        all_body_data.append(content)
+                except Exception as e:
+                    st.error(f"Errore nel file {file.name}: {e}")
+            
+            if all_body_data:
+                df_body = pd.DataFrame(all_body_data)
+                st.success(caricato con successo! {len(df_body)} record totali.")
+                st.dataframe(df_body.head(10), use_container_width=True)
 
 # --- SEZIONE 3: MENSA SMART ---
 elif menu == "Mensa Smart":
