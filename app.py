@@ -112,7 +112,7 @@ elif menu == "Carica Dati (Health)":
             
             if all_ex_data:
                 df_ex = pd.DataFrame(all_ex_data)
-                st.success(caricato con successo! {len(df_ex)} record totali.")
+                st.success(f"File allenamenti caricato con successo! {len(df_ex)} record totali.")
                 st.dataframe(df_ex.head(10), use_container_width=True)
 
     with col_up2:
@@ -134,7 +134,7 @@ elif menu == "Carica Dati (Health)":
             
             if all_body_data:
                 df_body = pd.DataFrame(all_body_data)
-                st.success(caricato con successo! {len(df_body)} record totali.")
+                st.success(f"File composizione caricato con successo! {len(df_body)} record totali.")
                 st.dataframe(df_body.head(10), use_container_width=True)
 
 # --- SEZIONE 3: MENSA SMART ---
