@@ -87,55 +87,60 @@ if menu == "Dashboard Progressi":
 
 
 # --- SEZIONE: CARICA DATI (HEALTH) ---
+import urllib.parse
+import requests
+
+# ... (altro codice del tuo file) ...
+
 elif menu == "Carica Dati (Health)":
-    st.title("📥 Importa Dati Samsung Health")
-    st.write("Puoi selezionare **anche più file contemporaneamente** dalle cartelle del telefono per unificarli.")
+    st.title("🔄 Sincronizzazione Google Fit")
+    st.write("Collega il tuo account Google per scaricare in automatico i dati sanitari e gli allenamenti.")
 
-    col_up1, col_up2 = st.columns(2)
+    # Recupera le credenziali in modo sicuro
+    client_id = st.secrets["GOOGLE_CLIENT_ID"]
+    client_secret = st.secrets["GOOGLE_CLIENT_SECRET"]
+    redirect_uri = st.secrets["REDIRECT_URI"]
 
-    with col_up1:
-        st.subheader("🏋️ Allenamenti")
-        st.write("Seleziona i file JSON dalla cartella `com.samsung.shealth.exercise`")
-        uploaded_exercises = st.file_uploader("JSON Allenamenti (puoi sceglierne più di uno)", type=["json"], accept_multiple_files=True, key="ex_multi")
+    # Scope necessari per leggere attività (passi, allenamenti) e composizione corporea
+    scopes = "https://www.googleapis.com/auth/fitness.activity.read https://www.googleapis.com/auth/fitness.body.read"
+
+    # 1. Controlla se abbiamo appena ricevuto il codice di autorizzazione
+    query_params = st.query_params
+    
+    if "code" in query_params:
+        auth_code = query_params["code"]
         
-        if uploaded_exercises:
-            all_ex_data = []
-            for file in uploaded_exercises:
-                try:
-                    content = json.load(file)
-                    if isinstance(content, list):
-                        all_ex_data.extend(content)
-                    elif isinstance(content, dict):
-                        all_ex_data.append(content)
-                except Exception as e:
-                    st.error(f"Errore nel file {file.name}: {e}")
-            
-            if all_ex_data:
-                df_ex = pd.DataFrame(all_ex_data)
-                st.success(f"File allenamenti caricato con successo! {len(df_ex)} record totali.")
-                st.dataframe(df_ex.head(10), use_container_width=True)
-
-    with col_up2:
-        st.subheader("⚖️ Composizione Corporea")
-        st.write("Seleziona i file JSON dalla cartella `com.samsung.shealth.body_composition`")
-        uploaded_bodies = st.file_uploader("JSON Composizione (puoi sceglierne più di uno)", type=["json"], accept_multiple_files=True, key="body_multi")
+        # 2. Scambia il codice con il Token
+        token_url = "https://oauth2.googleapis.com/token"
+        token_data = {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": auth_code,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect_uri
+        }
         
-        if uploaded_bodies:
-            all_body_data = []
-            for file in uploaded_bodies:
-                try:
-                    content = json.load(file)
-                    if isinstance(content, list):
-                        all_body_data.extend(content)
-                    elif isinstance(content, dict):
-                        all_body_data.append(content)
-                except Exception as e:
-                    st.error(f"Errore nel file {file.name}: {e}")
-            
-            if all_body_data:
-                df_body = pd.DataFrame(all_body_data)
-                st.success(f"File composizione caricato con successo! {len(df_body)} record totali.")
-                st.dataframe(df_body.head(10), use_container_width=True)
+        response = requests.post(token_url, data=token_data)
+        if response.status_code == 200:
+            token_info = response.json()
+            st.session_state["access_token"] = token_info["access_token"]
+            st.success("Autenticazione riuscita! Account collegato.")
+            st.query_params.clear()
+        else:
+            st.error("Errore durante l'autenticazione. Riprova.")
+
+    # 3. Mostra l'interfaccia in base allo stato del login
+    if "access_token" not in st.session_state:
+        # Genera il link per il login
+        auth_base_url = "https://accounts.google.com/o/oauth2/v2/auth"
+        auth_url = f"{auth_base_url}?client_id={client_id}&redirect_uri={redirect_uri}&response_type=code&scope={urllib.parse.quote(scopes)}&access_type=offline&prompt=consent"
+        
+        # Disegna un bottone in stile Google
+        st.markdown(f'<a href="{auth_url}" target="_self"><button style="background-color:#4285F4; color:white; font-weight:bold; padding:10px 20px; border:none; border-radius:5px; cursor:pointer;">Accedi con Google Fit</button></a>', unsafe_allow_html=True)
+    else:
+        st.write("✅ **Account Google collegato con successo.**")
+        if st.button("Scarica ultimi dati", type="primary"):
+            st.info("Il token è pronto! Nel prossimo step inseriremo la chiamata effettiva alle API di Fit.")
 
 # --- SEZIONE 3: MENSA SMART ---
 elif menu == "Mensa Smart":
