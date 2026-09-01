@@ -130,14 +130,22 @@ elif menu == "Carica Dati (Health)":
         else:
             st.error("Errore durante l'autenticazione. Riprova.")
 
-    # 3. Mostra l'interfaccia in base allo stato del login
+# 3. Mostra l'interfaccia in base allo stato del login
     if "access_token" not in st.session_state:
-        # Genera il link per il login
-        auth_base_url = "https://accounts.google.com/o/oauth2/v2/auth"
-        auth_url = f"{auth_base_url}?client_id={client_id}&redirect_uri={redirect_uri}&response_type=code&scope={urllib.parse.quote(scopes)}&access_type=offline&prompt=consent"
+        # Pulisce le chiavi da spazi invisibili o invii accidentali
+        clean_client_id = client_id.strip()
+        clean_redirect = redirect_uri.strip()
         
-        # Disegna un bottone in stile Google
-        st.markdown(f'<a href="{auth_url}" target="_self"><button style="background-color:#4285F4; color:white; font-weight:bold; padding:10px 20px; border:none; border-radius:5px; cursor:pointer;">Accedi con Google Fit</button></a>', unsafe_allow_html=True)
+        # Genera il link per il login con codifica URL rigorosa
+        auth_base_url = "https://accounts.google.com/o/oauth2/v2/auth"
+        auth_url = f"{auth_base_url}?client_id={clean_client_id}&redirect_uri={urllib.parse.quote(clean_redirect, safe='')}&response_type=code&scope={urllib.parse.quote(scopes, safe='')}&access_type=offline&prompt=select_account"
+        
+        # Stampa il link di debug a schermo
+        st.write("URL generato (per controllo):")
+        st.code(auth_url)
+        
+        # Usa un link Markdown che costringe l'apertura in una nuova scheda pulita
+        st.markdown(f"### [👉 CLICCA QUI PER ACCEDERE CON GOOGLE FIT]({auth_url})")
     else:
         st.write("✅ **Account Google collegato con successo.**")
         if st.button("Scarica ultimi dati", type="primary"):
