@@ -89,10 +89,6 @@ if menu == "Dashboard Progressi":
 
 
 # --- SEZIONE: CARICA DATI (HEALTH) ---
-
-
-# ... (altro codice del tuo file) ...
-
 elif menu == "Carica Dati (Health)":
     st.title("🔄 Sincronizzazione Google Fit")
     st.write("Collega il tuo account Google per scaricare in automatico i dati sanitari e gli allenamenti.")
@@ -130,7 +126,7 @@ elif menu == "Carica Dati (Health)":
         else:
             st.error("Errore durante l'autenticazione. Riprova.")
 
-# 3. Mostra l'interfaccia in base allo stato del login
+    # 3. Mostra l'interfaccia in base allo stato del login
     if "access_token" not in st.session_state:
         # Pulisce le chiavi da spazi invisibili o invii accidentali
         clean_client_id = client_id.strip()
@@ -181,7 +177,7 @@ elif menu == "Mensa Smart":
         if st.button("Trova il pasto ideale", type="primary"):
             with st.spinner("Lettura del menu in corso..."):
                 try:
-                    model = genai.GenerativeModel('gemini-3.6-flash')
+                    model = genai.GenerativeModel('gemini-2.5-flash')
                     prompt = """
                     Sei un nutrizionista sportivo. L'utente pesa circa 135 kg e vuole dimagrire mantenendo massa muscolare.
                     Leggi il menu nella foto e fornisci il tuo SUGGERIMENTO DIRETTO su cosa ordinare oggi.
@@ -222,7 +218,7 @@ elif menu == "Piano Alimentare & Spesa":
                 else:
                     regola_ufficio = "2. GIORNI IN UFFICIO: Nessuno. L'utente mangia a casa TUTTI I GIORNI. Devi generare colazione, pranzo, spuntino e cena per tutti e 7 i giorni."
 
-                model = genai.GenerativeModel('gemini-3.6-flash')
+                model = genai.GenerativeModel('gemini-2.5-flash')
                 prompt = f"""
                 Agisci come un nutrizionista. Crea un piano settimanale per un uomo di 135 kg in deficit.
                 
@@ -292,21 +288,17 @@ elif menu == "Piano Alimentare & Spesa":
                             is_ufficio = "UFFICIO" in testo
                             status_icon = "✅" if (is_ufficio or not mancanti) else "🔒"
                             
-                            # CAMPO DI TESTO MODIFICABILE
-                            nuovo_testo = st.text_input(
-                                f"{status_icon} {nome_pasto}", 
-                                value=testo, 
-                                key=f"edit_{giorno}_{nome_pasto}",
-                                disabled=is_ufficio
-                            )
-                            
-                            if nuovo_testo != testo:
-                                st.session_state['dati_generati']['piano'][giorno][nome_pasto]['testo'] = nuovo_testo
+                            # Card pulita e leggibile per evitare il troncamento su mobile
+                            with st.container(border=True):
+                                st.markdown(f"**{status_icon} {nome_pasto}**")
+                                st.write(f"🍽️ {testo}")
                                 
-                            if mancanti and not is_ufficio:
-                                st.caption(f"*(Manca in dispensa: {', '.join(mancanti)})*")
+                                if mancanti and not is_ufficio:
+                                    st.caption(f"🛒 *Manca in dispensa: {', '.join(mancanti)}*")
                         else:
-                            st.markdown(f"**{nome_pasto}:** {info}")
+                            with st.container(border=True):
+                                st.markdown(f"**{nome_pasto}**")
+                                st.write(f"🍽️ {info}")
                 
                 st.write("")
                 altri_giorni = [g for g in giorni_totali if g != giorno]
@@ -331,7 +323,7 @@ elif menu == "Piano Alimentare & Spesa":
                 try:
                     menu_attuale = json.dumps(st.session_state['dati_generati']['piano'], ensure_ascii=False)
                     
-                    model = genai.GenerativeModel('gemini-3.6-flash')
+                    model = genai.GenerativeModel('gemini-2.5-flash')
                     prompt_ricalcolo = f"""
                     Agisci come un nutrizionista. L'utente ha modificato manualmente il suo menu settimanale. 
                     Ecco il menu attuale in formato JSON:
