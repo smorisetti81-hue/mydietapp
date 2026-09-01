@@ -2,6 +2,8 @@ import streamlit as st
 import google.generativeai as genai
 import json
 import pandas as pd
+import urllib.parse
+import requests
 from PIL import Image
 from streamlit_option_menu import option_menu
 
@@ -87,8 +89,7 @@ if menu == "Dashboard Progressi":
 
 
 # --- SEZIONE: CARICA DATI (HEALTH) ---
-import urllib.parse
-import requests
+
 
 # ... (altro codice del tuo file) ...
 
