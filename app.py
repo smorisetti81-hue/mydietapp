@@ -195,6 +195,39 @@ def raw_points(payload):
         })
     return out
 
+def compare_today_sources(catalogs, dtype, mode, day_start, day_end):
+    """Read every visible source independently for today's interval."""
+    rows=[]
+    start_ms=int(day_start.timestamp()*1000)
+    end_ms=int(day_end.timestamp()*1000)
+    for src in catalogs.get("steps" if dtype=="com.google.step_count.delta" else "calories",[]):
+        sid=src.get("id")
+        payload,r=read_raw_dataset(sid,start_ms,end_ms)
+        if payload is None:
+            rows.append({
+                "sorgente":src.get("name"),
+                "app":src.get("app"),
+                "device":src.get("device"),
+                "tipo":"—",
+                "punti":0,
+                "valore":None,
+                "http":r.status_code if r is not None else None
+            })
+            continue
+        pts=raw_points(payload)
+        pts=[p for p in pts if datetime.fromtimestamp(p["end"],ROME).date()==day_start.date()]
+        value=sum(p["value"] for p in pts) if mode=="sum" else (pts[-1]["value"] if pts else None)
+        rows.append({
+            "sorgente":src.get("name"),
+            "app":src.get("app"),
+            "device":src.get("device"),
+            "tipo":"delta" if mode=="sum" else "latest",
+            "punti":len(pts),
+            "valore":value,
+            "http":200
+        })
+    return rows
+
 def raw_point_rows(payload, day):
     """Return today's raw points with local timestamps and values."""
     rows=[]
@@ -483,12 +516,28 @@ def sync_health(days=14):
     # These are the exact live values calculated above from today's raw
     # dataset for the selected Google Fit derived streams.
     data["steps_today"]=data.get("steps")
-    data["calories_today"]=data.get("calories")
+    # Never expose an obviously impossible calorie value to the food budget.
+    # Keep the raw value in diagnostics for investigation.
+    cal=data.get("calories")
+    data["calories_today"]=cal if cal is not None and 500 <= cal <= 10000 else None
     dist=next((x["value"] for x in hist["distance"] if x["date"]==t),None)
     data["distance_today"]=dist/1000 if dist is not None else None
     data["source_catalogs"]=catalogs
     data["source_comparisons"]=comparisons
     data["source_values"]=source_values
+    # V11: compare every visible source independently for today's interval.
+    try:
+        live_start=datetime.now(ROME).replace(hour=0,minute=0,second=0,microsecond=0)
+        live_end=datetime.now(ROME)
+        diag["_source_compare_steps"]=compare_today_sources(
+            catalogs,"com.google.step_count.delta","sum",live_start,live_end
+        )
+        diag["_source_compare_calories"]=compare_today_sources(
+            catalogs,"com.google.calories.expended","sum",live_start,live_end
+        )
+    except Exception as e:
+        diag["_source_compare_error"]=str(e)
+
     return data,hist,diag
 
 # ---------------- Navigation ----------------
@@ -621,7 +670,17 @@ elif st.session_state.page=="Attività":
                 fat=h["weight"]*h["body_fat"]/100; lean=h["weight"]-fat
                 c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
             st.divider(); st.subheader("🧪 Diagnostica")
-            st.caption("V10: mostra i punti grezzi di oggi per verificare esattamente come Google Fit sta restituendo passi e calorie.")
+            st.caption("V11: confronta ogni sorgente Google Fit visibile separatamente, per capire quale corrisponde ai dati Samsung Health.")
+            comp_steps=diag.get("_source_compare_steps",[])
+            comp_cal=diag.get("_source_compare_calories",[])
+            if comp_steps:
+                with st.expander("📱 Confronto sorgenti — PASSI",expanded=True):
+                    st.dataframe(pd.DataFrame(comp_steps),use_container_width=True,hide_index=True)
+            if comp_cal:
+                with st.expander("🔥 Confronto sorgenti — CALORIE"):
+                    st.dataframe(pd.DataFrame(comp_cal),use_container_width=True,hide_index=True)
+            if diag.get("_source_compare_error"):
+                st.warning(f"⚠️ Errore confronto sorgenti: {diag['_source_compare_error']}")
             for k,x in st.session_state.diagnostics.items():
                 if x["status"]=="available":
                     if x.get("source_id"):
