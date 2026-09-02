@@ -195,6 +195,21 @@ def raw_points(payload):
         })
     return out
 
+def raw_point_rows(payload, day):
+    """Return today's raw points with local timestamps and values."""
+    rows=[]
+    for p in raw_points(payload):
+        start_dt=datetime.fromtimestamp(p["start"],ROME)
+        end_dt=datetime.fromtimestamp(p["end"],ROME)
+        if end_dt.date()==day:
+            rows.append({
+                "inizio":start_dt.strftime("%H:%M:%S"),
+                "fine":end_dt.strftime("%H:%M:%S"),
+                "valore":p["value"],
+                "durata_min":round((p["end"]-p["start"])/60,1)
+            })
+    return sorted(rows,key=lambda x:(x["fine"],x["inizio"]))
+
 def raw_today_sum(payload, day):
     """Somma solo i punti delta che terminano nel giorno locale richiesto."""
     pts=raw_points(payload)
@@ -420,18 +435,30 @@ def sync_health(days=14):
                 lem=int(live_end.timestamp()*1000)
                 raw_payload,raw_r=read_raw_dataset(chosen,lsm,lem)
                 if raw_payload is not None:
+                    raw_rows=raw_point_rows(raw_payload,live_start.date())
                     if mode=="sum":
-                        live_value,raw_count=raw_today_sum(raw_payload,live_start.date())
+                        pts=[p for p in raw_points(raw_payload) if datetime.fromtimestamp(p["end"],ROME).date()==live_start.date()]
+                        raw_count=len(pts)
+                        raw_sum=sum(p["value"] for p in pts) if pts else None
+                        if key=="calories":
+                            # calories.expended can be cumulative/overlapping.
+                            # Do not blindly sum it for the live dashboard.
+                            live_value=pts[-1]["value"] if pts else None
+                        else:
+                            live_value=raw_sum
                     else:
                         pts=raw_points(raw_payload)
                         live_value=pts[-1]["value"] if pts else None
                         raw_count=len(pts)
+                        raw_sum=None
                     live_info={
                         "method":"raw_dataset",
                         "points":raw_count,
                         "start":live_start.strftime("%d/%m/%Y %H:%M:%S"),
                         "end":live_end.strftime("%d/%m/%Y %H:%M:%S"),
-                        "value":live_value
+                        "value":live_value,
+                        "raw_sum":raw_sum,
+                        "raw_rows":raw_rows
                     }
                 else:
                     live_info={
@@ -594,12 +621,22 @@ elif st.session_state.page=="Attività":
                 fat=h["weight"]*h["body_fat"]/100; lean=h["weight"]-fat
                 c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
             st.divider(); st.subheader("🧪 Diagnostica")
-            st.caption("V9.1: per il valore live di oggi passi e calorie vengono letti dai punti grezzi della sorgente Google Fit selezionata; l'aggregate resta solo per storico e diagnostica.")
+            st.caption("V10: mostra i punti grezzi di oggi per verificare esattamente come Google Fit sta restituendo passi e calorie.")
             for k,x in st.session_state.diagnostics.items():
                 if x["status"]=="available":
                     if x.get("source_id"):
                         st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
                         st.caption(f"Sorgente usata: `{x.get('source_label',x['source_id'])}` · {x.get('source_reason','')}")
+                        lq=x.get("live_query") or {}
+                        if lq.get("method")=="raw_dataset":
+                            st.caption(f"📡 Live oggi: dataset grezzo · {lq.get('points',0)} punti · valore {lq.get('value')}")
+                            if lq.get("raw_rows"):
+                                with st.expander(f"🔎 Punti grezzi di oggi — {k} ({len(lq['raw_rows'])})"):
+                                    st.dataframe(pd.DataFrame(lq["raw_rows"]),use_container_width=True,hide_index=True)
+                                    if k=="calories" and lq.get("raw_sum") is not None:
+                                        st.caption(f"Somma grezza: {lq['raw_sum']:.1f} · valore usato nel live: {lq.get('value')}")
+                        elif lq.get("method")=="raw_dataset_failed":
+                            st.warning(f"⚠️ Dataset grezzo non leggibile (HTTP {lq.get('http')}).")
                     else:
                         st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
                 elif x["status"]=="no_data": st.warning(f"○ {k}: nessun dato restituito · {x['type']}")
