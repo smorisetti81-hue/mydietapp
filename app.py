@@ -172,7 +172,7 @@ elif menu == "Carica Dati (Health)":
                 fit_url = "https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate"
                 fit_response = requests.post(fit_url, headers=headers, json=body)
                 
-if fit_response.status_code == 200:
+                if fit_response.status_code == 200:
                     st.success("✅ Dati scaricati con successo!")
                     dati_fit = fit_response.json()
                     
@@ -187,7 +187,7 @@ if fit_response.status_code == 200:
                         for ds in b.get("dataset", []):
                             for p in ds.get("point", []):
                                 for v in p.get("value", []):
-                                    passi_totali += v.get("intVal", 0)
+                                    passi_totali += int(v.get("intVal", 0))
                         
                         passi_giornalieri.append({"Data": data_gg, "Passi": passi_totali})
                     
