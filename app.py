@@ -183,7 +183,7 @@ elif menu == "Carica Dati (Health)":
                     st.success("✅ Dati scaricati con successo!")
                     dati_fit = fit_response.json()
                     
-# Elaborazione del JSON per estrarre i passi
+                    # Elaborazione del JSON per estrarre i passi
                     passi_giornalieri = []
                     for b in dati_fit.get("bucket", []):
                         # Manteniamo la data come VERO oggetto temporale (non testo) per l'ordinamento cronologico
@@ -198,21 +198,22 @@ elif menu == "Carica Dati (Health)":
                         
                         passi_giornalieri.append({"Data": data_gg, "Passi": passi_totali})
                     
-			df_passi = pd.DataFrame(passi_giornalieri)
+                    df_passi = pd.DataFrame(passi_giornalieri)
                     
                     # Ordiniamo esplicitamente il DataFrame per data (dal più vecchio al più nuovo)
                     df_passi = df_passi.sort_values(by="Data")
                     
-                    # AGGIUNGI QUESTA RIGA: riconvertiamo in testo (GG/MM) per avere barre larghe
+                    # Riconvertiamo in testo (GG/MM) per avere barre larghe
                     df_passi["Data"] = df_passi["Data"].apply(lambda x: x.strftime('%d/%m'))
                     
                     st.divider()
-                    st.subheader("👣 Andamento Passi (Ultimi 7 giorni)")                    
+                    st.subheader("👣 Andamento Passi (Ultimi 7 giorni)")
+                    
                     # Mostriamo i passi di oggi (ultimo elemento della lista ordinata)
                     passi_oggi = df_passi.iloc[-1]['Passi']
                     st.metric(label="Passi rilevati oggi", value=f"{passi_oggi:,}".replace(',', '.'))
                     
-                    # Disegniamo il grafico (passando un oggetto Date, Streamlit ordina e formatta l'asse da solo)
+                    # Disegniamo il grafico (passando testo, Streamlit allarga le barre per categoria)
                     st.bar_chart(df_passi.set_index("Data"), color="#ff4b4b")
                 else:
                     st.error(f"Errore {fit_response.status_code} dal server Google.")
@@ -313,7 +314,7 @@ elif menu == "Piano Alimentare & Spesa":
                 """
                 response = model.generate_content(prompt)
                 
-                testo_json = response.text.replace('```json', '').replace('```', '').strip()
+                testo_json = response.text.replace("```json", "").replace("```", "").strip()
                 st.session_state['dati_generati'] = json.loads(testo_json)
                 
                 for key in list(st.session_state.keys()):
@@ -415,7 +416,7 @@ elif menu == "Piano Alimentare & Spesa":
                     }}
                     """
                     response_ric = model.generate_content(prompt_ricalcolo)
-                    testo_json_ric = response_ric.text.replace('```json', '').replace('```', '').strip()
+                    testo_json_ric = response_ric.text.replace("```json", "").replace("```", "").strip()
                     dati_aggiornati = json.loads(testo_json_ric)
                     
                     st.session_state['dati_generati'] = dati_aggiornati
