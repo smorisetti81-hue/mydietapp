@@ -265,30 +265,42 @@ def source_label(src):
     return " · ".join(bits)
 
 def choose_preferred_source(dtype,sources):
-    ids=[str(x.get("dataStreamId","")) for x in sources]
-    # These are Google Fit derived streams. They are preferable to asking the
-    # aggregate endpoint for the dataTypeName, which contributes every source.
+    """Select the safest source.
+
+    For steps, prefer a populated Samsung top_level source. Google Fit's
+    estimated_steps/merge streams can be a derived union and returned 6267
+    while Samsung top_level returned 4643 in the current test.
+    """
     if dtype=="com.google.step_count.delta":
-        preferred=[
+        samsung=[
+            s for s in sources
+            if str(s.get("name","")).lower()=="top_level"
+            and str(s.get("app","")).lower()=="com.google.android.fit"
+            and s.get("device")
+        ]
+        if samsung:
+            # Prefer the source with an explicit Samsung device; if several
+            # exist, the caller's per-source diagnostics will expose all of them.
+            return samsung[-1]["id"], "Samsung top_level preferito per i passi"
+
+    preferred={
+        "com.google.step_count.delta":[
             "derived:com.google.step_count.delta:com.google.android.gms:estimated_steps",
             "derived:com.google.step_count.delta:com.google.android.gms:merge_step_deltas",
-        ]
-    elif dtype=="com.google.calories.expended":
-        preferred=[
+        ],
+        "com.google.calories.expended":[
             "derived:com.google.calories.expended:com.google.android.gms:merge_calories_expended",
             "derived:com.google.calories.expended:com.google.android.gms:platform_calories_expended",
-        ]
-    else:
-        preferred=[]
-    for wanted in preferred:
-        if wanted in ids:
-            return wanted, "Google Fit derived stream"
-    # Generic fallback: prefer a derived Google Play services stream, then any
-    # visible source. This keeps the app working for users with different Fit setups.
-    candidates=[x for x in sources if x.get("type")=="derived" and ((x.get("application") or {}).get("packageName")=="com.google.android.gms")]
-    if candidates:
-        return candidates[0].get("dataStreamId"), "derived Google Fit stream (fallback)"
-    return None, "aggregate di tutte le sorgenti (fallback)"
+        ],
+    }.get(dtype,[])
+
+    ids={s.get("id") for s in sources}
+    for p in preferred:
+        if p in ids:
+            return p, "stream derivato Google Fit preferito"
+    if sources:
+        return sources[0].get("id"), "prima sorgente disponibile"
+    return None, "nessuna sorgente disponibile"
 
 def source_catalog(dtype):
     sources,r=list_datasources(dtype)
@@ -508,7 +520,7 @@ def sync_health(days=14):
                 "points":len(points_from(payload)),
                 "source_id":chosen,
                 "source_reason":choice_reason,
-                "source_label":next((f"{x['name']} · {x['app']}" for x in catalogs.get(key,[]) if x["id"]==chosen), chosen or "aggregate di tutte le sorgenti"),
+                "source_label":next((f"{x['name']} · {x['app']} · {x.get('device') or 'device n/d'}" for x in catalogs.get(key,[]) if x["id"]==chosen), chosen or "aggregate di tutte le sorgenti"),
                 "live_query":live_info
             }
         except Exception as e:
@@ -670,7 +682,7 @@ elif st.session_state.page=="Attività":
                 fat=h["weight"]*h["body_fat"]/100; lean=h["weight"]-fat
                 c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
             st.divider(); st.subheader("🧪 Diagnostica")
-            st.caption("V11.2: confronta ogni sorgente Google Fit visibile separatamente, per capire quale corrisponde ai dati Samsung Health.")
+            st.caption("V12: per i passi viene preferita la sorgente Samsung top_level popolata; le sorgenti Google derivate restano per confronto.")
             diag_view=st.session_state.get("diagnostics",{})
             comp_steps=diag_view.get("_source_compare_steps",[])
             comp_cal=diag_view.get("_source_compare_calories",[])
