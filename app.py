@@ -308,4 +308,122 @@ elif menu == "Piano Alimentare & Spesa":
                 """
                 response = model.generate_content(prompt)
                 
-                testo_json = response.text.replace('```json', '').replace('
+                testo_json = response.text.replace('```json', '').replace('```', '').strip()
+                st.session_state['dati_generati'] = json.loads(testo_json)
+                
+                for key in list(st.session_state.keys()):
+                    if key.startswith("chk_"):
+                        del st.session_state[key]
+                        
+            except Exception as e:
+                st.error(f"Errore durante l'elaborazione: {e}")
+
+    if 'dati_generati' in st.session_state:
+        dati = st.session_state['dati_generati']
+        
+        st.subheader("🛒 Dispensa & Spesa")
+        st.write("Spunta gli ingredienti per 'accendere' i pasti.")
+        
+        spesa = dati.get('spesa', {})
+        for categoria, ingredienti in spesa.items():
+            if ingredienti: 
+                st.markdown(f"**{categoria}**")
+                for ingrediente in ingredienti:
+                    if f"chk_{ingrediente}" not in st.session_state:
+                        st.session_state[f"chk_{ingrediente}"] = False
+                    st.checkbox(ingrediente, key=f"chk_{ingrediente}")
+        
+        st.divider()
+
+        st.subheader("🗓️ Il tuo Menu Settimanale")
+        
+        piano = dati.get('piano', {})
+        giorni_totali = list(piano.keys())
+        
+        for giorno, pasti in piano.items():
+            with st.expander(f"📌 {giorno}", expanded=True):
+                if isinstance(pasti, dict):
+                    for nome_pasto, info in pasti.items():
+                        if isinstance(info, dict):
+                            testo = info.get('testo', '')
+                            reqs = info.get('req', [])
+                            mancanti = [r for r in reqs if not st.session_state.get(f"chk_{r}", False)]
+                            
+                            is_ufficio = "UFFICIO" in testo
+                            status_icon = "✅" if (is_ufficio or not mancanti) else "🔒"
+                            
+                            # Card pulita e leggibile per evitare il troncamento su mobile
+                            with st.container(border=True):
+                                st.markdown(f"**{status_icon} {nome_pasto}**")
+                                st.write(f"🍽️ {testo}")
+                                
+                                if mancanti and not is_ufficio:
+                                    st.caption(f"🛒 *Manca in dispensa: {', '.join(mancanti)}*")
+                        else:
+                            with st.container(border=True):
+                                st.markdown(f"**{nome_pasto}**")
+                                st.write(f"🍽️ {info}")
+                
+                st.write("")
+                altri_giorni = [g for g in giorni_totali if g != giorno]
+                col_swap1, col_swap2 = st.columns([2, 1])
+                with col_swap1:
+                    target_swap = st.selectbox(f"Sposta il menu di {giorno} a:", altri_giorni, key=f"sel_swap_{giorno}")
+                with col_swap2:
+                    st.write("") 
+                    if st.button("🔄 Scambia", key=f"btn_swap_{giorno}"):
+                        temp_menu = st.session_state['dati_generati']['piano'][giorno]
+                        st.session_state['dati_generati']['piano'][giorno] = st.session_state['dati_generati']['piano'][target_swap]
+                        st.session_state['dati_generati']['piano'][target_swap] = temp_menu
+                        st.rerun()
+
+        st.divider()
+        
+        st.subheader("🔄 Sincronizza la Spesa")
+        st.write("Hai fatto modifiche manuali ai piatti? Clicca qui sotto per rigenerare la lista della spesa.")
+        
+        if st.button("Ricalcola Spesa con IA", type="secondary"):
+            with st.spinner("Analisi del nuovo menu e aggiornamento della lista spesa..."):
+                try:
+                    menu_attuale = json.dumps(st.session_state['dati_generati']['piano'], ensure_ascii=False)
+                    
+                    model = genai.GenerativeModel('gemini-2.5-flash')
+                    prompt_ricalcolo = f"""
+                    Agisci come un nutrizionista. L'utente ha modificato manualmente il suo menu settimanale. 
+                    Ecco il menu attuale in formato JSON:
+                    {menu_attuale}
+                    
+                    IL TUO COMPITO:
+                    1. Leggi i piatti elencati nella chiave "testo" di ogni pasto.
+                    2. Genera una NUOVA lista della spesa unificata (con quantità e alternative economiche). Ignora i pasti in UFFICIO.
+                    3. Aggiorna l'array "req" di OGNI pasto nel piano in modo che contenga le nuove stringhe ESATTE della lista della spesa appena generata.
+                    
+                    RESTITUISCI ESCLUSIVAMENTE JSON CON QUESTA STRUTTURA:
+                    {{
+                        "piano": <IL PIANO CON GLI ARRAY 'req' AGGIORNATI>,
+                        "spesa": {{
+                            "Ortofrutta": [],
+                            "Carne e Pesce": [],
+                            "Latticini e Frigo": [],
+                            "Dispensa": []
+                        }}
+                    }}
+                    """
+                    response_ric = model.generate_content(prompt_ricalcolo)
+                    testo_json_ric = response_ric.text.replace('```json', '').replace('```', '').strip()
+                    dati_aggiornati = json.loads(testo_json_ric)
+                    
+                    st.session_state['dati_generati'] = dati_aggiornati
+                    
+                    for key in list(st.session_state.keys()):
+                        if key.startswith("chk_"):
+                            del st.session_state[key]
+                            
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore durante il ricalcolo: {e}. Riprova.")
+
+# --- SEZIONE 5: TRACKING ATTIVITÀ ---
+elif menu == "Tracking Attività":
+    st.title("Tracking Attività 🏋️")
+    st.info("Qui potremo inserire l'interfaccia per loggare i nuovi allenamenti e collegarci a un database.")
