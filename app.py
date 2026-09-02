@@ -172,13 +172,38 @@ elif menu == "Carica Dati (Health)":
                 fit_url = "https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate"
                 fit_response = requests.post(fit_url, headers=headers, json=body)
                 
-                if fit_response.status_code == 200:
+if fit_response.status_code == 200:
                     st.success("✅ Dati scaricati con successo!")
                     dati_fit = fit_response.json()
                     
-                    # Mostriamo il JSON grezzo per confermare la ricezione
-                    with st.expander("Visualizza dati grezzi (Sotto il cofano)", expanded=True):
-                        st.json(dati_fit)
+                    # Elaborazione del JSON per estrarre i passi
+                    passi_giornalieri = []
+                    for b in dati_fit.get("bucket", []):
+                        # Convertiamo i millisecondi in una data leggibile (es. 02/09)
+                        start_millis = int(b.get("startTimeMillis", 0))
+                        data_gg = pd.to_datetime(start_millis, unit='ms').strftime('%d/%m')
+                        
+                        passi_totali = 0
+                        for ds in b.get("dataset", []):
+                            for p in ds.get("point", []):
+                                for v in p.get("value", []):
+                                    passi_totali += v.get("intVal", 0)
+                        
+                        passi_giornalieri.append({"Data": data_gg, "Passi": passi_totali})
+                    
+                    # Creazione del dataframe e del grafico
+                    df_passi = pd.DataFrame(passi_giornalieri)
+                    
+                    st.divider()
+                    st.subheader("👣 Andamento Passi (Ultimi 7 giorni)")
+                    
+                    # Mostriamo una metrica con i passi di oggi (ultimo giorno dell'array)
+                    passi_oggi = df_passi.iloc[-1]['Passi']
+                    st.metric(label="Passi rilevati oggi", value=f"{passi_oggi:,}".replace(',', '.'))
+                    
+                    # Disegniamo il grafico a barre
+                    st.bar_chart(df_passi.set_index("Data"), color="#ff4b4b")
+                    
                 else:
                     st.error(f"Errore {fit_response.status_code} dal server Google.")
 
