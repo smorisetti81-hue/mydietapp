@@ -19,7 +19,7 @@ import uuid
 # - Home separates intake, target and observed expenditure
 # - Python owns local food/calorie state
 # ============================================================
-st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide")
+st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", initial_sidebar_state="collapsed")
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 FIT_BASE = "https://www.googleapis.com/fitness/v1/users/me"
@@ -124,6 +124,13 @@ def balance():
         "maintenance":e["maintenance_est"], "deficit":e["deficit"]
     }
 
+def effective_bmr():
+    h=st.session_state.health
+    return round(float(h["bmr"])) if h.get("bmr") else energy_profile()["bmr_est"]
+
+def current_day_name():
+    return ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"][datetime.now(ROME).weekday()]
+
 # ---------------- Google Fit legacy health layer ----------------
 def refresh_token():
     rt=st.session_state.get("refresh_token")
@@ -227,20 +234,26 @@ if st.session_state.page=="Home":
     st.subheader("🔥 Bilancio di oggi")
     st.markdown(f'''<div class="card"><div class="muted">CALORIE ASSUNTE / OBIETTIVO</div>
     <div class="big">{b["eaten"]:,} / {b["target"]:,} kcal</div>
-    <div class="muted">Obiettivo calcolato · deficit {b["deficit"]} kcal · BMR stimato {b["bmr_est"]} kcal</div>
+    <div class="muted">Target calcolato · deficit {b["deficit"]} kcal · BMR {b["bmr_health"] or b["bmr_est"]} kcal</div>
     <div class="{cls}">{msg}</div></div>'''.replace(",","."),unsafe_allow_html=True)
     st.progress(min(max(b["eaten"]/max(b["target"],1),0),1))
-    c1,c2,c3=st.columns(3)
-    with c1: st.metric("⚖️ Peso",f"{st.session_state.health['weight']:.1f} kg" if st.session_state.health.get("weight") else "—")
-    with c2: st.metric("👣 Passi",f"{int(st.session_state.health.get('steps_today') or 0):,}".replace(",","."))
-    with c3: st.metric("🔥 Consumo rilevato",f"{int(st.session_state.health.get('calories_today') or 0):,} kcal".replace(",","."))
-    if b["observed_burn"]:
-        st.caption(f"Google Fit ha rilevato {b['observed_burn']:,} kcal di consumo oggi. Questo dato è mostrato separatamente dal budget alimentare.")
+    c1,c2,c3=st.columns(3); h=st.session_state.health
+    with c1:
+        w=h.get("weight"); st.metric("⚖️ Peso",f"{w:.1f} kg" if w is not None else f"{st.session_state.p_weight:.1f} kg",help="Peso Health se disponibile, altrimenti profilo")
+    with c2:
+        steps=h.get("steps_today"); st.metric("👣 Passi",f"{int(steps):,}".replace(",",".") if steps is not None else "—")
+    with c3:
+        burn=h.get("calories_today"); st.metric("🔥 Calorie totali rilevate",f"{int(burn):,} kcal".replace(",",".") if burn is not None else "—")
+    if burn is None:
+        st.info("💡 Dati Health non ancora sincronizzati in questa sessione. Vai su **Attività** → collega Google Health / Fit → **Sincronizza dati reali**.")
+    else:
+        active=max(0,round(float(burn)-effective_bmr()))
+        st.caption(f"Health rileva {round(float(burn)):,} kcal totali oggi. Attività sopra il BMR: circa {active:,} kcal. Non viene sommata automaticamente al target alimentare.")
     st.subheader("🍽️ Oggi")
-    daynames=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]; d=daynames[date.today().weekday()]
-    ms=st.session_state.meal_plan.get(d) or next(iter(st.session_state.meal_plan.values()))
+    d=current_day_name(); ms=st.session_state.meal_plan.get(d) or next(iter(st.session_state.meal_plan.values()))
     for mn,m in list(ms.items())[:2]:
-        st.write(f"**{mn}** · {m.get('name','Pasto')} · {round(sum(float(i['kcal'])*float(st.session_state.overrides.get(i['id'],{}).get('multiplier',1)) for i in active_items(m)))} kcal")
+        kcal=round(sum(float(i["kcal"])*float(st.session_state.overrides.get(i["id"],{}).get("multiplier",1)) for i in active_items(m)))
+        st.write(f"**{mn}** · {m.get('name','Pasto')} · {kcal} kcal")
     if st.session_state.last_sync: st.caption("Ultima sincronizzazione Health: "+st.session_state.last_sync)
 
 # ---------------- Piano ----------------
@@ -307,6 +320,7 @@ elif st.session_state.page=="Dispensa":
 # ---------------- Attività / Health ----------------
 elif st.session_state.page=="Attività":
     st.title("🏃 Attività & Health")
+    st.caption("Dati reali separati dal target alimentare. La sincronizzazione è manuale per evitare chiamate inutili a Google Fit.")
     cid=st.secrets.get("GOOGLE_CLIENT_ID"); cs=st.secrets.get("GOOGLE_CLIENT_SECRET"); ru=st.secrets.get("REDIRECT_URI")
     if not cid or not cs or not ru: st.error("Mancano GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET o REDIRECT_URI nei secrets.")
     else:
@@ -314,42 +328,49 @@ elif st.session_state.page=="Attività":
             r=requests.post("https://oauth2.googleapis.com/token",data={"client_id":cid,"client_secret":cs,"code":st.query_params["code"],"grant_type":"authorization_code","redirect_uri":ru},timeout=20)
             if r.status_code==200:
                 x=r.json(); st.session_state.access_token=x["access_token"]
-                if x.get("refresh_token"):st.session_state.refresh_token=x["refresh_token"]
+                if x.get("refresh_token"): st.session_state.refresh_token=x["refresh_token"]
                 st.query_params.clear(); st.rerun()
-            else: st.error(r.text[:500])
+            else: st.error("Autorizzazione Google non riuscita: "+r.text[:500])
         if "access_token" not in st.session_state:
             url="https://accounts.google.com/o/oauth2/v2/auth?client_id="+urllib.parse.quote(cid.strip())+"&redirect_uri="+urllib.parse.quote(ru.strip(),safe="")+"&response_type=code&scope="+urllib.parse.quote(FIT_SCOPES,safe="")+"&access_type=offline&prompt=consent"
+            st.warning("🔗 Google non è collegato in questa sessione. Dopo l'autorizzazione, torna qui.")
             st.link_button("🔗 Collega Google Health / Fit",url,use_container_width=True)
         else:
-            st.success("Account collegato")
+            st.success("Account Google collegato in questa sessione")
             if st.button("🔄 Sincronizza dati reali",type="primary",use_container_width=True):
                 try:
-                    data,hist,diag=sync_health(); st.session_state.health=data; st.session_state.health_history=hist; st.session_state.diagnostics=diag; st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M"); st.rerun()
+                    data,hist,diag=sync_health()
+                    st.session_state.health=data; st.session_state.health_history=hist; st.session_state.diagnostics=diag
+                    st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+                    st.rerun()
                 except Exception as e: st.error(f"Sincronizzazione fallita: {e}")
-            h=st.session_state.health
-            if h:
-                cards=[("👣 Passi oggi",h.get("steps_today"),"passi"),("🔥 Calorie oggi",h.get("calories_today"),"kcal"),("⚖️ Peso",h.get("weight"),"kg"),("🟠 Massa grassa",h.get("body_fat"),"%"),("📏 Distanza",h.get("distance_today"),"km"),("🧬 BMR",h.get("bmr"),"kcal/giorno")]
-                cc=st.columns(3)
-                for i,(lab,val,unit) in enumerate(cards):
-                    with cc[i%3]: st.metric(lab,"Non disponibile" if val is None else f"{val:.1f} {unit}")
-                if h.get("weight") is not None and h.get("body_fat") is not None:
-                    fat=h["weight"]*h["body_fat"]/100; lean=h["weight"]-fat
-                    c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
-                st.divider(); st.subheader("🧪 Diagnostica")
-                for k,x in st.session_state.diagnostics.items():
-                    if x["status"]=="available": st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
-                    elif x["status"]=="no_data": st.warning(f"○ {k}: nessun dato restituito · {x['type']}")
-                    else: st.error(f"✕ {k}: HTTP {x.get('http','')} · {x.get('detail','')}")
-                metric=st.selectbox("Storico",["steps","calories","weight","body_fat","distance"]); hh=st.session_state.health_history.get(metric,[])
-                if hh:
-                    df=pd.DataFrame(hh); df["date"]=pd.to_datetime(df["date"]); st.line_chart(df.set_index("date")["value"])
-            else:
-                st.info("Premi 'Sincronizza dati reali' per leggere i dati disponibili.")
+        h=st.session_state.health
+        if h:
+            st.divider(); st.subheader("📊 Dati di oggi")
+            cards=[("👣 Passi oggi",h.get("steps_today"),"passi"),("🔥 Calorie totali",h.get("calories_today"),"kcal"),("⚖️ Peso",h.get("weight"),"kg"),("🟠 Massa grassa",h.get("body_fat"),"%"),("📏 Distanza",h.get("distance_today"),"km"),("🧬 BMR",h.get("bmr"),"kcal/giorno")]
+            cc=st.columns(3)
+            for i,(lab,val,unit) in enumerate(cards):
+                with cc[i%3]: st.metric(lab,"Non disponibile" if val is None else f"{val:.1f} {unit}")
+            if h.get("calories_today") is not None:
+                active=max(0,round(float(h["calories_today"])-effective_bmr()))
+                st.info(f"🔥 Attività sopra il BMR: circa **{active:,} kcal** oggi. È una derivazione locale, non un dato separato fornito da Google Fit.")
+            if h.get("weight") is not None and h.get("body_fat") is not None:
+                fat=h["weight"]*h["body_fat"]/100; lean=h["weight"]-fat
+                c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
+            st.divider(); st.subheader("🧪 Diagnostica")
+            for k,x in st.session_state.diagnostics.items():
+                if x["status"]=="available": st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
+                elif x["status"]=="no_data": st.warning(f"○ {k}: nessun dato restituito · {x['type']}")
+                else: st.error(f"✕ {k}: HTTP {x.get('http','')} · {x.get('detail','')}")
+            metric=st.selectbox("Storico",["steps","calories","weight","body_fat","distance"]); hh=st.session_state.health_history.get(metric,[])
+            if hh:
+                df=pd.DataFrame(hh); df["date"]=pd.to_datetime(df["date"]); st.line_chart(df.set_index("date")["value"])
+        elif "access_token" in st.session_state:
+            st.info("Premi 'Sincronizza dati reali' per leggere i dati disponibili.")
 
 # ---------------- Profilo ----------------
 else:
     st.title("👤 Profilo")
-    ep=energy_profile()
     with st.form("profile"):
         c1,c2=st.columns(2)
         with c1:
@@ -363,6 +384,7 @@ else:
             deficit=st.select_slider("Deficit desiderato",options=[300,500,700],value=int(st.session_state.p_deficit),format_func=lambda x:f"{x} kcal/giorno")
         if st.form_submit_button("Salva",type="primary"):
             st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_deficit=deficit; st.success("Profilo aggiornato")
+    ep=energy_profile()
     st.subheader("🎯 Obiettivo energetico")
     st.metric("Target alimentare stimato",f"{ep['target']:,} kcal/giorno".replace(",","."))
     c1,c2=st.columns(2); c1.metric("BMR stimato",f"{ep['bmr_est']:,} kcal".replace(",",".")); c2.metric("Mantenimento stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
