@@ -11,7 +11,7 @@ from collections import defaultdict
 import uuid
 
 # ============================================================
-# MyDietApp v8
+# MyDietApp v15
 # Health-first release:
 # - real Google Fit data diagnostics
 # - robust aggregation for cumulative vs point data
@@ -117,8 +117,7 @@ def balance():
     h=st.session_state.health
     e=energy_profile()
     eaten=eaten_kcal()
-    observed=float(h.get("calories_today") or 0)
-    bmr_health=float(h.get("bmr") or 0)
+    observed=float(h.get("calories_today") or 0) if h.get("calories_source_verified") else 0.0
     # Google Fit calories.expended is a total expenditure stream and may include
     # basal expenditure. Use the observed total only for the live food budget.
     live_target=round(max(1200, observed-e["deficit"])) if observed > 0 else e["target"]
@@ -131,8 +130,9 @@ def balance():
     }
 
 def effective_bmr():
-    h=st.session_state.health
-    return round(float(h["bmr"])) if h.get("bmr") else energy_profile()["bmr_est"]
+    # Google Fit legacy BMR is not trusted for production energy calculations.
+    # Until Health Connect/native Android is active, use the profile estimate.
+    return energy_profile()["bmr_est"]
 
 def current_day_name():
     return ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"][datetime.now(ROME).weekday()]
@@ -159,7 +159,7 @@ class HealthProvider:
 
 class GoogleFitProvider(HealthProvider):
     key = "google_fit_legacy"
-    name = "Google Fit (legacy REST)"
+    name = "Google Fit (legacy REST) · diagnostica"
     status = "legacy"
 
     def sync(self, days=14):
@@ -569,15 +569,24 @@ def sync_google_fit_health(days=14):
     # V13: the Google derived step stream is retained for diagnostics, but is
     # not treated as Galaxy Watch data. A phone Samsung top_level source is
     # explicitly excluded from the authoritative dashboard value.
-    if diag.get("steps",{}).get("source_reason","").startswith("Google Fit derived"):
-        data["steps_today"]=None
-        data["steps_source_verified"]=False
-    else:
-        data["steps_today"]=data.get("steps")
+    step_reason=str(diag.get("steps",{}).get("source_reason","") or "")
+    step_app=str(diag.get("steps",{}).get("source_label","") or "")
+    # No Google Fit legacy value is considered an authoritative Galaxy Watch
+    # value. A verified value will only be enabled by the native Health Connect
+    # provider, which will set steps_source_verified=True explicitly.
+    data["steps_today"]=None
+    data["steps_source_verified"]=False
+    data["steps_untrusted_value"]=data.get("steps")
+    data["steps_untrusted_reason"]=step_reason or "Google Fit legacy: sorgente Watch non verificata"
     # Never expose an obviously impossible calorie value to the food budget.
     # Keep the raw value in diagnostics for investigation.
     cal=data.get("calories")
-    data["calories_today"]=cal if cal is not None and 500 <= cal <= 10000 else None
+    # Google Fit legacy calories.expended can contain cumulative/overlapping
+    # intervals. Until Health Connect provides a normalized total-calorie
+    # record, never use this value for the live food budget.
+    data["calories_today"]=None
+    data["calories_untrusted_value"]=cal if cal is not None else None
+    data["calories_source_verified"]=False
     dist=next((x["value"] for x in hist["distance"] if x["date"]==t),None)
     data["distance_today"]=dist/1000 if dist is not None else None
     data["source_catalogs"]=catalogs
@@ -733,7 +742,7 @@ elif st.session_state.page=="Attività":
                 fat=h["weight"]*h["body_fat"]/100; lean=h["weight"]-fat
                 c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
             st.divider(); st.subheader("🧪 Diagnostica")
-            st.info("📱 V13: Google Fit espone una sorgente Samsung top_level associata a un dispositivo telefono (es. SM-S948B). Non la usiamo come passi del Galaxy Watch. Le sorgenti Google derivate restano visibili solo per diagnosi. Per leggere in modo affidabile i dati del Watch, il percorso definitivo sarà Samsung Health → Health Connect → componente Android nativo.")
+            st.info("📱 V15: i dati Google Fit legacy restano disponibili solo per diagnosi. I passi derivati (es. 6.299) e le calorie legacy (es. 3.789 kcal) NON vengono usati nel bilancio perché non possiamo dimostrare che rappresentino correttamente il Galaxy Watch Ultra 2. Il BMR Google Fit non viene usato: per ora il calcolo usa il profilo. Il provider definitivo sarà Samsung Health → Health Connect → componente Android nativo.")
             diag_view=st.session_state.get("diagnostics",{})
             comp_steps=diag_view.get("_source_compare_steps",[])
             comp_cal=diag_view.get("_source_compare_calories",[])
@@ -772,6 +781,11 @@ elif st.session_state.page=="Attività":
                 elif x["status"]=="no_data": st.warning(f"○ {k}: nessun dato restituito · {x['type']}")
                 elif x["status"]=="source_error": st.error(f"✕ {k}: impossibile leggere l'elenco delle sorgenti · HTTP {x.get('http','')} · {x.get('detail','')}")
                 else: st.error(f"✕ {k}: HTTP {x.get('http','')} · {x.get('detail','')}")
+            hdiag=st.session_state.health
+            if hdiag.get("steps_untrusted_value") is not None:
+                st.warning(f"⚠️ Passi Google Fit non verificati: {round(float(hdiag['steps_untrusted_value'])):,}. Valore escluso dal Dashboard perché non attribuibile con certezza al Galaxy Watch.")
+            if hdiag.get("calories_untrusted_value") is not None:
+                st.warning(f"⚠️ Calorie Google Fit non verificate: {float(hdiag['calories_untrusted_value']):,.1f} kcal. Valore escluso dal budget alimentare finché non arriva da Health Connect.")
             source_tabs=[k for k in ("steps","calories") if st.session_state.health.get("source_catalogs",{}).get(k)]
             if source_tabs:
                 with st.expander("🔎 Sorgenti rilevate da Google Fit"):
