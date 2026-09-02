@@ -5,33 +5,45 @@ import pandas as pd
 import urllib.parse
 import requests
 from datetime import datetime, timedelta, timezone, date
+from zoneinfo import ZoneInfo
 from PIL import Image
 from collections import defaultdict
 import uuid
 
 # ============================================================
-# MyDietApp v2
-# AI generates/suggests. Python owns state, quantities, shopping
-# and calorie accounting. Health is isolated behind one layer.
+# MyDietApp v3
+# Health-first release:
+# - real Google Fit data diagnostics
+# - robust aggregation for cumulative vs point data
+# - automatic BMR / calorie target calculation
+# - Home separates intake, target and observed expenditure
+# - Python owns local food/calorie state
 # ============================================================
 st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide")
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+
 FIT_BASE = "https://www.googleapis.com/fitness/v1/users/me"
-FIT_SCOPES = "https://www.googleapis.com/auth/fitness.activity.read https://www.googleapis.com/auth/fitness.body.read https://www.googleapis.com/auth/fitness.nutrition.read"
+FIT_SCOPES = (
+    "https://www.googleapis.com/auth/fitness.activity.read "
+    "https://www.googleapis.com/auth/fitness.body.read "
+    "https://www.googleapis.com/auth/fitness.nutrition.read"
+)
+ROME = ZoneInfo("Europe/Rome")
 
 st.markdown("""
 <style>
 #MainMenu, footer, header {visibility:hidden;}
-.block-container {max-width:1050px;padding-top:1rem;padding-bottom:6.5rem;}
+.block-container {max-width:1050px;padding-top:1rem;padding-bottom:5rem;}
 .card {border:1px solid rgba(128,128,128,.22);border-radius:18px;padding:18px;margin:8px 0;background:rgba(128,128,128,.06);}
 .hero {border-radius:24px;padding:22px;background:linear-gradient(135deg,rgba(255,75,75,.18),rgba(128,128,128,.06));border:1px solid rgba(255,75,75,.25);}
 .muted {color:#888;font-size:.88rem}.big {font-size:2.2rem;font-weight:800}.ok {color:#22a06b;font-weight:700}.bad {color:#d64545;font-weight:700}
+.small {font-size:.82rem;color:#888;}
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------- State ----------------
 def sid(): return uuid.uuid4().hex[:10]
-def today(): return date.today().isoformat()
+def today(): return datetime.now(ROME).date().isoformat()
 
 def init_plan():
     def ing(n,q,u,k): return {"id":sid(),"name":n,"qty":q,"unit":u,"kcal":k}
@@ -42,10 +54,15 @@ def init_plan():
         "🌙 Cena":{"name":"Uova, pane e verdure","ingredients":[ing("Uova",2,"pz",150),ing("Pane integrale",70,"g",175),ing("Insalata mista",250,"g",50),ing("Olio EVO",10,"g",90)]}
     }}
 
-for k,v in {"page":"Home","meal_plan":init_plan(),"overrides":{},"eaten":{},"manual_foods":[],"health":{},"health_history":{},"diagnostics":{},"last_sync":None}.items():
-    st.session_state.setdefault(k,v)
-for k,v in {"name":"Stefano","weight":135.0,"height":180.0,"age":40,"sex":"male","target":2400}.items():
-    st.session_state.setdefault("p_"+k,v)
+_defaults = {
+    "page":"Home", "meal_plan":init_plan(), "overrides":{}, "eaten":{}, "manual_foods":[],
+    "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None
+}
+for k,v in _defaults.items(): st.session_state.setdefault(k,v)
+for k,v in {
+    "name":"Stefano", "weight":135.0, "height":180.0, "age":40, "sex":"male",
+    "activity_level":"moderata", "deficit":500
+}.items(): st.session_state.setdefault("p_"+k,v)
 
 
 def meals():
@@ -62,8 +79,14 @@ def active_items(meal):
 
 def eaten_kcal():
     lookup={i["id"]:i for _,_,m in meals() for i in m.get("ingredients",[])}
-    total=sum(float(lookup[i]["kcal"]) for i,v in st.session_state.eaten.items() if v and i in lookup)
-    total+=sum(float(x["kcal"]) for x in st.session_state.manual_foods if x["date"]==today())
+    total=0
+    for iid,v in st.session_state.eaten.items():
+        if v and iid in lookup:
+            item=lookup[iid]
+            mult=float(st.session_state.overrides.get(iid,{}).get("multiplier",1))
+            if not st.session_state.overrides.get(iid,{}).get("removed"):
+                total += float(item["kcal"])*mult
+    total += sum(float(x["kcal"]) for x in st.session_state.manual_foods if x["date"]==today())
     return round(total)
 
 def grocery():
@@ -73,22 +96,41 @@ def grocery():
             key=(i["name"].strip().lower(),i["unit"]); d[key][0]+=float(i["qty"]); d[key][1]=i["unit"]; d[key][2]=i["name"]
     return sorted(d.values(),key=lambda x:x[2].lower())
 
+# ---------------- Energy model ----------------
+def bmr_mifflin(weight, height, age, sex):
+    # Mifflin-St Jeor. This is an estimate, not a medical measurement.
+    value=10*weight + 6.25*height - 5*age + (5 if sex=="male" else -161)
+    return round(value)
+
+ACTIVITY_FACTORS={"sedentaria":1.20,"leggera":1.375,"moderata":1.55,"alta":1.725}
+
+def energy_profile():
+    p={k:st.session_state["p_"+k] for k in ["weight","height","age","sex","activity_level","deficit"]}
+    bmr=bmr_mifflin(float(p["weight"]),float(p["height"]),int(p["age"]),p["sex"])
+    maintenance=round(bmr*ACTIVITY_FACTORS[p["activity_level"]])
+    target=max(1200, maintenance-int(p["deficit"]))
+    return {"bmr_est":bmr,"maintenance_est":maintenance,"target":target,"deficit":int(p["deficit"]),"factor":ACTIVITY_FACTORS[p["activity_level"]]}
+
 def balance():
     h=st.session_state.health
-    base=float(st.session_state.p_target)
-    burned=float(h.get("calories_today") or 0)
-    bmr=float(h.get("bmr") or 0)
-    activity=max(0,burned-bmr)
-    # Only 50% of detected activity is returned to the food budget.
-    effective=round(base+activity*.5)
+    e=energy_profile()
     eaten=eaten_kcal()
-    return {"base":round(base),"target":effective,"eaten":eaten,"burned":round(burned),"activity":round(activity),"remaining":effective-eaten}
+    observed=float(h.get("calories_today") or 0)
+    bmr_health=float(h.get("bmr") or 0)
+    return {
+        "target":e["target"], "eaten":eaten, "remaining":e["target"]-eaten,
+        "observed_burn":round(observed), "bmr_est":e["bmr_est"],
+        "bmr_health":round(bmr_health) if bmr_health else None,
+        "maintenance":e["maintenance_est"], "deficit":e["deficit"]
+    }
 
 # ---------------- Google Fit legacy health layer ----------------
 def refresh_token():
     rt=st.session_state.get("refresh_token")
     if not rt:return False
-    r=requests.post("https://oauth2.googleapis.com/token",data={"client_id":st.secrets["GOOGLE_CLIENT_ID"],"client_secret":st.secrets["GOOGLE_CLIENT_SECRET"],"refresh_token":rt,"grant_type":"refresh_token"},timeout=20)
+    r=requests.post("https://oauth2.googleapis.com/token",data={
+        "client_id":st.secrets["GOOGLE_CLIENT_ID"],"client_secret":st.secrets["GOOGLE_CLIENT_SECRET"],
+        "refresh_token":rt,"grant_type":"refresh_token"},timeout=20)
     if r.status_code==200:
         st.session_state.access_token=r.json()["access_token"]; return True
     return False
@@ -112,37 +154,61 @@ def point_value(p):
         if "intVal" in v:return float(v["intVal"])
     return None
 
-def history_from(payload):
-    hist=[]
-    for b in payload.get("bucket",[]):
-        vals=[]
-        for ds in b.get("dataset",[]):
+def points_from(payload):
+    points=[]
+    for bucket in payload.get("bucket",[]):
+        for ds in bucket.get("dataset",[]):
             for p in ds.get("point",[]):
                 v=point_value(p)
-                if v is not None: vals.append(v)
-        if vals:
-            ts=int(b.get("startTimeMillis",0))/1000
-            hist.append({"date":datetime.fromtimestamp(ts,timezone.utc).date().isoformat(),"value":sum(vals)})
-    return hist
+                if v is not None:
+                    ts=int(p.get("endTimeNanos") or p.get("startTimeNanos") or int(bucket.get("startTimeMillis",0))*1_000_000)/1_000_000_000
+                    points.append({"ts":ts,"value":v})
+    return points
 
-def sync_health(days=7):
-    tz=timezone(timedelta(hours=2)); now=datetime.now(tz); start=now.replace(hour=0,minute=0,second=0,microsecond=0)-timedelta(days=days-1)
+def daily_sum(payload):
+    # For cumulative quantities such as steps, calories and distance, sum points per local day.
+    d=defaultdict(float)
+    for p in points_from(payload):
+        day=datetime.fromtimestamp(p["ts"],ROME).date().isoformat(); d[day]+=p["value"]
+    return [{"date":k,"value":v} for k,v in sorted(d.items())]
+
+def daily_latest(payload):
+    # For body measurements, use the latest reading of each local day.
+    d={}
+    for p in points_from(payload):
+        day=datetime.fromtimestamp(p["ts"],ROME).date().isoformat()
+        if day not in d or p["ts"]>d[day]["ts"]: d[day]=p
+    return [{"date":k,"value":d[k]["value"]} for k in sorted(d)]
+
+def sync_health(days=14):
+    now=datetime.now(ROME); start=(now-timedelta(days=days-1)).replace(hour=0,minute=0,second=0,microsecond=0)
     sm=int(start.timestamp()*1000); em=int(now.timestamp()*1000)
-    specs={"steps":"com.google.step_count.delta","calories":"com.google.calories.expended","distance":"com.google.distance.delta","weight":"com.google.weight","body_fat":"com.google.body.fat.percentage","bmr":"com.google.calories.bmr"}
+    specs={
+        "steps":("com.google.step_count.delta","sum"),
+        "calories":("com.google.calories.expended","sum"),
+        "distance":("com.google.distance.delta","sum"),
+        "weight":("com.google.weight","latest"),
+        "body_fat":("com.google.body.fat.percentage","latest"),
+        "bmr":("com.google.calories.bmr","latest")
+    }
     data={}; hist={}; diag={}
-    for key,dtype in specs.items():
+    for key,(dtype,mode) in specs.items():
         try:
             payload,r=aggregate(dtype,sm,em)
             if payload is None:
-                data[key]=None; hist[key]=[]; diag[key]={"status":"error","http":r.status_code,"type":dtype,"detail":r.text[:250]}
+                data[key]=None; hist[key]=[]; diag[key]={"status":"error","http":r.status_code,"type":dtype,"detail":r.text[:500]}
             else:
-                h=history_from(payload); hist[key]=h; data[key]=h[-1]["value"] if h else None; diag[key]={"status":"available" if h else "no_data","http":200,"type":dtype}
+                h=daily_sum(payload) if mode=="sum" else daily_latest(payload)
+                hist[key]=h
+                data[key]=h[-1]["value"] if h else None
+                diag[key]={"status":"available" if h else "no_data","http":200,"type":dtype,"points":len(points_from(payload))}
         except Exception as e:
             data[key]=None; hist[key]=[]; diag[key]={"status":"error","type":dtype,"detail":str(e)}
     t=today()
     data["steps_today"]=next((x["value"] for x in hist["steps"] if x["date"]==t),None)
     data["calories_today"]=next((x["value"] for x in hist["calories"] if x["date"]==t),None)
-    dist=next((x["value"] for x in hist["distance"] if x["date"]==t),None); data["distance_today"]=dist/1000 if dist is not None else None
+    dist=next((x["value"] for x in hist["distance"] if x["date"]==t),None)
+    data["distance_today"]=dist/1000 if dist is not None else None
     return data,hist,diag
 
 # ---------------- Navigation ----------------
@@ -155,19 +221,26 @@ for col,(name,icon) in zip(cols,pages.items()):
 
 # ---------------- Home ----------------
 if st.session_state.page=="Home":
-    b=balance(); cls="ok" if b["remaining"]>=0 else "bad"; msg=(f"Ti restano {b['remaining']} kcal" if b["remaining"]>=0 else f"{abs(b['remaining'])} kcal oltre il budget")
+    b=balance(); cls="ok" if b["remaining"]>=0 else "bad"
+    msg=(f"Ti restano {b['remaining']:,} kcal" if b["remaining"]>=0 else f"{abs(b['remaining']):,} kcal oltre il budget").replace(",",".")
     st.markdown(f'<div class="hero"><div class="muted">BENVENUTO</div><h1>Ciao {st.session_state.p_name} 👋</h1><b>Dimagrimento con attenzione alla massa muscolare</b></div>',unsafe_allow_html=True)
     st.subheader("🔥 Bilancio di oggi")
-    st.markdown(f'<div class="card"><div class="muted">CALORIE ASSUNTE / BUDGET</div><div class="big">{b["eaten"]:,} / {b["target"]:,} kcal</div><div class="muted">Base {b["base"]:,} · bonus attività {b["activity"]:,} · consumo rilevato {b["burned"]:,}</div><div class="{cls}">{msg}</div></div>'.replace(",","."),unsafe_allow_html=True)
+    st.markdown(f'''<div class="card"><div class="muted">CALORIE ASSUNTE / OBIETTIVO</div>
+    <div class="big">{b["eaten"]:,} / {b["target"]:,} kcal</div>
+    <div class="muted">Obiettivo calcolato · deficit {b["deficit"]} kcal · BMR stimato {b["bmr_est"]} kcal</div>
+    <div class="{cls}">{msg}</div></div>'''.replace(",","."),unsafe_allow_html=True)
     st.progress(min(max(b["eaten"]/max(b["target"],1),0),1))
     c1,c2,c3=st.columns(3)
     with c1: st.metric("⚖️ Peso",f"{st.session_state.health['weight']:.1f} kg" if st.session_state.health.get("weight") else "—")
     with c2: st.metric("👣 Passi",f"{int(st.session_state.health.get('steps_today') or 0):,}".replace(",","."))
-    with c3: st.metric("🔥 Calorie",f"{int(st.session_state.health.get('calories_today') or 0):,} kcal".replace(",","."))
+    with c3: st.metric("🔥 Consumo rilevato",f"{int(st.session_state.health.get('calories_today') or 0):,} kcal".replace(",","."))
+    if b["observed_burn"]:
+        st.caption(f"Google Fit ha rilevato {b['observed_burn']:,} kcal di consumo oggi. Questo dato è mostrato separatamente dal budget alimentare.")
     st.subheader("🍽️ Oggi")
     daynames=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]; d=daynames[date.today().weekday()]
     ms=st.session_state.meal_plan.get(d) or next(iter(st.session_state.meal_plan.values()))
-    for mn,m in list(ms.items())[:2]: st.write(f"**{mn}** · {m.get('name','Pasto')} · {round(sum(float(i['kcal']) for i in active_items(m)))} kcal")
+    for mn,m in list(ms.items())[:2]:
+        st.write(f"**{mn}** · {m.get('name','Pasto')} · {round(sum(float(i['kcal'])*float(st.session_state.overrides.get(i['id'],{}).get('multiplier',1)) for i in active_items(m)))} kcal")
     if st.session_state.last_sync: st.caption("Ultima sincronizzazione Health: "+st.session_state.last_sync)
 
 # ---------------- Piano ----------------
@@ -201,8 +274,8 @@ elif st.session_state.page=="Piano":
     st.divider(); st.subheader("🤖 Generazione AI")
     if st.button("Genera / rigenera piano settimanale",type="primary"):
         try:
-            model=genai.GenerativeModel("gemini-2.5-flash")
-            prompt=f'''Crea un piano alimentare italiano di 7 giorni. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni. Budget calorico base: {st.session_state.p_target} kcal. Restituisci SOLO JSON con giorni Lunedì-Domenica, 4 pasti al giorno e per ogni pasto name + ingredients. Ogni ingredient deve avere name, qty, unit, kcal.''' 
+            ep=energy_profile(); model=genai.GenerativeModel("gemini-2.5-flash")
+            prompt=f'''Crea un piano alimentare italiano di 7 giorni. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Target alimentare stimato: {ep["target"]} kcal/giorno. Restituisci SOLO JSON con giorni Lunedì-Domenica, 4 pasti al giorno e per ogni pasto name + ingredients. Ogni ingredient deve avere name, qty, unit, kcal.'''
             raw=model.generate_content(prompt).text.replace("```json","").replace("```","").strip(); gen=json.loads(raw); out={}
             for day,ms in gen.items():
                 out[day]={}
@@ -210,7 +283,7 @@ elif st.session_state.page=="Piano":
             st.session_state.meal_plan=out; st.session_state.overrides={}; st.session_state.eaten={}; st.rerun()
         except Exception as e: st.error(f"Errore AI: {e}")
     st.subheader("📷 Mensa Smart")
-    img=st.camera_input("Scatta il menu") or st.file_uploader("Carica una foto",type=["jpg","jpeg","png"],key="mensa2")
+    img=st.camera_input("Scatta il menu") or st.file_uploader("Carica una foto",type=["jpg","jpeg","png"],key="mensa3")
     if img:
         im=Image.open(img); st.image(im,width=420)
         if st.button("✨ Analizza menu",type="secondary"):
@@ -224,7 +297,7 @@ elif st.session_state.page=="Dispensa":
     st.caption("La lista viene calcolata localmente dal piano: rimuovi o aggiungi un alimento e cambia subito.")
     for q,u,n in grocery(): st.checkbox(f"{n} — {q:g} {u}",key="g_"+n+u)
     st.divider(); st.subheader("🍴 Registra qualcosa che hai mangiato")
-    c1,c2=st.columns([3,1]);
+    c1,c2=st.columns([3,1])
     with c1:n=st.text_input("Alimento",placeholder="Pizza margherita")
     with c2:k=st.number_input("kcal",0,3000,500,10)
     if st.button("Registra",type="primary") and n.strip(): st.session_state.manual_foods.append({"name":n.strip(),"kcal":k,"date":today()}); st.rerun()
@@ -251,7 +324,7 @@ elif st.session_state.page=="Attività":
             st.success("Account collegato")
             if st.button("🔄 Sincronizza dati reali",type="primary",use_container_width=True):
                 try:
-                    data,hist,diag=sync_health(); st.session_state.health=data; st.session_state.health_history=hist; st.session_state.diagnostics=diag; st.session_state.last_sync=datetime.now().strftime("%d/%m/%Y %H:%M"); st.rerun()
+                    data,hist,diag=sync_health(); st.session_state.health=data; st.session_state.health_history=hist; st.session_state.diagnostics=diag; st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M"); st.rerun()
                 except Exception as e: st.error(f"Sincronizzazione fallita: {e}")
             h=st.session_state.health
             if h:
@@ -264,22 +337,33 @@ elif st.session_state.page=="Attività":
                     c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
                 st.divider(); st.subheader("🧪 Diagnostica")
                 for k,x in st.session_state.diagnostics.items():
-                    if x["status"]=="available": st.success(f"✓ {k}: dati trovati · {x['type']}")
+                    if x["status"]=="available": st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
                     elif x["status"]=="no_data": st.warning(f"○ {k}: nessun dato restituito · {x['type']}")
                     else: st.error(f"✕ {k}: HTTP {x.get('http','')} · {x.get('detail','')}")
-                metric=st.selectbox("Storico",["steps","calories","weight","body_fat"]); hist=st.session_state.health_history.get(metric,[])
-                if hist:
-                    df=pd.DataFrame(hist); df["date"]=pd.to_datetime(df["date"]); st.line_chart(df.set_index("date")["value"])
+                metric=st.selectbox("Storico",["steps","calories","weight","body_fat","distance"]); hh=st.session_state.health_history.get(metric,[])
+                if hh:
+                    df=pd.DataFrame(hh); df["date"]=pd.to_datetime(df["date"]); st.line_chart(df.set_index("date")["value"])
+            else:
+                st.info("Premi 'Sincronizza dati reali' per leggere i dati disponibili.")
 
 # ---------------- Profilo ----------------
 else:
     st.title("👤 Profilo")
+    ep=energy_profile()
     with st.form("profile"):
         c1,c2=st.columns(2)
         with c1:
-            name=st.text_input("Nome",st.session_state.p_name); weight=st.number_input("Peso (kg)",30.,300.,float(st.session_state.p_weight),.1); height=st.number_input("Altezza (cm)",100.,230.,float(st.session_state.p_height),.5)
+            name=st.text_input("Nome",st.session_state.p_name)
+            weight=st.number_input("Peso (kg)",30.,300.,float(st.session_state.p_weight),.1)
+            height=st.number_input("Altezza (cm)",100.,230.,float(st.session_state.p_height),.5)
         with c2:
-            age=st.number_input("Età",13,100,int(st.session_state.p_age)); sex=st.selectbox("Sesso",["male","female"],index=0 if st.session_state.p_sex=="male" else 1); target=st.number_input("Budget calorico base",1000,5000,int(st.session_state.p_target),50)
+            age=st.number_input("Età",13,100,int(st.session_state.p_age))
+            sex=st.selectbox("Sesso",["male","female"],index=0 if st.session_state.p_sex=="male" else 1)
+            activity=st.selectbox("Attività abituale",list(ACTIVITY_FACTORS.keys()),index=list(ACTIVITY_FACTORS.keys()).index(st.session_state.p_activity_level))
+            deficit=st.select_slider("Deficit desiderato",options=[300,500,700],value=int(st.session_state.p_deficit),format_func=lambda x:f"{x} kcal/giorno")
         if st.form_submit_button("Salva",type="primary"):
-            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_target=target; st.success("Profilo aggiornato")
-    st.info("Il budget calorico è una configurazione dell'app. Il motore Health può aggiungere un bonus legato all'attività rilevata, senza confondere calorie bruciate e calorie da mangiare.")
+            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_deficit=deficit; st.success("Profilo aggiornato")
+    st.subheader("🎯 Obiettivo energetico")
+    st.metric("Target alimentare stimato",f"{ep['target']:,} kcal/giorno".replace(",","."))
+    c1,c2=st.columns(2); c1.metric("BMR stimato",f"{ep['bmr_est']:,} kcal".replace(",",".")); c2.metric("Mantenimento stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
+    st.caption("Il target è una stima basata su Mifflin-St Jeor + livello di attività + deficit scelto. Non è una prescrizione medica. I dati reali di Health vengono mostrati separatamente e serviranno a rendere il motore più preciso nelle prossime versioni.")
