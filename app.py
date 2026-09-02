@@ -11,7 +11,7 @@ from collections import defaultdict
 import uuid
 
 # ============================================================
-# MyDietApp v6
+# MyDietApp v8
 # Health-first release:
 # - real Google Fit data diagnostics
 # - robust aggregation for cumulative vs point data
@@ -237,6 +237,24 @@ def points_from(payload):
                     points.append({"ts":ts,"value":v})
     return points
 
+def points_today_detailed(payload):
+    """Return today's raw points with local start/end timestamps for debugging."""
+    out=[]
+    today_date=datetime.now(ROME).date()
+    for bucket in payload.get("bucket",[]):
+        for ds in bucket.get("dataset",[]):
+            for p in ds.get("point",[]):
+                v=point_value(p)
+                if v is None: continue
+                start_ns=int(p.get("startTimeNanos") or 0)
+                end_ns=int(p.get("endTimeNanos") or 0)
+                ts=end_ns/1_000_000_000 if end_ns else start_ns/1_000_000_000
+                dt_end=datetime.fromtimestamp(ts,ROME)
+                if dt_end.date()!=today_date: continue
+                dt_start=datetime.fromtimestamp(start_ns/1_000_000_000,ROME) if start_ns else dt_end
+                out.append({"start":dt_start.strftime("%H:%M:%S"),"end":dt_end.strftime("%H:%M:%S"),"value":v})
+    return sorted(out,key=lambda x:(x["end"],x["start"]))
+
 def daily_sum(payload):
     # For cumulative quantities such as steps, calories and distance, sum points per local day.
     d=defaultdict(float)
@@ -281,12 +299,12 @@ def sync_health(days=14):
                             "device":(x.get("device") or {}).get("model","") or "—",
                         } for x in sources
                     ]
-                    # Debug: read each visible source independently for today.
-                    # This is diagnostic only; it is never summed into the app value.
+                    # Debug: read EVERY visible source independently for today,
+                    # including the selected derived stream. Never sum these values.
                     per_source=[]
                     for src in sources:
                         src_id=src.get("dataStreamId")
-                        if not src_id or src_id == chosen:
+                        if not src_id:
                             continue
                         try:
                             spayload,sr=aggregate(dtype,sm,em,src_id)
@@ -298,7 +316,9 @@ def sync_health(days=14):
                                     "app":(src.get("application") or {}).get("packageName","") or "—",
                                     "device":(src.get("device") or {}).get("model","") or "—",
                                     "value":sval,
-                                    "id":src_id
+                                    "id":src_id,
+                                    "selected":src_id==chosen,
+                                    "points_today":points_today_detailed(spayload)
                                 })
                             else:
                                 per_source.append({
@@ -307,7 +327,9 @@ def sync_health(days=14):
                                     "device":(src.get("device") or {}).get("model","") or "—",
                                     "value":None,
                                     "id":src_id,
-                                    "error":f"HTTP {sr.status_code}"
+                                    "selected":src_id==chosen,
+                                    "error":f"HTTP {sr.status_code}",
+                                    "points_today":[]
                                 })
                         except Exception as se:
                             per_source.append({
@@ -316,7 +338,9 @@ def sync_health(days=14):
                                 "device":(src.get("device") or {}).get("model","") or "—",
                                 "value":None,
                                 "id":src_id,
-                                "error":str(se)[:150]
+                                "selected":src_id==chosen,
+                                "error":str(se)[:150],
+                                "points_today":[]
                             })
                     source_values[key]=per_source
                 else:
@@ -535,6 +559,18 @@ elif st.session_state.page=="Attività":
                                 "valore":("{:.1f} {}".format(row["value"],unit) if row.get("value") is not None else row.get("error","nessun dato")),
                             })
                         st.dataframe(pd.DataFrame(display),use_container_width=True,hide_index=True)
+                        st.caption("La riga ✓ è lo stream attualmente scelto da MyDietApp. I dettagli sotto mostrano i singoli intervalli temporali restituiti da Google Fit.")
+                        for row in rows:
+                            pts=row.get("points_today",[])
+                            if not pts: continue
+                            label=row.get("name") or row.get("id") or "sorgente"
+                            mark="✓ SCELTA" if row.get("selected") else ""
+                            with st.expander(f"{label} {mark} · {len(pts)} intervalli"):
+                                pdf=pd.DataFrame(pts)
+                                if not pdf.empty:
+                                    pdf["value"]=pdf["value"].round(1)
+                                    st.dataframe(pdf,use_container_width=True,hide_index=True)
+                                    st.caption(f"Somma degli intervalli mostrati: {pdf['value'].sum():,.1f}".replace(",","."))
 
             comparisons=st.session_state.health.get("source_comparisons",{})
             if comparisons:
