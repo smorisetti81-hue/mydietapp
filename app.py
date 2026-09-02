@@ -169,6 +169,43 @@ def aggregate(dtype,start_ms,end_ms,data_source_id=None):
     if r.status_code!=200:return None,r
     return r.json(),r
 
+def read_raw_dataset(data_source_id,start_ms,end_ms):
+    """Legge i punti grezzi di una singola sorgente Google Fit."""
+    if not data_source_id:
+        return None, None
+    dataset_id=f"{int(start_ms)*1_000_000}-{int(end_ms)*1_000_000}"
+    url=FIT_BASE+"/dataSources/"+urllib.parse.quote(str(data_source_id),safe="")+"/datasets/"+dataset_id
+    r=fit("GET",url)
+    if r.status_code!=200:
+        return None,r
+    return r.json(),r
+
+def raw_points(payload):
+    out=[]
+    for p in (payload or {}).get("point",[]):
+        v=point_value(p)
+        if v is None:
+            continue
+        start_ns=int(p.get("startTimeNanos") or 0)
+        end_ns=int(p.get("endTimeNanos") or start_ns)
+        out.append({
+            "start":start_ns/1_000_000_000,
+            "end":end_ns/1_000_000_000,
+            "value":v
+        })
+    return out
+
+def raw_today_sum(payload, day):
+    """Somma solo i punti delta che terminano nel giorno locale richiesto."""
+    pts=raw_points(payload)
+    total=0.0
+    used=0
+    for p in pts:
+        if datetime.fromtimestamp(p["end"],ROME).date()==day:
+            total += p["value"]
+            used += 1
+    return (total if used else None), used
+
 def source_label(src):
     app=(src.get("application") or {}).get("packageName","")
     dev=src.get("device") or {}
@@ -371,7 +408,39 @@ def sync_health(days=14):
                     comparisons[key]={"selected":selected_today,"all_sources":all_today,"difference":(all_today-selected_today) if all_today is not None and selected_today is not None else None}
                 else:
                     comparisons[key]={"selected":next((z["value"] for z in h if z["date"]==today()),None),"all_sources":None,"difference":None,"error":all_r.text[:300]}
-            data[key]=h[-1]["value"] if h else None
+            # IMPORTANT: the aggregate endpoint is NOT used for the live
+            # value of steps/calories. In our account it returned 6267 steps
+            # even though that value represented a wider historical aggregate.
+            live_value = h[-1]["value"] if h else None
+            live_info = {}
+            if key in {"steps","calories"} and chosen:
+                live_start=datetime.now(ROME).replace(hour=0,minute=0,second=0,microsecond=0)
+                live_end=datetime.now(ROME)
+                lsm=int(live_start.timestamp()*1000)
+                lem=int(live_end.timestamp()*1000)
+                raw_payload,raw_r=read_raw_dataset(chosen,lsm,lem)
+                if raw_payload is not None:
+                    if mode=="sum":
+                        live_value,raw_count=raw_today_sum(raw_payload,live_start.date())
+                    else:
+                        pts=raw_points(raw_payload)
+                        live_value=pts[-1]["value"] if pts else None
+                        raw_count=len(pts)
+                    live_info={
+                        "method":"raw_dataset",
+                        "points":raw_count,
+                        "start":live_start.strftime("%d/%m/%Y %H:%M:%S"),
+                        "end":live_end.strftime("%d/%m/%Y %H:%M:%S"),
+                        "value":live_value
+                    }
+                else:
+                    live_info={
+                        "method":"raw_dataset_failed",
+                        "http":raw_r.status_code if raw_r is not None else None,
+                        "detail":raw_r.text[:250] if raw_r is not None else "nessuna risposta"
+                    }
+
+            data[key]=live_value
             diag[key]={
                 "status":"available" if h else "no_data",
                 "http":200,
@@ -379,13 +448,15 @@ def sync_health(days=14):
                 "points":len(points_from(payload)),
                 "source_id":chosen,
                 "source_reason":choice_reason,
-                "source_label":next((f"{x['name']} · {x['app']}" for x in catalogs.get(key,[]) if x["id"]==chosen), chosen or "aggregate di tutte le sorgenti")
+                "source_label":next((f"{x['name']} · {x['app']}" for x in catalogs.get(key,[]) if x["id"]==chosen), chosen or "aggregate di tutte le sorgenti"),
+                "live_query":live_info
             }
         except Exception as e:
             data[key]=None; hist[key]=[]; diag[key]={"status":"error","type":dtype,"detail":str(e)}
-    t=today()
-    data["steps_today"]=next((x["value"] for x in hist["steps"] if x["date"]==t),None)
-    data["calories_today"]=next((x["value"] for x in hist["calories"] if x["date"]==t),None)
+    # These are the exact live values calculated above from today's raw
+    # dataset for the selected Google Fit derived streams.
+    data["steps_today"]=data.get("steps")
+    data["calories_today"]=data.get("calories")
     dist=next((x["value"] for x in hist["distance"] if x["date"]==t),None)
     data["distance_today"]=dist/1000 if dist is not None else None
     data["source_catalogs"]=catalogs
@@ -523,7 +594,7 @@ elif st.session_state.page=="Attività":
                 fat=h["weight"]*h["body_fat"]/100; lean=h["weight"]-fat
                 c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
             st.divider(); st.subheader("🧪 Diagnostica")
-            st.caption("V6 non somma più alla cieca tutte le sorgenti per passi e calorie: prima cerca lo stream derivato di Google Fit, progettato per la vista unificata.")
+            st.caption("V9.1: per il valore live di oggi passi e calorie vengono letti dai punti grezzi della sorgente Google Fit selezionata; l'aggregate resta solo per storico e diagnostica.")
             for k,x in st.session_state.diagnostics.items():
                 if x["status"]=="available":
                     if x.get("source_id"):
