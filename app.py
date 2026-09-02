@@ -4,6 +4,7 @@ import json
 import pandas as pd
 import urllib.parse
 import requests
+import time
 from PIL import Image
 from streamlit_option_menu import option_menu
 
@@ -144,8 +145,42 @@ elif menu == "Carica Dati (Health)":
         st.markdown(f"### [👉 CLICCA QUI PER ACCEDERE CON GOOGLE FIT]({auth_url})")
     else:
         st.write("✅ **Account Google collegato con successo.**")
+        
         if st.button("Scarica ultimi dati", type="primary"):
-            st.info("Il token è pronto! Nel prossimo step inseriremo la chiamata effettiva alle API di Fit.")
+            with st.spinner("Connessione a Google Fit in corso..."):
+                # Prepara l'intestazione con il tuo Token di accesso
+                headers = {
+                    "Authorization": f"Bearer {st.session_state['access_token']}",
+                    "Content-Type": "application/json"
+                }
+                
+                # Calcola il range di tempo (ultimi 7 giorni in millisecondi)
+                now_millis = int(time.time() * 1000)
+                seven_days_ago_millis = now_millis - (7 * 24 * 60 * 60 * 1000)
+                
+                # Chiediamo a Google Fit la somma dei passi giornalieri
+                body = {
+                    "aggregateBy": [{
+                        "dataTypeName": "com.google.step_count.delta",
+                        "dataSourceId": "derived:com.google.step_count.delta:com.google.android.gms:estimated_steps"
+                    }],
+                    "bucketByTime": { "durationMillis": 86400000 }, # 1 giorno in millisecondi
+                    "startTimeMillis": seven_days_ago_millis,
+                    "endTimeMillis": now_millis
+                }
+                
+                fit_url = "https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate"
+                fit_response = requests.post(fit_url, headers=headers, json=body)
+                
+                if fit_response.status_code == 200:
+                    st.success("✅ Dati scaricati con successo!")
+                    dati_fit = fit_response.json()
+                    
+                    # Mostriamo il JSON grezzo per confermare la ricezione
+                    with st.expander("Visualizza dati grezzi (Sotto il cofano)", expanded=True):
+                        st.json(dati_fit)
+                else:
+                    st.error(f"Errore {fit_response.status_code} dal server Google.")
 
 # --- SEZIONE 3: MENSA SMART ---
 elif menu == "Mensa Smart":
