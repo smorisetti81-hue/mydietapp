@@ -137,6 +137,51 @@ def effective_bmr():
 def current_day_name():
     return ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"][datetime.now(ROME).weekday()]
 
+# ---------------- Health provider architecture ----------------
+# The application consumes a normalized HealthProvider contract. The current
+# provider is Google Fit legacy for compatibility/debug; production will use
+# a native Android Health Connect bridge.
+HEALTH_METRICS = (
+    "steps", "total_calories", "active_calories", "distance",
+    "weight", "body_fat", "lean_mass", "workouts", "heart_rate", "sleep"
+)
+
+class HealthProvider:
+    key = "base"
+    name = "Health provider"
+    status = "unavailable"
+
+    def sync(self, days=14):
+        raise NotImplementedError
+
+    def info(self):
+        return {"key": self.key, "name": self.name, "status": self.status}
+
+class GoogleFitProvider(HealthProvider):
+    key = "google_fit_legacy"
+    name = "Google Fit (legacy REST)"
+    status = "legacy"
+
+    def sync(self, days=14):
+        return sync_google_fit_health(days)
+
+class HealthConnectProvider(HealthProvider):
+    key = "health_connect_native"
+    name = "Health Connect (Android nativo)"
+    status = "planned"
+
+    def sync(self, days=14):
+        raise RuntimeError(
+            "Health Connect richiede il componente Android nativo: "
+            "il server Streamlit non può leggere direttamente i dati locali del telefono."
+        )
+
+def get_health_provider():
+    # V14: Google Fit remains the compatibility provider. The selector is the
+    # only place that needs changing when the native Android bridge is ready.
+    return GoogleFitProvider()
+
+
 # ---------------- Google Fit legacy health layer ----------------
 def refresh_token():
     rt=st.session_state.get("refresh_token")
@@ -361,7 +406,7 @@ def daily_latest(payload):
         if day not in d or p["ts"]>d[day]["ts"]: d[day]=p
     return [{"date":k,"value":d[k]["value"]} for k in sorted(d)]
 
-def sync_health(days=14):
+def sync_google_fit_health(days=14):
     now=datetime.now(ROME); start=(now-timedelta(days=days-1)).replace(hour=0,minute=0,second=0,microsecond=0)
     sm=int(start.timestamp()*1000); em=int(now.timestamp()*1000)
     specs={
@@ -663,12 +708,17 @@ elif st.session_state.page=="Attività":
             st.success("Account Google collegato in questa sessione")
             if st.button("🔄 Sincronizza dati reali",type="primary",use_container_width=True):
                 try:
-                    data,hist,diag=sync_health()
+                    provider=get_health_provider()
+                    data,hist,diag=provider.sync()
+                    data["provider"]=provider.info()
                     st.session_state.health=data; st.session_state.health_history=hist; st.session_state.diagnostics=diag
                     st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
                     st.rerun()
                 except Exception as e: st.error(f"Sincronizzazione fallita: {e}")
         h=st.session_state.health
+        provider_info=h.get("provider",{}) if isinstance(h,dict) else {}
+        if provider_info:
+            st.caption(f"Provider Health attivo: **{provider_info.get('name','—')}** · stato: **{provider_info.get('status','—')}**")
         if h:
             st.divider(); st.subheader("📊 Dati di oggi")
             cards=[("👣 Passi oggi",h.get("steps_today"),"passi"),("🔥 Calorie totali",h.get("calories_today"),"kcal"),("⚖️ Peso",h.get("weight"),"kg"),("🟠 Massa grassa",h.get("body_fat"),"%"),("📏 Distanza",h.get("distance_today"),"km"),("🧬 BMR",h.get("bmr"),"kcal/giorno")]
@@ -774,6 +824,10 @@ elif st.session_state.page=="Attività":
                                 st.success("Nessuna differenza significativa tra i due risultati per oggi.")
             if h.get("weight") is None or h.get("body_fat") is None:
                 st.caption("ℹ️ Peso e composizione corporea non risultano disponibili nella sorgente Google Fit attuale. Il profilo locale resta il fallback per il calcolo energetico.")
+            with st.expander("🧱 Architettura Health — V14"):
+                st.write("**Contratto normalizzato:** passi · calorie totali · calorie attive · distanza · peso · massa grassa · massa magra · allenamenti · frequenza cardiaca · sonno.")
+                st.info("Dashboard, bilancio e attività ora dipendono dal concetto di **Health Provider**, non direttamente da Google Fit. Il provider attuale è Google Fit legacy; quello di produzione previsto è Health Connect tramite componente Android nativo.")
+                st.caption("Quando il bridge Android sarà pronto, potremo sostituire il provider senza riscrivere la logica dell'app.")
             metric=st.selectbox("Storico",["steps","calories","weight","body_fat","distance"]); hh=st.session_state.health_history.get(metric,[])
             if hh:
                 df=pd.DataFrame(hh); df["date"]=pd.to_datetime(df["date"]); st.line_chart(df.set_index("date")["value"])
