@@ -263,7 +263,7 @@ def sync_health(days=14):
         "body_fat":("com.google.body.fat.percentage","latest"),
         "bmr":("com.google.calories.bmr","latest")
     }
-    data={}; hist={}; diag={}; catalogs={}; comparisons={}
+    data={}; hist={}; diag={}; catalogs={}; comparisons={}; source_values={}
     source_keys={"steps","calories"}
     for key,(dtype,mode) in specs.items():
         try:
@@ -281,6 +281,44 @@ def sync_health(days=14):
                             "device":(x.get("device") or {}).get("model","") or "—",
                         } for x in sources
                     ]
+                    # Debug: read each visible source independently for today.
+                    # This is diagnostic only; it is never summed into the app value.
+                    per_source=[]
+                    for src in sources:
+                        src_id=src.get("dataStreamId")
+                        if not src_id or src_id == chosen:
+                            continue
+                        try:
+                            spayload,sr=aggregate(dtype,sm,em,src_id)
+                            if spayload is not None:
+                                sh=daily_sum(spayload)
+                                sval=next((z["value"] for z in sh if z["date"]==today()),None)
+                                per_source.append({
+                                    "name":src.get("dataStreamName","") or "—",
+                                    "app":(src.get("application") or {}).get("packageName","") or "—",
+                                    "device":(src.get("device") or {}).get("model","") or "—",
+                                    "value":sval,
+                                    "id":src_id
+                                })
+                            else:
+                                per_source.append({
+                                    "name":src.get("dataStreamName","") or "—",
+                                    "app":(src.get("application") or {}).get("packageName","") or "—",
+                                    "device":(src.get("device") or {}).get("model","") or "—",
+                                    "value":None,
+                                    "id":src_id,
+                                    "error":f"HTTP {sr.status_code}"
+                                })
+                        except Exception as se:
+                            per_source.append({
+                                "name":src.get("dataStreamName","") or "—",
+                                "app":(src.get("application") or {}).get("packageName","") or "—",
+                                "device":(src.get("device") or {}).get("model","") or "—",
+                                "value":None,
+                                "id":src_id,
+                                "error":str(se)[:150]
+                            })
+                    source_values[key]=per_source
                 else:
                     catalogs[key]=[]
                     diag[key]={"status":"source_error","http":r.status_code,"type":dtype,"detail":r.text[:500]}
@@ -328,6 +366,7 @@ def sync_health(days=14):
     data["distance_today"]=dist/1000 if dist is not None else None
     data["source_catalogs"]=catalogs
     data["source_comparisons"]=comparisons
+    data["source_values"]=source_values
     return data,hist,diag
 
 # ---------------- Navigation ----------------
@@ -479,6 +518,24 @@ elif st.session_state.page=="Attività":
                         rows=st.session_state.health["source_catalogs"][key]
                         st.dataframe(pd.DataFrame(rows)[["name","type","app","device","id"]],use_container_width=True,hide_index=True)
                     st.caption("Le sorgenti visibili dipendono dagli scope OAuth e dall'account. Google Fit documenta che l'aggregate per dataTypeName include tutte le sorgenti che forniscono quel tipo; per questo V6 preferisce uno stream derivato specifico quando disponibile.")
+            source_values=st.session_state.health.get("source_values",{})
+            if source_values:
+                with st.expander("🧩 Valori per singola sorgente (diagnostica)"):
+                    st.caption("Qui leggiamo separatamente le sorgenti visibili. Non vengono sommate: servono per capire da dove nasce il valore riconciliato di Google Fit.")
+                    for key,rows in source_values.items():
+                        if not rows: continue
+                        unit="passi" if key=="steps" else "kcal"
+                        st.markdown(f"**{key} — valori di oggi**")
+                        display=[]
+                        for row in rows:
+                            display.append({
+                                "device":row.get("device") or "—",
+                                "app":row.get("app") or "—",
+                                "nome":row.get("name") or "—",
+                                "valore":("{:.1f} {}".format(row["value"],unit) if row.get("value") is not None else row.get("error","nessun dato")),
+                            })
+                        st.dataframe(pd.DataFrame(display),use_container_width=True,hide_index=True)
+
             comparisons=st.session_state.health.get("source_comparisons",{})
             if comparisons:
                 with st.expander("🧭 Confronto: stream scelto vs tutte le sorgenti"):
