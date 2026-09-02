@@ -5,6 +5,7 @@ import pandas as pd
 import urllib.parse
 import requests
 import time
+from datetime import datetime, timedelta, timezone
 from PIL import Image
 from streamlit_option_menu import option_menu
 
@@ -148,24 +149,30 @@ elif menu == "Carica Dati (Health)":
         
         if st.button("Scarica ultimi dati", type="primary"):
             with st.spinner("Connessione a Google Fit in corso..."):
-                # Prepara l'intestazione con il tuo Token di accesso
+                # Fuso orario Italiano (UTC+2 in estate) per allineare i server
+                tz_ita = timezone(timedelta(hours=2))
+                ora_attuale = datetime.now(tz_ita)
+                
+                # Partiamo esattamente dalla mezzanotte di 6 giorni fa
+                mezzanotte_oggi = ora_attuale.replace(hour=0, minute=0, second=0, microsecond=0)
+                inizio_settimana = mezzanotte_oggi - timedelta(days=6)
+                
+                start_millis = int(inizio_settimana.timestamp() * 1000)
+                now_millis = int(ora_attuale.timestamp() * 1000)
+
                 headers = {
                     "Authorization": f"Bearer {st.session_state['access_token']}",
                     "Content-Type": "application/json"
                 }
                 
-                # Calcola il range di tempo (ultimi 7 giorni in millisecondi)
-                now_millis = int(time.time() * 1000)
-                seven_days_ago_millis = now_millis - (7 * 24 * 60 * 60 * 1000)
-                
-                # Chiediamo a Google Fit la somma dei passi giornalieri
+                # Chiediamo a Google Fit la somma dei passi giornalieri allineati alla mezzanotte
                 body = {
                     "aggregateBy": [{
                         "dataTypeName": "com.google.step_count.delta",
                         "dataSourceId": "derived:com.google.step_count.delta:com.google.android.gms:estimated_steps"
                     }],
-                    "bucketByTime": { "durationMillis": 86400000 }, # 1 giorno in millisecondi
-                    "startTimeMillis": seven_days_ago_millis,
+                    "bucketByTime": { "durationMillis": 86400000 },
+                    "startTimeMillis": start_millis,
                     "endTimeMillis": now_millis
                 }
                 
@@ -179,9 +186,9 @@ elif menu == "Carica Dati (Health)":
                     # Elaborazione del JSON per estrarre i passi
                     passi_giornalieri = []
                     for b in dati_fit.get("bucket", []):
-                        # Convertiamo i millisecondi in una data leggibile (es. 02/09)
-                        start_millis = int(b.get("startTimeMillis", 0))
-                        data_gg = pd.to_datetime(start_millis, unit='ms').strftime('%d/%m')
+                        # Convertiamo i millisecondi in data, forzando il fuso orario italiano
+                        bucket_start = int(b.get("startTimeMillis", 0))
+                        data_gg = pd.to_datetime(bucket_start, unit='ms').tz_localize('UTC').tz_convert(tz_ita).strftime('%d/%m')
                         
                         passi_totali = 0
                         for ds in b.get("dataset", []):
@@ -191,19 +198,17 @@ elif menu == "Carica Dati (Health)":
                         
                         passi_giornalieri.append({"Data": data_gg, "Passi": passi_totali})
                     
-                    # Creazione del dataframe e del grafico
                     df_passi = pd.DataFrame(passi_giornalieri)
                     
                     st.divider()
                     st.subheader("👣 Andamento Passi (Ultimi 7 giorni)")
                     
-                    # Mostriamo una metrica con i passi di oggi (ultimo giorno dell'array)
+                    # Mostriamo i passi di oggi (ultimo elemento della lista)
                     passi_oggi = df_passi.iloc[-1]['Passi']
                     st.metric(label="Passi rilevati oggi", value=f"{passi_oggi:,}".replace(',', '.'))
                     
-                    # Disegniamo il grafico a barre
+                    # Disegniamo il grafico
                     st.bar_chart(df_passi.set_index("Data"), color="#ff4b4b")
-                    
                 else:
                     st.error(f"Errore {fit_response.status_code} dal server Google.")
 
@@ -237,7 +242,7 @@ elif menu == "Mensa Smart":
         if st.button("Trova il pasto ideale", type="primary"):
             with st.spinner("Lettura del menu in corso..."):
                 try:
-                    model = genai.GenerativeModel('gemini-3.6-flash')
+                    model = genai.GenerativeModel('gemini-2.5-flash')
                     prompt = """
                     Sei un nutrizionista sportivo. L'utente pesa circa 135 kg e vuole dimagrire mantenendo massa muscolare.
                     Leggi il menu nella foto e fornisci il tuo SUGGERIMENTO DIRETTO su cosa ordinare oggi.
@@ -251,7 +256,6 @@ elif menu == "Mensa Smart":
                     st.markdown(response.text)
                 except Exception as e:
                     st.error(f"Errore durante la lettura: {e}")
-
 
 # --- SEZIONE 4: PIANO ALIMENTARE E SPESA ---
 elif menu == "Piano Alimentare & Spesa":
@@ -278,7 +282,7 @@ elif menu == "Piano Alimentare & Spesa":
                 else:
                     regola_ufficio = "2. GIORNI IN UFFICIO: Nessuno. L'utente mangia a casa TUTTI I GIORNI. Devi generare colazione, pranzo, spuntino e cena per tutti e 7 i giorni."
 
-                model = genai.GenerativeModel('gemini-3.6-flash')
+                model = genai.GenerativeModel('gemini-2.5-flash')
                 prompt = f"""
                 Agisci come un nutrizionista. Crea un piano settimanale per un uomo di 135 kg in deficit.
                 
@@ -304,122 +308,4 @@ elif menu == "Piano Alimentare & Spesa":
                 """
                 response = model.generate_content(prompt)
                 
-                testo_json = response.text.replace('```json', '').replace('```', '').strip()
-                st.session_state['dati_generati'] = json.loads(testo_json)
-                
-                for key in list(st.session_state.keys()):
-                    if key.startswith("chk_"):
-                        del st.session_state[key]
-                        
-            except Exception as e:
-                st.error(f"Errore durante l'elaborazione: {e}")
-
-    if 'dati_generati' in st.session_state:
-        dati = st.session_state['dati_generati']
-        
-        st.subheader("🛒 Dispensa & Spesa")
-        st.write("Spunta gli ingredienti per 'accendere' i pasti.")
-        
-        spesa = dati.get('spesa', {})
-        for categoria, ingredienti in spesa.items():
-            if ingredienti: 
-                st.markdown(f"**{categoria}**")
-                for ingrediente in ingredienti:
-                    if f"chk_{ingrediente}" not in st.session_state:
-                        st.session_state[f"chk_{ingrediente}"] = False
-                    st.checkbox(ingrediente, key=f"chk_{ingrediente}")
-        
-        st.divider()
-
-        st.subheader("🗓️ Il tuo Menu Settimanale")
-        
-        piano = dati.get('piano', {})
-        giorni_totali = list(piano.keys())
-        
-        for giorno, pasti in piano.items():
-            with st.expander(f"📌 {giorno}", expanded=True):
-                if isinstance(pasti, dict):
-                    for nome_pasto, info in pasti.items():
-                        if isinstance(info, dict):
-                            testo = info.get('testo', '')
-                            reqs = info.get('req', [])
-                            mancanti = [r for r in reqs if not st.session_state.get(f"chk_{r}", False)]
-                            
-                            is_ufficio = "UFFICIO" in testo
-                            status_icon = "✅" if (is_ufficio or not mancanti) else "🔒"
-                            
-                            # Card pulita e leggibile per evitare il troncamento su mobile
-                            with st.container(border=True):
-                                st.markdown(f"**{status_icon} {nome_pasto}**")
-                                st.write(f"🍽️ {testo}")
-                                
-                                if mancanti and not is_ufficio:
-                                    st.caption(f"🛒 *Manca in dispensa: {', '.join(mancanti)}*")
-                        else:
-                            with st.container(border=True):
-                                st.markdown(f"**{nome_pasto}**")
-                                st.write(f"🍽️ {info}")
-                
-                st.write("")
-                altri_giorni = [g for g in giorni_totali if g != giorno]
-                col_swap1, col_swap2 = st.columns([2, 1])
-                with col_swap1:
-                    target_swap = st.selectbox(f"Sposta il menu di {giorno} a:", altri_giorni, key=f"sel_swap_{giorno}")
-                with col_swap2:
-                    st.write("") 
-                    if st.button("🔄 Scambia", key=f"btn_swap_{giorno}"):
-                        temp_menu = st.session_state['dati_generati']['piano'][giorno]
-                        st.session_state['dati_generati']['piano'][giorno] = st.session_state['dati_generati']['piano'][target_swap]
-                        st.session_state['dati_generati']['piano'][target_swap] = temp_menu
-                        st.rerun()
-
-        st.divider()
-        
-        st.subheader("🔄 Sincronizza la Spesa")
-        st.write("Hai fatto modifiche manuali ai piatti? Clicca qui sotto per rigenerare la lista della spesa.")
-        
-        if st.button("Ricalcola Spesa con IA", type="secondary"):
-            with st.spinner("Analisi del nuovo menu e aggiornamento della lista spesa..."):
-                try:
-                    menu_attuale = json.dumps(st.session_state['dati_generati']['piano'], ensure_ascii=False)
-                    
-                    model = genai.GenerativeModel('gemini-3.6-flash')
-                    prompt_ricalcolo = f"""
-                    Agisci come un nutrizionista. L'utente ha modificato manualmente il suo menu settimanale. 
-                    Ecco il menu attuale in formato JSON:
-                    {menu_attuale}
-                    
-                    IL TUO COMPITO:
-                    1. Leggi i piatti elencati nella chiave "testo" di ogni pasto.
-                    2. Genera una NUOVA lista della spesa unificata (con quantità e alternative economiche). Ignora i pasti in UFFICIO.
-                    3. Aggiorna l'array "req" di OGNI pasto nel piano in modo che contenga le nuove stringhe ESATTE della lista della spesa appena generata.
-                    
-                    RESTITUISCI ESCLUSIVAMENTE JSON CON QUESTA STRUTTURA:
-                    {{
-                        "piano": <IL PIANO CON GLI ARRAY 'req' AGGIORNATI>,
-                        "spesa": {{
-                            "Ortofrutta": [],
-                            "Carne e Pesce": [],
-                            "Latticini e Frigo": [],
-                            "Dispensa": []
-                        }}
-                    }}
-                    """
-                    response_ric = model.generate_content(prompt_ricalcolo)
-                    testo_json_ric = response_ric.text.replace('```json', '').replace('```', '').strip()
-                    dati_aggiornati = json.loads(testo_json_ric)
-                    
-                    st.session_state['dati_generati'] = dati_aggiornati
-                    
-                    for key in list(st.session_state.keys()):
-                        if key.startswith("chk_"):
-                            del st.session_state[key]
-                            
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Errore durante il ricalcolo: {e}. Riprova.")
-
-# --- SEZIONE 5: TRACKING ATTIVITÀ ---
-elif menu == "Tracking Attività":
-    st.title("Tracking Attività 🏋️")
-    st.info("Qui potremo inserire l'interfaccia per loggare i nuovi allenamenti e collegarci a un database.")
+                testo_json = response.text.replace('```json', '').replace('
