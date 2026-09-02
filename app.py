@@ -670,7 +670,7 @@ elif st.session_state.page=="Attività":
                 fat=h["weight"]*h["body_fat"]/100; lean=h["weight"]-fat
                 c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
             st.divider(); st.subheader("🧪 Diagnostica")
-            st.caption("V11: confronta ogni sorgente Google Fit visibile separatamente, per capire quale corrisponde ai dati Samsung Health.")
+            st.caption("V11.2: confronta ogni sorgente Google Fit visibile separatamente, per capire quale corrisponde ai dati Samsung Health.")
             diag_view=st.session_state.get("diagnostics",{})
             comp_steps=diag_view.get("_source_compare_steps",[])
             comp_cal=diag_view.get("_source_compare_calories",[])
@@ -683,6 +683,13 @@ elif st.session_state.page=="Attività":
             if diag_view.get("_source_compare_error"):
                 st.warning(f"⚠️ Errore confronto sorgenti: {diag_view['_source_compare_error']}")
             for k,x in st.session_state.diagnostics.items():
+                # V11 adds special comparison entries whose values are lists.
+                # They are rendered above in their own tables, so skip them
+                # here instead of treating them as normal metric diagnostics.
+                if k.startswith("_source_compare_"):
+                    continue
+                if not isinstance(x,dict) or "status" not in x:
+                    continue
                 if x["status"]=="available":
                     if x.get("source_id"):
                         st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
