@@ -183,12 +183,12 @@ elif menu == "Carica Dati (Health)":
                     st.success("✅ Dati scaricati con successo!")
                     dati_fit = fit_response.json()
                     
-                    # Elaborazione del JSON per estrarre i passi
+# Elaborazione del JSON per estrarre i passi
                     passi_giornalieri = []
                     for b in dati_fit.get("bucket", []):
-                        # Convertiamo i millisecondi in data, forzando il fuso orario italiano
+                        # Manteniamo la data come VERO oggetto temporale (non testo) per l'ordinamento cronologico
                         bucket_start = int(b.get("startTimeMillis", 0))
-                        data_gg = pd.to_datetime(bucket_start, unit='ms').tz_localize('UTC').tz_convert(tz_ita).strftime('%d/%m')
+                        data_gg = pd.to_datetime(bucket_start, unit='ms').tz_localize('UTC').tz_convert(tz_ita).date()
                         
                         passi_totali = 0
                         for ds in b.get("dataset", []):
@@ -200,14 +200,17 @@ elif menu == "Carica Dati (Health)":
                     
                     df_passi = pd.DataFrame(passi_giornalieri)
                     
+                    # Ordiniamo esplicitamente il DataFrame per data (dal più vecchio al più nuovo)
+                    df_passi = df_passi.sort_values(by="Data")
+                    
                     st.divider()
                     st.subheader("👣 Andamento Passi (Ultimi 7 giorni)")
                     
-                    # Mostriamo i passi di oggi (ultimo elemento della lista)
+                    # Mostriamo i passi di oggi (ultimo elemento della lista ordinata)
                     passi_oggi = df_passi.iloc[-1]['Passi']
                     st.metric(label="Passi rilevati oggi", value=f"{passi_oggi:,}".replace(',', '.'))
                     
-                    # Disegniamo il grafico
+                    # Disegniamo il grafico (passando un oggetto Date, Streamlit ordina e formatta l'asse da solo)
                     st.bar_chart(df_passi.set_index("Data"), color="#ff4b4b")
                 else:
                     st.error(f"Errore {fit_response.status_code} dal server Google.")
