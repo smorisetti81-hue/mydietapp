@@ -198,7 +198,7 @@ elif menu == "Carica Dati (Health)":
                         
                         passi_giornalieri.append({"Data": data_gg, "Passi": passi_totali})
                     
-		    df_passi = pd.DataFrame(passi_giornalieri)
+			df_passi = pd.DataFrame(passi_giornalieri)
                     
                     # Ordiniamo esplicitamente il DataFrame per data (dal più vecchio al più nuovo)
                     df_passi = df_passi.sort_values(by="Data")
