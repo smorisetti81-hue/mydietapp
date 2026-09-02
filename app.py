@@ -198,14 +198,16 @@ elif menu == "Carica Dati (Health)":
                         
                         passi_giornalieri.append({"Data": data_gg, "Passi": passi_totali})
                     
-                    df_passi = pd.DataFrame(passi_giornalieri)
+		    df_passi = pd.DataFrame(passi_giornalieri)
                     
                     # Ordiniamo esplicitamente il DataFrame per data (dal più vecchio al più nuovo)
                     df_passi = df_passi.sort_values(by="Data")
                     
-                    st.divider()
-                    st.subheader("👣 Andamento Passi (Ultimi 7 giorni)")
+                    # AGGIUNGI QUESTA RIGA: riconvertiamo in testo (GG/MM) per avere barre larghe
+                    df_passi["Data"] = df_passi["Data"].apply(lambda x: x.strftime('%d/%m'))
                     
+                    st.divider()
+                    st.subheader("👣 Andamento Passi (Ultimi 7 giorni)")                    
                     # Mostriamo i passi di oggi (ultimo elemento della lista ordinata)
                     passi_oggi = df_passi.iloc[-1]['Passi']
                     st.metric(label="Passi rilevati oggi", value=f"{passi_oggi:,}".replace(',', '.'))
