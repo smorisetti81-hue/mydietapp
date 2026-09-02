@@ -11,13 +11,15 @@ from collections import defaultdict
 import uuid
 
 # ============================================================
-# MyDietApp v3
+# MyDietApp v6
 # Health-first release:
 # - real Google Fit data diagnostics
 # - robust aggregation for cumulative vs point data
 # - automatic BMR / calorie target calculation
 # - Home separates intake, target and observed expenditure
 # - Python owns local food/calorie state
+# - source-aware Google Fit diagnostics
+# - prefer Google Fit derived/reconciled streams instead of summing every source
 # ============================================================
 st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", initial_sidebar_state="collapsed")
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
@@ -117,11 +119,15 @@ def balance():
     eaten=eaten_kcal()
     observed=float(h.get("calories_today") or 0)
     bmr_health=float(h.get("bmr") or 0)
+    # Google Fit calories.expended is a total expenditure stream and may include
+    # basal expenditure. Use the observed total only for the live food budget.
+    live_target=round(max(1200, observed-e["deficit"])) if observed > 0 else e["target"]
     return {
-        "target":e["target"], "eaten":eaten, "remaining":e["target"]-eaten,
-        "observed_burn":round(observed), "bmr_est":e["bmr_est"],
-        "bmr_health":round(bmr_health) if bmr_health else None,
-        "maintenance":e["maintenance_est"], "deficit":e["deficit"]
+        "target":e["target"], "live_target":live_target, "eaten":eaten,
+        "remaining":live_target-eaten, "observed_burn":round(observed),
+        "bmr_est":e["bmr_est"], "bmr_health":round(bmr_health) if bmr_health else None,
+        "maintenance":e["maintenance_est"], "deficit":e["deficit"],
+        "using_observed":observed > 0
     }
 
 def effective_bmr():
@@ -149,11 +155,70 @@ def fit(method,url,**kwargs):
         headers["Authorization"]=f"Bearer {st.session_state.access_token}"; r=requests.request(method,url,headers=headers,timeout=25,**kwargs)
     return r
 
-def aggregate(dtype,start_ms,end_ms):
-    body={"aggregateBy":[{"dataTypeName":dtype}],"bucketByTime":{"durationMillis":86400000},"startTimeMillis":start_ms,"endTimeMillis":end_ms}
+def list_datasources(dtype=None):
+    params={"dataTypeName":dtype} if dtype else {}
+    r=fit("GET",FIT_BASE+"/dataSources",params=params)
+    if r.status_code!=200:
+        return None,r
+    return r.json().get("dataSource",[]),r
+
+def aggregate(dtype,start_ms,end_ms,data_source_id=None):
+    spec={"dataTypeName":dtype} if not data_source_id else {"dataSourceId":data_source_id}
+    body={"aggregateBy":[spec],"bucketByTime":{"durationMillis":86400000},"startTimeMillis":start_ms,"endTimeMillis":end_ms}
     r=fit("POST",FIT_BASE+"/dataset:aggregate",json=body)
     if r.status_code!=200:return None,r
     return r.json(),r
+
+def source_label(src):
+    app=(src.get("application") or {}).get("packageName","")
+    dev=src.get("device") or {}
+    devtxt=" ".join(str(dev.get(k,"")) for k in ("manufacturer","model","uid") if dev.get(k))
+    name=src.get("dataStreamName") or src.get("dataStreamId") or "sorgente sconosciuta"
+    bits=[name]
+    if app: bits.append(app)
+    if devtxt: bits.append(devtxt)
+    return " · ".join(bits)
+
+def choose_preferred_source(dtype,sources):
+    ids=[str(x.get("dataStreamId","")) for x in sources]
+    # These are Google Fit derived streams. They are preferable to asking the
+    # aggregate endpoint for the dataTypeName, which contributes every source.
+    if dtype=="com.google.step_count.delta":
+        preferred=[
+            "derived:com.google.step_count.delta:com.google.android.gms:estimated_steps",
+            "derived:com.google.step_count.delta:com.google.android.gms:merge_step_deltas",
+        ]
+    elif dtype=="com.google.calories.expended":
+        preferred=[
+            "derived:com.google.calories.expended:com.google.android.gms:merge_calories_expended",
+            "derived:com.google.calories.expended:com.google.android.gms:platform_calories_expended",
+        ]
+    else:
+        preferred=[]
+    for wanted in preferred:
+        if wanted in ids:
+            return wanted, "Google Fit derived stream"
+    # Generic fallback: prefer a derived Google Play services stream, then any
+    # visible source. This keeps the app working for users with different Fit setups.
+    candidates=[x for x in sources if x.get("type")=="derived" and ((x.get("application") or {}).get("packageName")=="com.google.android.gms")]
+    if candidates:
+        return candidates[0].get("dataStreamId"), "derived Google Fit stream (fallback)"
+    return None, "aggregate di tutte le sorgenti (fallback)"
+
+def source_catalog(dtype):
+    sources,r=list_datasources(dtype)
+    if sources is None:
+        return [], {"status":"error","http":r.status_code,"type":dtype,"detail":r.text[:500]}
+    rows=[]
+    for src in sources:
+        rows.append({
+            "id":src.get("dataStreamId",""),
+            "name":src.get("dataStreamName","") or "—",
+            "type":src.get("type","") or "—",
+            "app":(src.get("application") or {}).get("packageName","") or "—",
+            "device":(src.get("device") or {}).get("model","") or "—",
+        })
+    return rows,{"status":"available","http":200,"type":dtype,"count":len(rows)}
 
 def point_value(p):
     for v in p.get("value",[]):
@@ -198,17 +263,62 @@ def sync_health(days=14):
         "body_fat":("com.google.body.fat.percentage","latest"),
         "bmr":("com.google.calories.bmr","latest")
     }
-    data={}; hist={}; diag={}
+    data={}; hist={}; diag={}; catalogs={}; comparisons={}
+    source_keys={"steps","calories"}
     for key,(dtype,mode) in specs.items():
         try:
-            payload,r=aggregate(dtype,sm,em)
+            chosen=None; choice_reason=None
+            if key in source_keys:
+                sources,r=list_datasources(dtype)
+                if sources is not None:
+                    chosen,choice_reason=choose_preferred_source(dtype,sources)
+                    catalogs[key]=[
+                        {
+                            "id":x.get("dataStreamId",""),
+                            "name":x.get("dataStreamName","") or "—",
+                            "type":x.get("type","") or "—",
+                            "app":(x.get("application") or {}).get("packageName","") or "—",
+                            "device":(x.get("device") or {}).get("model","") or "—",
+                        } for x in sources
+                    ]
+                else:
+                    catalogs[key]=[]
+                    diag[key]={"status":"source_error","http":r.status_code,"type":dtype,"detail":r.text[:500]}
+            payload,r=aggregate(dtype,sm,em,chosen)
             if payload is None:
-                data[key]=None; hist[key]=[]; diag[key]={"status":"error","http":r.status_code,"type":dtype,"detail":r.text[:500]}
-            else:
-                h=daily_sum(payload) if mode=="sum" else daily_latest(payload)
-                hist[key]=h
-                data[key]=h[-1]["value"] if h else None
-                diag[key]={"status":"available" if h else "no_data","http":200,"type":dtype,"points":len(points_from(payload))}
+                # If a preferred derived stream is unavailable/forbidden, fall back
+                # to the dataType aggregate so the user still gets diagnostics.
+                fallback_used=False
+                if chosen:
+                    payload,r=aggregate(dtype,sm,em,None); fallback_used=True
+                if payload is None:
+                    data[key]=None; hist[key]=[]; diag[key]={"status":"error","http":r.status_code,"type":dtype,"detail":r.text[:500],"source_id":chosen}
+                    continue
+                choice_reason=(choice_reason or "sorgente selezionata")+" · fallback aggregate"
+            h=daily_sum(payload) if mode=="sum" else daily_latest(payload)
+            hist[key]=h
+            if key in source_keys:
+                # Keep the old all-source aggregate only as a diagnostic comparator.
+                # It is NOT used for the value shown by MyDietApp when a preferred
+                # derived stream is available.
+                all_payload,all_r=aggregate(dtype,sm,em,None)
+                if all_payload is not None:
+                    all_hist=daily_sum(all_payload) if mode=="sum" else daily_latest(all_payload)
+                    selected_today=next((z["value"] for z in h if z["date"]==today()),None)
+                    all_today=next((z["value"] for z in all_hist if z["date"]==today()),None)
+                    comparisons[key]={"selected":selected_today,"all_sources":all_today,"difference":(all_today-selected_today) if all_today is not None and selected_today is not None else None}
+                else:
+                    comparisons[key]={"selected":next((z["value"] for z in h if z["date"]==today()),None),"all_sources":None,"difference":None,"error":all_r.text[:300]}
+            data[key]=h[-1]["value"] if h else None
+            diag[key]={
+                "status":"available" if h else "no_data",
+                "http":200,
+                "type":dtype,
+                "points":len(points_from(payload)),
+                "source_id":chosen,
+                "source_reason":choice_reason,
+                "source_label":next((f"{x['name']} · {x['app']}" for x in catalogs.get(key,[]) if x["id"]==chosen), chosen or "aggregate di tutte le sorgenti")
+            }
         except Exception as e:
             data[key]=None; hist[key]=[]; diag[key]={"status":"error","type":dtype,"detail":str(e)}
     t=today()
@@ -216,6 +326,8 @@ def sync_health(days=14):
     data["calories_today"]=next((x["value"] for x in hist["calories"] if x["date"]==t),None)
     dist=next((x["value"] for x in hist["distance"] if x["date"]==t),None)
     data["distance_today"]=dist/1000 if dist is not None else None
+    data["source_catalogs"]=catalogs
+    data["source_comparisons"]=comparisons
     return data,hist,diag
 
 # ---------------- Navigation ----------------
@@ -228,27 +340,16 @@ for col,(name,icon) in zip(cols,pages.items()):
 
 # ---------------- Home ----------------
 if st.session_state.page=="Home":
-    b=balance(); cls="ok" if b["remaining"]>=0 else "bad"
-    msg=(f"Ti restano {b['remaining']:,} kcal" if b["remaining"]>=0 else f"{abs(b['remaining']):,} kcal oltre il budget").replace(",",".")
-    st.markdown(f'<div class="hero"><div class="muted">BENVENUTO</div><h1>Ciao {st.session_state.p_name} 👋</h1><b>Dimagrimento con attenzione alla massa muscolare</b></div>',unsafe_allow_html=True)
-    st.subheader("🔥 Bilancio di oggi")
-    st.markdown(f'''<div class="card"><div class="muted">CALORIE ASSUNTE / OBIETTIVO</div>
-    <div class="big">{b["eaten"]:,} / {b["target"]:,} kcal</div>
-    <div class="muted">Target calcolato · deficit {b["deficit"]} kcal · BMR {b["bmr_health"] or b["bmr_est"]} kcal</div>
-    <div class="{cls}">{msg}</div></div>'''.replace(",","."),unsafe_allow_html=True)
-    st.progress(min(max(b["eaten"]/max(b["target"],1),0),1))
-    c1,c2,c3=st.columns(3); h=st.session_state.health
-    with c1:
-        w=h.get("weight"); st.metric("⚖️ Peso",f"{w:.1f} kg" if w is not None else f"{st.session_state.p_weight:.1f} kg",help="Peso Health se disponibile, altrimenti profilo")
-    with c2:
-        steps=h.get("steps_today"); st.metric("👣 Passi",f"{int(steps):,}".replace(",",".") if steps is not None else "—")
-    with c3:
-        burn=h.get("calories_today"); st.metric("🔥 Calorie totali rilevate",f"{int(burn):,} kcal".replace(",",".") if burn is not None else "—")
-    if burn is None:
-        st.info("💡 Dati Health non ancora sincronizzati in questa sessione. Vai su **Attività** → collega Google Health / Fit → **Sincronizza dati reali**.")
-    else:
-        active=max(0,round(float(burn)-effective_bmr()))
-        st.caption(f"Health rileva {round(float(burn)):,} kcal totali oggi. Attività sopra il BMR: circa {active:,} kcal. Non viene sommata automaticamente al target alimentare.")
+    b=balance()
+    rem=b["remaining"]
+    msg=f"Ti restano {rem:,} kcal".replace(",",".") if rem>=0 else f"Sei sopra il target di {abs(rem):,} kcal".replace(",",".")
+    cls="ok" if rem>=0 else "bad"
+    target_label="budget dinamico" if b["using_observed"] else "target stimato"
+    st.markdown(f"""<div class="card"><div class="muted">CALORIE ASSUNTE / {target_label.upper()}</div>
+    <div class="big">{b["eaten"]:,} / {b["live_target"]:,} kcal</div>
+    <div class="muted">Target profilo {b["target"]:,} · deficit {b["deficit"]} kcal · BMR stimato {b["bmr_est"]} kcal</div>
+    <div class="{cls}">{msg}</div></div>""".replace(",","."),unsafe_allow_html=True)
+    st.progress(min(max(b["eaten"]/max(b["live_target"],1),0),1))
     st.subheader("🍽️ Oggi")
     d=current_day_name(); ms=st.session_state.meal_plan.get(d) or next(iter(st.session_state.meal_plan.values()))
     for mn,m in list(ms.items())[:2]:
@@ -353,15 +454,45 @@ elif st.session_state.page=="Attività":
                 with cc[i%3]: st.metric(lab,"Non disponibile" if val is None else f"{val:.1f} {unit}")
             if h.get("calories_today") is not None:
                 active=max(0,round(float(h["calories_today"])-effective_bmr()))
-                st.info(f"🔥 Attività sopra il BMR: circa **{active:,} kcal** oggi. È una derivazione locale, non un dato separato fornito da Google Fit.")
+                b=balance()
+                st.info(f"🔥 Google Fit rileva **{round(float(h['calories_today'])):,} kcal** totali oggi. Sopra il BMR stimato: circa **{active:,} kcal**. Budget alimentare dinamico: **{b['live_target']:,} kcal** (consumo osservato − deficit {b['deficit']} kcal).")
             if h.get("weight") is not None and h.get("body_fat") is not None:
                 fat=h["weight"]*h["body_fat"]/100; lean=h["weight"]-fat
                 c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
             st.divider(); st.subheader("🧪 Diagnostica")
+            st.caption("V6 non somma più alla cieca tutte le sorgenti per passi e calorie: prima cerca lo stream derivato di Google Fit, progettato per la vista unificata.")
             for k,x in st.session_state.diagnostics.items():
-                if x["status"]=="available": st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
+                if x["status"]=="available":
+                    if x.get("source_id"):
+                        st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
+                        st.caption(f"Sorgente usata: `{x.get('source_label',x['source_id'])}` · {x.get('source_reason','')}")
+                    else:
+                        st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
                 elif x["status"]=="no_data": st.warning(f"○ {k}: nessun dato restituito · {x['type']}")
+                elif x["status"]=="source_error": st.error(f"✕ {k}: impossibile leggere l'elenco delle sorgenti · HTTP {x.get('http','')} · {x.get('detail','')}")
                 else: st.error(f"✕ {k}: HTTP {x.get('http','')} · {x.get('detail','')}")
+            source_tabs=[k for k in ("steps","calories") if st.session_state.health.get("source_catalogs",{}).get(k)]
+            if source_tabs:
+                with st.expander("🔎 Sorgenti rilevate da Google Fit"):
+                    for key in source_tabs:
+                        st.markdown(f"**{key}**")
+                        rows=st.session_state.health["source_catalogs"][key]
+                        st.dataframe(pd.DataFrame(rows)[["name","type","app","device","id"]],use_container_width=True,hide_index=True)
+                    st.caption("Le sorgenti visibili dipendono dagli scope OAuth e dall'account. Google Fit documenta che l'aggregate per dataTypeName include tutte le sorgenti che forniscono quel tipo; per questo V6 preferisce uno stream derivato specifico quando disponibile.")
+            comparisons=st.session_state.health.get("source_comparisons",{})
+            if comparisons:
+                with st.expander("🧭 Confronto: stream scelto vs tutte le sorgenti"):
+                    for key,cmp in comparisons.items():
+                        sel=cmp.get("selected"); alls=cmp.get("all_sources"); diff=cmp.get("difference")
+                        if sel is not None and alls is not None:
+                            unit="passi" if key=="steps" else "kcal"
+                            st.write(f"**{key}** — stream scelto: **{sel:,.1f} {unit}** · tutte le sorgenti: **{alls:,.1f} {unit}**".replace(",","."))
+                            if diff and abs(diff)>0.1:
+                                st.warning(f"Differenza rilevata: **{diff:,.1f} {unit}**. Questo è esattamente il caso che V6 vuole rendere visibile invece di sommare automaticamente.".replace(",","."))
+                            else:
+                                st.success("Nessuna differenza significativa tra i due risultati per oggi.")
+            if h.get("weight") is None or h.get("body_fat") is None:
+                st.caption("ℹ️ Peso e composizione corporea non risultano disponibili nella sorgente Google Fit attuale. Il profilo locale resta il fallback per il calcolo energetico.")
             metric=st.selectbox("Storico",["steps","calories","weight","body_fat","distance"]); hh=st.session_state.health_history.get(metric,[])
             if hh:
                 df=pd.DataFrame(hh); df["date"]=pd.to_datetime(df["date"]); st.line_chart(df.set_index("date")["value"])
@@ -388,4 +519,7 @@ else:
     st.subheader("🎯 Obiettivo energetico")
     st.metric("Target alimentare stimato",f"{ep['target']:,} kcal/giorno".replace(",","."))
     c1,c2=st.columns(2); c1.metric("BMR stimato",f"{ep['bmr_est']:,} kcal".replace(",",".")); c2.metric("Mantenimento stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
-    st.caption("Il target è una stima basata su Mifflin-St Jeor + livello di attività + deficit scelto. Non è una prescrizione medica. I dati reali di Health vengono mostrati separatamente e serviranno a rendere il motore più preciso nelle prossime versioni.")
+    b=balance()
+    if b["using_observed"]:
+        st.info(f"🔥 Con i dati Health di oggi, il budget dinamico è circa **{b['live_target']:,} kcal/giorno**: consumo osservato {b['observed_burn']:,} − deficit {b['deficit']} kcal.")
+    st.caption("Il target di profilo è una stima basata su Mifflin-St Jeor + livello di attività + deficit scelto. Il budget dinamico usa il consumo totale osservato da Health quando disponibile. Non è una prescrizione medica.")
