@@ -265,42 +265,36 @@ def source_label(src):
     return " · ".join(bits)
 
 def choose_preferred_source(dtype,sources):
-    """Select the safest source.
+    """Choose a source without mislabeling phone data as Watch data.
 
-    For steps, prefer a populated Samsung top_level source. Google Fit's
-    estimated_steps/merge streams can be a derived union and returned 6267
-    while Samsung top_level returned 4643 in the current test.
+    The current Google Fit catalog exposes Samsung top_level sources with
+    phone model IDs (e.g. SM-S948B). These are not a verified Galaxy Watch
+    stream, so they must not become the app's authoritative Watch steps.
     """
     if dtype=="com.google.step_count.delta":
-        samsung=[
-            s for s in sources
-            if str(s.get("name","")).lower()=="top_level"
-            and str(s.get("app","")).lower()=="com.google.android.fit"
-            and s.get("device")
-        ]
-        if samsung:
-            # Prefer the source with an explicit Samsung device; if several
-            # exist, the caller's per-source diagnostics will expose all of them.
-            return samsung[-1]["id"], "Samsung top_level preferito per i passi"
-
-    preferred={
-        "com.google.step_count.delta":[
+        # Do not use Samsung top_level as the authoritative live Watch value.
+        # Keep Google derived streams available for diagnostics only.
+        preferred=[
             "derived:com.google.step_count.delta:com.google.android.gms:estimated_steps",
             "derived:com.google.step_count.delta:com.google.android.gms:merge_step_deltas",
-        ],
+        ]
+        ids={s.get("id") for s in sources}
+        for p in preferred:
+            if p in ids:
+                return p, "Google Fit derived — solo diagnostica, non Watch verificato"
+        return None, "nessuna sorgente Watch verificata disponibile"
+
+    preferred={
         "com.google.calories.expended":[
             "derived:com.google.calories.expended:com.google.android.gms:merge_calories_expended",
             "derived:com.google.calories.expended:com.google.android.gms:platform_calories_expended",
         ],
     }.get(dtype,[])
-
     ids={s.get("id") for s in sources}
     for p in preferred:
         if p in ids:
-            return p, "stream derivato Google Fit preferito"
-    if sources:
-        return sources[0].get("id"), "prima sorgente disponibile"
-    return None, "nessuna sorgente disponibile"
+            return p, "stream derivato Google Fit"
+    return (sources[0].get("id"), "prima sorgente disponibile") if sources else (None,"nessuna sorgente disponibile")
 
 def source_catalog(dtype):
     sources,r=list_datasources(dtype)
@@ -527,7 +521,14 @@ def sync_health(days=14):
             data[key]=None; hist[key]=[]; diag[key]={"status":"error","type":dtype,"detail":str(e)}
     # These are the exact live values calculated above from today's raw
     # dataset for the selected Google Fit derived streams.
-    data["steps_today"]=data.get("steps")
+    # V13: the Google derived step stream is retained for diagnostics, but is
+    # not treated as Galaxy Watch data. A phone Samsung top_level source is
+    # explicitly excluded from the authoritative dashboard value.
+    if diag.get("steps",{}).get("source_reason","").startswith("Google Fit derived"):
+        data["steps_today"]=None
+        data["steps_source_verified"]=False
+    else:
+        data["steps_today"]=data.get("steps")
     # Never expose an obviously impossible calorie value to the food budget.
     # Keep the raw value in diagnostics for investigation.
     cal=data.get("calories")
@@ -682,7 +683,7 @@ elif st.session_state.page=="Attività":
                 fat=h["weight"]*h["body_fat"]/100; lean=h["weight"]-fat
                 c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
             st.divider(); st.subheader("🧪 Diagnostica")
-            st.caption("V12: per i passi viene preferita la sorgente Samsung top_level popolata; le sorgenti Google derivate restano per confronto.")
+            st.info("📱 V13: Google Fit espone una sorgente Samsung top_level associata a un dispositivo telefono (es. SM-S948B). Non la usiamo come passi del Galaxy Watch. Le sorgenti Google derivate restano visibili solo per diagnosi. Per leggere in modo affidabile i dati del Watch, il percorso definitivo sarà Samsung Health → Health Connect → componente Android nativo.")
             diag_view=st.session_state.get("diagnostics",{})
             comp_steps=diag_view.get("_source_compare_steps",[])
             comp_cal=diag_view.get("_source_compare_calories",[])
