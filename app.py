@@ -33,6 +33,8 @@ FIT_SCOPES = (
 )
 ROME = ZoneInfo("Europe/Rome")
 
+def today(): return datetime.now(ROME).date().isoformat()
+
 st.markdown("""
 <style>
 #MainMenu, footer, header {visibility:hidden;}
@@ -128,7 +130,6 @@ _ingest_native_health_bridge()
 
 # ---------------- State ----------------
 def sid(): return uuid.uuid4().hex[:10]
-def today(): return datetime.now(ROME).date().isoformat()
 
 def init_plan():
     def ing(n,q,u,k): return {"id":sid(),"name":n,"qty":q,"unit":u,"kcal":k}
@@ -783,170 +784,139 @@ elif st.session_state.page=="Dispensa":
 # ---------------- Attività / Health ----------------
 elif st.session_state.page=="Attività":
     st.title("🏃 Attività & Health")
-    if st.session_state.get("health", {}).get("native_health_snapshot"):
-        p = st.session_state.health.get("provider", {})
-        st.success(f"✓ Health Connect nativo attivo · snapshot ricevuto {st.session_state.last_sync or '—'}")
+    h=st.session_state.get("health",{})
+    native=bool(h.get("native_health_snapshot"))
+
+    if native:
+        p=h.get("provider",{})
+        st.success(f"✓ Health Connect nativo attivo · snapshot ricevuto {st.session_state.get('last_sync') or '—'}")
         st.caption(f"Bridge Android {p.get('bridge_version') or '—'} · Samsung Health → Health Connect → MyDietApp")
+        trust=h.get("native_health_payload",{}).get("trust",{})
+        st.write("**Fonte produttiva:** Health Connect nativo")
+        c1,c2,c3=st.columns(3)
+        c1.metric("Passi verificati", "Sì" if trust.get("steps") else "No")
+        c2.metric("Calorie totali verificate", "Sì" if trust.get("total_calories") else "No")
+        c3.metric("Snapshot", h.get("date") or "—")
     else:
         st.caption("Dati reali separati dal target alimentare. Health Connect nativo è la fonte produttiva; Google Fit resta solo diagnostica.")
-    cid=st.secrets.get("GOOGLE_CLIENT_ID"); cs=st.secrets.get("GOOGLE_CLIENT_SECRET"); ru=st.secrets.get("REDIRECT_URI")
-    if st.session_state.get("health", {}).get("native_health_snapshot"):
-        st.info("I dati mostrati sotto arrivano dal bridge Android Health Connect. Google Fit non viene interrogato per il bilancio.")
-    elif not cid or not cs or not ru: st.error("Mancano GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET o REDIRECT_URI nei secrets.")
-    else:
-        if "code" in st.query_params:
-            r=requests.post("https://oauth2.googleapis.com/token",data={"client_id":cid,"client_secret":cs,"code":st.query_params["code"],"grant_type":"authorization_code","redirect_uri":ru},timeout=20)
-            if r.status_code==200:
-                x=r.json(); st.session_state.access_token=x["access_token"]
-                if x.get("refresh_token"): st.session_state.refresh_token=x["refresh_token"]
-                st.query_params.clear(); st.rerun()
-            else: st.error("Autorizzazione Google non riuscita: "+r.text[:500])
-        if "access_token" not in st.session_state:
-            url="https://accounts.google.com/o/oauth2/v2/auth?client_id="+urllib.parse.quote(cid.strip())+"&redirect_uri="+urllib.parse.quote(ru.strip(),safe="")+"&response_type=code&scope="+urllib.parse.quote(FIT_SCOPES,safe="")+"&access_type=offline&prompt=consent"
-            st.warning("🔗 Google non è collegato in questa sessione. Dopo l'autorizzazione, torna qui.")
-            st.link_button("🔗 Collega Google Health / Fit",url,use_container_width=True)
+
+        cid=st.secrets.get("GOOGLE_CLIENT_ID"); cs=st.secrets.get("GOOGLE_CLIENT_SECRET"); ru=st.secrets.get("REDIRECT_URI")
+        if not cid or not cs or not ru:
+            st.error("Mancano GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET o REDIRECT_URI nei secrets.")
         else:
-            st.success("Account Google collegato in questa sessione")
-            if st.button("🔄 Sincronizza dati reali",type="primary",use_container_width=True):
-                try:
-                    provider=get_health_provider()
-                    data,hist,diag=provider.sync()
-                    data["provider"]=provider.info()
-                    st.session_state.health=data; st.session_state.health_history=hist; st.session_state.diagnostics=diag
-                    st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
-                    st.rerun()
-                except Exception as e: st.error(f"Sincronizzazione fallita: {e}")
-        h=st.session_state.health
-        provider_info=h.get("provider",{}) if isinstance(h,dict) else {}
-        if provider_info:
-            st.caption(f"Provider Health attivo: **{provider_info.get('name','—')}** · stato: **{provider_info.get('status','—')}**")
-        if h:
-            st.divider(); st.subheader("📊 Dati di oggi")
-            cards=[("👣 Passi oggi",h.get("steps_today"),"passi"),("🔥 Calorie totali",h.get("calories_today"),"kcal"),("⚖️ Peso",h.get("weight"),"kg"),("🟠 Massa grassa",h.get("body_fat"),"%"),("📏 Distanza",h.get("distance_today"),"km"),("🧬 BMR",h.get("bmr"),"kcal/giorno")]
-            cc=st.columns(3)
-            for i,(lab,val,unit) in enumerate(cards):
-                with cc[i%3]: st.metric(lab,"Non disponibile" if val is None else f"{val:.1f} {unit}")
-            if h.get("calories_today") is not None:
+            if "code" in st.query_params:
+                r=requests.post("https://oauth2.googleapis.com/token",data={"client_id":cid,"client_secret":cs,"code":st.query_params["code"],"grant_type":"authorization_code","redirect_uri":ru},timeout=20)
+                if r.status_code==200:
+                    x=r.json(); st.session_state.access_token=x["access_token"]
+                    if x.get("refresh_token"): st.session_state.refresh_token=x["refresh_token"]
+                    st.query_params.clear(); st.rerun()
+                else: st.error("Autorizzazione Google non riuscita: "+r.text[:500])
+            if "access_token" not in st.session_state:
+                url="https://accounts.google.com/o/oauth2/v2/auth?client_id="+urllib.parse.quote(cid.strip())+"&redirect_uri="+urllib.parse.quote(ru.strip(),safe="")+"&response_type=code&scope="+urllib.parse.quote(FIT_SCOPES,safe="")+"&access_type=offline&prompt=consent"
+                st.warning("🔗 Google non è collegato in questa sessione. Dopo l'autorizzazione, torna qui.")
+                st.link_button("🔗 Collega Google Health / Fit",url,use_container_width=True)
+            else:
+                st.success("Account Google collegato in questa sessione")
+                if st.button("🔄 Sincronizza dati reali",type="primary",use_container_width=True):
+                    try:
+                        provider=get_health_provider()
+                        data,hist,diag=provider.sync()
+                        data["provider"]=provider.info()
+                        st.session_state.health=data; st.session_state.health_history=hist; st.session_state.diagnostics=diag
+                        st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+                        st.rerun()
+                    except Exception as e: st.error(f"Sincronizzazione fallita: {e}")
+
+    # IMPORTANT: Native bridge data is rendered outside the Google-auth branch.
+    # This keeps Health Connect values visible when the app is opened directly
+    # from the Android bridge.
+    h=st.session_state.get("health",{})
+    provider_info=h.get("provider",{}) if isinstance(h,dict) else {}
+    if provider_info:
+        st.caption(f"Provider Health attivo: **{provider_info.get('name','—')}** · stato: **{provider_info.get('status','—')}**")
+
+    if h:
+        st.divider(); st.subheader("📊 Dati di oggi")
+        cards=[
+            ("👣 Passi oggi",h.get("steps_today"),"passi"),
+            ("🔥 Calorie totali",h.get("calories_today"),"kcal"),
+            ("⚡ Calorie attive",h.get("active_calories_today"),"kcal"),
+            ("⚖️ Peso",h.get("weight"),"kg"),
+            ("🟠 Massa grassa",h.get("body_fat"),"%"),
+            ("📏 Distanza",h.get("distance_today"),"km"),
+            ("🧬 BMR",h.get("bmr"),"kcal/giorno"),
+            ("❤️ FC media",h.get("heart_rate_avg"),"bpm"),
+            ("😴 Sonno",h.get("sleep_minutes"),"min"),
+        ]
+        cc=st.columns(3)
+        for i,(lab,val,unit) in enumerate(cards):
+            with cc[i%3]:
+                if val is None:
+                    st.metric(lab,"Non disponibile")
+                else:
+                    try:
+                        if unit in ("passi","kcal","min"): display=f"{float(val):,.0f} {unit}".replace(",",".")
+                        elif unit=="bpm": display=f"{float(val):.0f} {unit}"
+                        else: display=f"{float(val):.1f} {unit}"
+                    except Exception: display=f"{val} {unit}"
+                    st.metric(lab,display)
+
+        if native:
+            st.info("I dati mostrati sopra arrivano direttamente dal bridge Android tramite Health Connect. Google Fit non viene interrogato per il bilancio.")
+            if h.get("calories_today") is not None and h.get("calories_source_verified"):
                 active=max(0,round(float(h["calories_today"])-effective_bmr()))
                 b=balance()
-                st.info(f"🔥 Google Fit rileva **{round(float(h['calories_today'])):,} kcal** totali oggi. Sopra il BMR stimato: circa **{active:,} kcal**. Budget alimentare dinamico: **{b['live_target']:,} kcal** (consumo osservato − deficit {b['deficit']} kcal).")
-            if h.get("weight") is not None and h.get("body_fat") is not None:
-                fat=h["weight"]*h["body_fat"]/100; lean=h["weight"]-fat
-                c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
+                st.info(f"🔥 Consumo osservato **{round(float(h['calories_today'])):,} kcal**. Sopra il BMR stimato: circa **{active:,} kcal**. Budget alimentare dinamico: **{b['live_target']:,} kcal**.".replace(",","."))
+            elif h.get("calories_today") is not None:
+                st.warning("⚠️ Le calorie totali Health Connect sono ricevute, ma non sono ancora considerate verificate per il calcolo del budget. Prima validiamo la provenienza Galaxy Watch.")
+        else:
+            st.info("Google Fit legacy è usato solo come diagnostica; i valori non verificati non entrano nel bilancio produttivo.")
+
+        if h.get("weight") is not None and h.get("body_fat") is not None:
+            fat=float(h["weight"])*float(h["body_fat"])/100; lean=float(h["weight"])-fat
+            c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
+
+        if native:
+            payload=h.get("native_health_payload",{})
+            with st.expander("🔎 Dettagli snapshot Health Connect"):
+                st.write("**Schema:**",payload.get("schema","—"))
+                st.write("**Bridge:**",payload.get("bridge_version","—"))
+                st.write("**Data:**",payload.get("date","—"))
+                st.write("**Trust:**",payload.get("trust",{}))
+                st.caption("Il payload compatto contiene solo metriche normalizzate e informazioni di trust; le sorgenti dettagliate restano nel bridge Android.")
+        else:
             st.divider(); st.subheader("🧪 Diagnostica")
-            st.info("📱 V16: Health Connect nativo è il provider produttivo quando è presente uno snapshot del bridge. Google Fit legacy resta disponibile solo come diagnostica. I passi derivati (es. 6.299) e le calorie legacy (es. 3.789 kcal) NON vengono usati nel bilancio perché non possiamo dimostrare che rappresentino correttamente il Galaxy Watch Ultra 2. Il BMR Google Fit non viene usato: per ora il calcolo usa il profilo. Il provider definitivo sarà Samsung Health → Health Connect → componente Android nativo.")
-            if h.get("native_health_snapshot"):
-                trust = h.get("native_health_payload", {}).get("trust", {})
-                st.write("**Fonte produttiva:** Health Connect nativo")
-                st.write("Passi verificati:", "Sì" if trust.get("steps") else "No")
-                st.write("Calorie totali verificate:", "Sì" if trust.get("total_calories") else "No")
+            st.info("Google Fit legacy resta disponibile solo come diagnostica. I passi derivati e le calorie legacy non vengono usati nel bilancio perché non possiamo dimostrare che rappresentino correttamente il Galaxy Watch Ultra 2.")
 
             diag_view=st.session_state.get("diagnostics",{})
             comp_steps=diag_view.get("_source_compare_steps",[])
             comp_cal=diag_view.get("_source_compare_calories",[])
             if comp_steps:
-                with st.expander("📱 Confronto sorgenti — PASSI",expanded=True):
-                    st.dataframe(pd.DataFrame(comp_steps),use_container_width=True,hide_index=True)
+                with st.expander("📱 Confronto sorgenti — PASSI",expanded=True): st.dataframe(pd.DataFrame(comp_steps),use_container_width=True,hide_index=True)
             if comp_cal:
-                with st.expander("🔥 Confronto sorgenti — CALORIE"):
-                    st.dataframe(pd.DataFrame(comp_cal),use_container_width=True,hide_index=True)
+                with st.expander("🔥 Confronto sorgenti — CALORIE"): st.dataframe(pd.DataFrame(comp_cal),use_container_width=True,hide_index=True)
             if diag_view.get("_source_compare_error"):
                 st.warning(f"⚠️ Errore confronto sorgenti: {diag_view['_source_compare_error']}")
+
             for k,x in st.session_state.diagnostics.items():
-                # V11 adds special comparison entries whose values are lists.
-                # They are rendered above in their own tables, so skip them
-                # here instead of treating them as normal metric diagnostics.
-                if k.startswith("_source_compare_"):
-                    continue
-                if not isinstance(x,dict) or "status" not in x:
-                    continue
+                if k.startswith("_source_compare_"): continue
+                if not isinstance(x,dict) or "status" not in x: continue
                 if x["status"]=="available":
                     if x.get("source_id"):
                         st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
                         st.caption(f"Sorgente usata: `{x.get('source_label',x['source_id'])}` · {x.get('source_reason','')}")
-                        lq=x.get("live_query") or {}
-                        if lq.get("method")=="raw_dataset":
-                            st.caption(f"📡 Live oggi: dataset grezzo · {lq.get('points',0)} punti · valore {lq.get('value')}")
-                            if lq.get("raw_rows"):
-                                with st.expander(f"🔎 Punti grezzi di oggi — {k} ({len(lq['raw_rows'])})"):
-                                    st.dataframe(pd.DataFrame(lq["raw_rows"]),use_container_width=True,hide_index=True)
-                                    if k=="calories" and lq.get("raw_sum") is not None:
-                                        st.caption(f"Somma grezza: {lq['raw_sum']:.1f} · valore usato nel live: {lq.get('value')}")
-                        elif lq.get("method")=="raw_dataset_failed":
-                            st.warning(f"⚠️ Dataset grezzo non leggibile (HTTP {lq.get('http')}).")
-                    else:
-                        st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
+                    else: st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
                 elif x["status"]=="no_data": st.warning(f"○ {k}: nessun dato restituito · {x['type']}")
                 elif x["status"]=="source_error": st.error(f"✕ {k}: impossibile leggere l'elenco delle sorgenti · HTTP {x.get('http','')} · {x.get('detail','')}")
                 else: st.error(f"✕ {k}: HTTP {x.get('http','')} · {x.get('detail','')}")
-            hdiag=st.session_state.health
-            if hdiag.get("steps_untrusted_value") is not None:
-                st.warning(f"⚠️ Passi Google Fit non verificati: {round(float(hdiag['steps_untrusted_value'])):,}. Valore escluso dal Dashboard perché non attribuibile con certezza al Galaxy Watch.")
-            if hdiag.get("calories_untrusted_value") is not None:
-                st.warning(f"⚠️ Calorie Google Fit non verificate: {float(hdiag['calories_untrusted_value']):,.1f} kcal. Valore escluso dal budget alimentare finché non arriva da Health Connect.")
-            source_tabs=[k for k in ("steps","calories") if st.session_state.health.get("source_catalogs",{}).get(k)]
-            if source_tabs:
-                with st.expander("🔎 Sorgenti rilevate da Google Fit"):
-                    for key in source_tabs:
-                        st.markdown(f"**{key}**")
-                        rows=st.session_state.health["source_catalogs"][key]
-                        st.dataframe(pd.DataFrame(rows)[["name","type","app","device","id"]],use_container_width=True,hide_index=True)
-                    st.caption("Le sorgenti visibili dipendono dagli scope OAuth e dall'account. Google Fit documenta che l'aggregate per dataTypeName include tutte le sorgenti che forniscono quel tipo; per questo V6 preferisce uno stream derivato specifico quando disponibile.")
-            source_values=st.session_state.health.get("source_values",{})
-            if source_values:
-                with st.expander("🧩 Valori per singola sorgente (diagnostica)"):
-                    st.caption("Qui leggiamo separatamente le sorgenti visibili. Non vengono sommate: servono per capire da dove nasce il valore riconciliato di Google Fit.")
-                    for key,rows in source_values.items():
-                        if not rows: continue
-                        unit="passi" if key=="steps" else "kcal"
-                        st.markdown(f"**{key} — valori di oggi**")
-                        display=[]
-                        for row in rows:
-                            display.append({
-                                "device":row.get("device") or "—",
-                                "app":row.get("app") or "—",
-                                "nome":row.get("name") or "—",
-                                "valore":("{:.1f} {}".format(row["value"],unit) if row.get("value") is not None else row.get("error","nessun dato")),
-                            })
-                        st.dataframe(pd.DataFrame(display),use_container_width=True,hide_index=True)
-                        st.caption("La riga ✓ è lo stream attualmente scelto da MyDietApp. I dettagli sotto mostrano i singoli intervalli temporali restituiti da Google Fit.")
-                        for row in rows:
-                            pts=row.get("points_today",[])
-                            if not pts: continue
-                            label=row.get("name") or row.get("id") or "sorgente"
-                            mark="✓ SCELTA" if row.get("selected") else ""
-                            with st.expander(f"{label} {mark} · {len(pts)} intervalli"):
-                                pdf=pd.DataFrame(pts)
-                                if not pdf.empty:
-                                    pdf["value"]=pdf["value"].round(1)
-                                    st.dataframe(pdf,use_container_width=True,hide_index=True)
-                                    st.caption(f"Somma degli intervalli mostrati: {pdf['value'].sum():,.1f}".replace(",","."))
 
-            comparisons=st.session_state.health.get("source_comparisons",{})
-            if comparisons:
-                with st.expander("🧭 Confronto: stream scelto vs tutte le sorgenti"):
-                    for key,cmp in comparisons.items():
-                        sel=cmp.get("selected"); alls=cmp.get("all_sources"); diff=cmp.get("difference")
-                        if sel is not None and alls is not None:
-                            unit="passi" if key=="steps" else "kcal"
-                            st.write(f"**{key}** — stream scelto: **{sel:,.1f} {unit}** · tutte le sorgenti: **{alls:,.1f} {unit}**".replace(",","."))
-                            if diff and abs(diff)>0.1:
-                                st.warning(f"Differenza rilevata: **{diff:,.1f} {unit}**. Questo è esattamente il caso che V6 vuole rendere visibile invece di sommare automaticamente.".replace(",","."))
-                            else:
-                                st.success("Nessuna differenza significativa tra i due risultati per oggi.")
-            if h.get("weight") is None or h.get("body_fat") is None:
-                st.caption("ℹ️ Peso e composizione corporea non risultano disponibili nella sorgente Google Fit attuale. Il profilo locale resta il fallback per il calcolo energetico.")
-            with st.expander("🧱 Architettura Health — V14"):
-                st.write("**Contratto normalizzato:** passi · calorie totali · calorie attive · distanza · peso · massa grassa · massa magra · allenamenti · frequenza cardiaca · sonno.")
-                st.info("Dashboard, bilancio e attività ora dipendono dal concetto di **Health Provider**, non direttamente da Google Fit. Il provider attuale è Google Fit legacy; quello di produzione previsto è Health Connect tramite componente Android nativo.")
-                st.caption("Quando il bridge Android sarà pronto, potremo sostituire il provider senza riscrivere la logica dell'app.")
-            metric=st.selectbox("Storico",["steps","calories","weight","body_fat","distance"]); hh=st.session_state.health_history.get(metric,[])
-            if hh:
-                df=pd.DataFrame(hh); df["date"]=pd.to_datetime(df["date"]); st.line_chart(df.set_index("date")["value"])
-        elif "access_token" in st.session_state:
-            st.info("Premi 'Sincronizza dati reali' per leggere i dati disponibili.")
+    elif native:
+        st.warning("Il bridge è stato rilevato ma non contiene metriche leggibili. Ritorna al bridge Android, premi 'Leggi dati di oggi' e poi 'Invia dati'.")
+    else:
+        st.info("Nessun dato Health disponibile in questa sessione.")
 
 # ---------------- Profilo ----------------
+
 else:
     st.title("👤 Profilo")
     with st.form("profile"):
