@@ -12,7 +12,7 @@ from collections import defaultdict
 import uuid
 
 # ============================================================
-# MyDietApp v21
+# MyDietApp v22
 # Health-first release:
 # - real Google Fit data diagnostics
 # - robust aggregation for cumulative vs point data
@@ -219,9 +219,21 @@ def activity_summary():
             })
         except Exception:
             continue
+    native_active=round(float(h.get("active_calories_today") or 0))
+    # If Health Connect does not expose active calories, use the same transparent
+    # estimate already used by the energy balance instead of displaying 0.
+    estimated_active=0
+    try:
+        b=balance()
+        estimated_active=int(b.get("active_observed") or 0) if b.get("using_observed") else 0
+    except Exception:
+        estimated_active=0
+    active=max(native_active, estimated_active)
+    active_source="Health Connect" if native_active > 0 else ("stima" if estimated_active > 0 else "non disponibile")
     return {
         "steps":int(float(h.get("steps_today") or 0)),
-        "active_calories":round(float(h.get("active_calories_today") or 0)),
+        "active_calories":active,
+        "active_source":active_source,
         "distance_km":float(h.get("distance_today") or 0),
         "workouts":int(float(h.get("workouts_today") or len(normalized) or 0)),
         "details":normalized,
@@ -778,7 +790,7 @@ if st.session_state.page=="Home":
             st.markdown("**🏃 Attività di oggi**")
             ac1,ac2,ac3,ac4=st.columns(4)
             ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
-            ac2.metric("⚡ Calorie attive", f"{a['active_calories']:,} kcal".replace(",","."))
+            ac2.metric("⚡ Calorie attive stimate", f"{a['active_calories']:,} kcal".replace(",","."))
             ac3.metric("📏 Distanza", f"{a['distance_km']:.2f} km")
             ac4.metric("🏋️ Allenamenti", str(a['workouts']))
             if a["details"]:
@@ -786,7 +798,7 @@ if st.session_state.page=="Home":
                     st.write(f"• **{w['name']}** · {w['duration_minutes']} min")
             else:
                 st.caption("Nessuna sessione di allenamento registrata. I passi e le calorie attive continuano comunque ad aggiornarsi.")
-            st.caption("Le calorie attive sono già comprese nel consumo totale Health osservato: non vengono sommate una seconda volta.")
+            st.caption(f"Fonte calorie attive: {a['active_source']}. Sono già comprese nel consumo totale Health osservato e non vengono sommate una seconda volta.")
     st.subheader("🍽️ Oggi")
     st.caption("Registra i pasti quando li mangi: il totale in alto si aggiorna automaticamente.")
     d=current_day_name(); ms=st.session_state.meal_plan.get(d)
@@ -826,16 +838,15 @@ if st.session_state.page=="Home":
     st.subheader("⚡ Bilancio energetico di oggi")
     if b["using_observed"]:
         net_so_far=b["eaten"]-b["observed_burn"]
-        projected_deficit=b["projected_burn"]-b["eaten"]
         c1,c2,c3,c4=st.columns(4)
         c1.metric("🍽️ Assunte",f"{b['eaten']:,} kcal".replace(",","."))
         c2.metric("🔥 Consumate finora",f"{b['observed_burn']:,} kcal".replace(",","."))
         c3.metric("🎯 Target alimentare",f"{b['live_target']:,} kcal".replace(",","."))
-        c4.metric("📉 Deficit previsto",f"{projected_deficit:,} kcal".replace(",","."))
+        c4.metric("📉 Deficit obiettivo",f"{b['deficit']:,} kcal".replace(",","."))
         if net_so_far < 0:
-            st.success(f"Sei attualmente a **{abs(net_so_far):,} kcal sotto il consumo osservato**. Il dato continua ad aggiornarsi con Health.".replace(",","."))
+            st.success(f"Sei attualmente a **{abs(net_so_far):,} kcal sotto il consumo osservato**. Il deficit obiettivo di oggi è **{b['deficit']} kcal**. Il dato continua ad aggiornarsi con Health.".replace(",","."))
         elif net_so_far > 0:
-            st.warning(f"Sei attualmente a **{net_so_far:,} kcal sopra il consumo osservato**. È un dato provvisorio della giornata.".replace(",","."))
+            st.warning(f"Sei attualmente a **{net_so_far:,} kcal sopra il consumo osservato**. Il deficit obiettivo di oggi è **{b['deficit']} kcal**. È un dato provvisorio della giornata.".replace(",","."))
         else:
             st.info("Assunte e consumate sono momentaneamente allo stesso livello.")
         if h.get("active_calories_today") is not None:
@@ -997,7 +1008,7 @@ elif st.session_state.page=="Attività":
         st.divider(); st.subheader("🏃 Attività di oggi")
         ac1,ac2,ac3=st.columns(3)
         ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
-        ac2.metric("⚡ Calorie attive", f"{a['active_calories']:,} kcal".replace(",","."))
+        ac2.metric("⚡ Calorie attive stimate", f"{a['active_calories']:,} kcal".replace(",","."))
         ac3.metric("📏 Distanza", f"{a['distance_km']:.2f} km")
         if a["details"]:
             for w in a["details"]:
