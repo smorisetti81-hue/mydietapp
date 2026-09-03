@@ -13,7 +13,7 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v33
+# MyDietApp v36
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
 # - recommendations adapt to the current dynamic calorie budget
@@ -190,7 +190,8 @@ def init_plan():
 _defaults = {
     "page":"Home", "meal_plan":init_plan(), "overrides":{}, "eaten":{}, "manual_foods":[],
     "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None, "water_history":{},
-    "plan_week_start":None, "plan_history":{}, "out_lunch_days":["Giovedì"], "out_dinner_days":["Giovedì"]
+    "plan_week_start":None, "plan_history":{}, "out_lunch_days":["Giovedì"], "out_dinner_days":["Giovedì"],
+    "pantry":{}, "shopping_checked":{}, "smart_food_advice":None
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
@@ -424,6 +425,77 @@ def meal_recommendation(day, meal_name, balance_data=None):
     }
 
 
+def eaten_items_today():
+    """Return foods actually registered as eaten today, for the smart assistant context."""
+    d=current_day_name()
+    out=[]
+    for meal_name, meal in st.session_state.meal_plan.get(d, {}).items():
+        for item in active_items(meal):
+            if st.session_state.eaten.get(item["id"], False):
+                out.append({"meal":meal_name,"name":item["name"],"kcal":round(item_kcal(item)),"quantity":quantity_caption(item)})
+    for x in st.session_state.manual_foods:
+        if x.get("date")==today():
+            out.append({"meal":"Registrato manualmente","name":x.get("name","Alimento"),"kcal":round(float(x.get("kcal",0))),"quantity":""})
+    return out
+
+
+def smart_assistant_context(balance_data=None):
+    """Build a compact, factual context for an optional AI recommendation."""
+    b=balance_data or balance()
+    d=current_day_name()
+    ms=st.session_state.meal_plan.get(d,{})
+    planned=[]
+    for meal_name in ["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]:
+        meal=ms.get(meal_name)
+        if not meal: continue
+        items=active_items(meal)
+        planned.append({
+            "meal":meal_name,
+            "name":meal.get("name",meal_name),
+            "kcal":round(sum(item_kcal(i) for i in items)),
+            "items":[i.get("name") for i in items],
+            "out_of_home":out_of_home_meal_configured(d,meal_name) or "FUORI CASA" in str(meal.get("name","")).upper()
+        })
+    return {
+        "day":d,
+        "remaining_kcal":int(b.get("remaining",0)),
+        "daily_food_target":int(b.get("live_target") or b.get("target") or 0),
+        "eaten_kcal":int(b.get("eaten",0)),
+        "deficit_target":int(b.get("deficit",0)),
+        "steps":int(b.get("steps",0) or 0),
+        "observed_burn":int(b.get("observed_burn",0) or 0),
+        "projected_burn":int(b.get("projected_burn",0) or 0),
+        "planned_meals":planned,
+        "eaten_items":eaten_items_today(),
+    }
+
+
+def run_smart_food_advice(balance_data=None):
+    """Ask Gemini for a practical next-meal suggestion. Arithmetic stays in Python."""
+    ctx=smart_assistant_context(balance_data)
+    prompt=f'''Sei l'assistente alimentare di MyDietApp. Dai un consiglio pratico per il PROSSIMO pasto della giornata, usando esclusivamente i dati forniti.
+
+CONTESTO:
+{json.dumps(ctx,ensure_ascii=False,indent=2)}
+
+REGOLE IMPORTANTI:
+- Il numero "remaining_kcal" è il budget alimentare residuo calcolato da MyDietApp: non ricalcolarlo e non modificarlo.
+- Non inventare calorie bruciate, attività future, alimenti o dati nutrizionali non presenti.
+- L'utente preferisce mangiare a porzioni e ODIA pesare gli alimenti: parla di porzioni normali, non di grammi.
+- Se il pasto previsto rientra nel budget, suggerisci di seguirlo senza complicarlo.
+- Se il pasto previsto supera il budget, proponi una modifica semplice o un'alternativa già presente nel piano.
+- Se il pasto è FUORI CASA, suggerisci di usare Mensa Smart invece di inventare un piatto.
+- Non dare consigli medici.
+- Non inventare valori di proteine: il database attuale non fornisce ancora dati proteici completi.
+
+Rispondi in massimo 5 righe, con questo formato:
+🍽️ PROSSIMO PASTO: ...
+💡 CONSIGLIO: ...
+🔥 BUDGET: ... kcal disponibili
+📌 MOTIVO: ...'''
+    return genai.GenerativeModel("gemini-2.5-flash").generate_content(prompt).text.strip()
+
+
 def show_daily_meal_recommendation(meal_name, day, balance_data):
     rec=meal_recommendation(day,meal_name,balance_data)
     if not rec:
@@ -451,11 +523,52 @@ def show_daily_meal_recommendation(meal_name, day, balance_data):
         st.write("💡 " + rec["advice"])
 
 def grocery():
+    """Aggregate quantities required by the active weekly plan."""
     d=defaultdict(lambda:[0,"",""])
     for _,_,m in meals():
         for i in active_items(m):
             key=(i["name"].strip().lower(),i["unit"]); d[key][0]+=float(i["qty"]); d[key][1]=i["unit"]; d[key][2]=i["name"]
     return sorted(d.values(),key=lambda x:x[2].lower())
+
+def _pantry_key(name, unit):
+    return f"{str(name).strip().lower()}|{str(unit).strip().lower()}"
+
+def pantry_items():
+    """Return pantry items as a sorted list with display names and quantities."""
+    out=[]
+    for key,item in st.session_state.get("pantry",{}).items():
+        if not isinstance(item,dict):
+            continue
+        q=float(item.get("qty",0) or 0)
+        if q <= 0:
+            continue
+        out.append({
+            "key":key, "name":str(item.get("name", "Alimento")),
+            "qty":q, "unit":str(item.get("unit", "g")),
+        })
+    return sorted(out,key=lambda x:x["name"].lower())
+
+def set_pantry_qty(name, unit, qty):
+    key=_pantry_key(name,unit)
+    q=max(0.0,float(qty))
+    if q <= 0:
+        st.session_state.pantry.pop(key,None)
+    else:
+        st.session_state.pantry[key]={"name":str(name).strip(),"unit":str(unit).strip(),"qty":q}
+
+def add_pantry_qty(name, unit, delta):
+    key=_pantry_key(name,unit)
+    current=float(st.session_state.get("pantry",{}).get(key,{}).get("qty",0) or 0)
+    set_pantry_qty(name,unit,current+float(delta))
+
+def shopping_list():
+    """Return plan needs minus what is currently in the pantry."""
+    rows=[]
+    for required,unit,name in grocery():
+        stock=float(st.session_state.get("pantry",{}).get(_pantry_key(name,unit),{}).get("qty",0) or 0)
+        need=max(0.0,float(required)-stock)
+        rows.append({"name":name,"unit":unit,"required":float(required),"pantry":stock,"need":need})
+    return rows
 
 def water_today_ml():
     """Return today's water intake in ml, stored by calendar date."""
@@ -1123,6 +1236,19 @@ if st.session_state.page=="Home":
     show_daily_meal_recommendation("🍽️ Pranzo", d, b)
     show_daily_meal_recommendation("🌙 Cena", d, b)
 
+    with st.container(border=True):
+        st.markdown("### 🤖 Consiglio intelligente")
+        st.caption("Un consiglio opzionale basato su ciò che hai già mangiato, sul piano di oggi e sulle calorie ancora disponibili. I calcoli del budget restano gestiti da MyDietApp.")
+        if st.button("✨ Dammi un consiglio per il prossimo pasto", key="smart_food_advice_btn", use_container_width=True):
+            with st.spinner("Sto valutando il tuo piano di oggi…"):
+                try:
+                    advice=run_smart_food_advice(b)
+                    st.session_state.smart_food_advice=advice
+                except Exception as e:
+                    st.error(f"Errore nel consiglio AI: {e}")
+        if st.session_state.get("smart_food_advice"):
+            st.info(st.session_state.smart_food_advice)
+
     st.subheader("🍽️ Oggi")
     st.caption("Registra i pasti quando li mangi: il totale in alto si aggiorna automaticamente.")
     d=current_day_name(); ms=st.session_state.meal_plan.get(d)
@@ -1368,9 +1494,81 @@ Se il budget residuo non consente di seguire esattamente il piano, proponi la co
 
 # ---------------- Dispensa ----------------
 elif st.session_state.page=="Dispensa":
-    st.title("🛒 Dispensa")
-    st.caption("La lista viene calcolata localmente dal piano: rimuovi o aggiungi un alimento e cambia subito.")
-    for q,u,n in grocery(): st.checkbox(f"{n} — {q:g} {u}",key="g_"+n+u)
+    st.title("🛒 Dispensa & Spesa")
+    st.caption("La lista della spesa nasce dal piano settimanale e viene ridotta automaticamente da ciò che hai già in casa.")
+
+    tab_shop, tab_pantry = st.tabs(["🛒 Lista della spesa", "📦 La mia dispensa"])
+
+    with tab_shop:
+        rows=shopping_list()
+        if not rows:
+            st.info("Il piano non contiene ancora alimenti da acquistare.")
+        else:
+            total=len(rows)
+            to_buy=sum(1 for r in rows if r["need"]>0)
+            st.subheader(f"🛒 Da acquistare · {to_buy}/{total}")
+            st.caption("La quantità richiesta è quella del piano. La colonna 'Hai' viene sottratta automaticamente.")
+            for r in rows:
+                key=_pantry_key(r["name"],r["unit"])
+                checked_key="shop_"+key.replace("|","_")
+                if r["need"]<=0:
+                    st.success(f"✓ {r['name']} · {r['required']:g} {r['unit']} · hai già {r['pantry']:g} {r['unit']}")
+                else:
+                    c1,c2,c3,c4=st.columns([3,1.2,1.2,1.3])
+                    with c1:
+                        st.checkbox(f"{r['name']}",key=checked_key,value=bool(st.session_state.shopping_checked.get(key,False)))
+                    with c2: st.write(f"Piano **{r['required']:g} {r['unit']}**")
+                    with c3: st.write(f"Hai **{r['pantry']:g} {r['unit']}**")
+                    with c4:
+                        if st.button("➕ In dispensa",key="buy_"+key.replace("|","_"),use_container_width=True):
+                            add_pantry_qty(r["name"],r["unit"],r["need"])
+                            st.session_state.shopping_checked[key]=True
+                            st.rerun()
+
+            st.divider()
+            st.caption("💡 Quando aggiungi un prodotto alla dispensa, la quantità da acquistare si aggiorna subito.")
+
+    with tab_pantry:
+        st.subheader("📦 Cosa hai già in casa")
+        pantry=pantry_items()
+        if pantry:
+            for item in pantry:
+                c1,c2,c3,c4=st.columns([3,1,1,1])
+                with c1: st.write(f"**{item['name']}**")
+                with c2:
+                    st.write(f"{item['qty']:g} {item['unit']}")
+                with c3:
+                    if st.button("−",key="pantry_minus_"+item["key"].replace("|","_"),use_container_width=True):
+                        step=1 if item["unit"]=="pz" else 50
+                        add_pantry_qty(item["name"],item["unit"],-step); st.rerun()
+                with c4:
+                    if st.button("+",key="pantry_plus_"+item["key"].replace("|","_"),use_container_width=True):
+                        step=1 if item["unit"]=="pz" else 50
+                        add_pantry_qty(item["name"],item["unit"],step); st.rerun()
+        else:
+            st.info("La dispensa è vuota. Puoi aggiungere qui quello che hai già in casa.")
+
+        st.divider()
+        st.markdown("**➕ Aggiungi alimento alla dispensa**")
+        suggestions=[{"name":r["name"],"unit":r["unit"]} for r in shopping_list()]
+        names=sorted({x["name"] for x in suggestions})
+        c1,c2,c3=st.columns([3,1,1])
+        with c1:
+            selected=st.selectbox("Alimento",["Nuovo alimento…"]+names,key="pantry_select")
+        with c2:
+            qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=50.0,key="pantry_qty")
+        with c3:
+            unit=st.selectbox("Unità",["g","ml","pz"],key="pantry_unit")
+        if selected=="Nuovo alimento…":
+            custom_name=st.text_input("Nome alimento",placeholder="es. Pasta")
+        else:
+            custom_name=selected
+            suggested_unit=next((x["unit"] for x in suggestions if x["name"]==selected),None)
+            if suggested_unit in ("g","ml","pz"):
+                st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
+        if st.button("Salva in dispensa",type="primary") and custom_name.strip() and qty>0:
+            add_pantry_qty(custom_name.strip(),unit,qty); st.rerun()
+
     st.divider(); st.subheader("🍴 Registra qualcosa che hai mangiato")
     c1,c2=st.columns([3,1])
     with c1:n=st.text_input("Alimento",placeholder="Pizza margherita")
