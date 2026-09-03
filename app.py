@@ -14,7 +14,7 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v43
+# MyDietApp v45
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
 # - recommendations adapt to the current dynamic calorie budget
@@ -702,6 +702,7 @@ def add_water_ml(delta):
     st.session_state.water_history[d]=max(0, current + int(delta))
 
 # V32: fixed the out_of_home variable mismatch in meal_recommendation/show_daily_meal_recommendation.
+# V45: active-calorie display shows 'Non disponibili' when no reliable active value exists; energy engine unchanged.
 # ---------------- Energy model ----------------
 def bmr_mifflin(weight, height, age, sex):
     # Mifflin-St Jeor. This is an estimate, not a medical measurement.
@@ -738,28 +739,17 @@ def activity_summary():
             })
         except Exception:
             continue
-
-    # Prefer the native Health Connect active-calorie value when available.
-    # If it is not available, expose the existing transparent estimate from the
-    # energy balance. Never turn an unavailable value into a misleading 0 kcal.
     native_active=round(float(h.get("active_calories_today") or 0))
+    # If Health Connect does not expose active calories, use the same transparent
+    # estimate already used by the energy balance instead of displaying 0.
     estimated_active=0
     try:
         b=balance()
         estimated_active=int(b.get("active_observed") or 0) if b.get("using_observed") else 0
     except Exception:
         estimated_active=0
-
-    if native_active > 0:
-        active=native_active
-        active_source="Health Connect"
-    elif estimated_active > 0:
-        active=estimated_active
-        active_source="stima"
-    else:
-        active=0
-        active_source="non disponibile"
-
+    active=max(native_active, estimated_active)
+    active_source="Health Connect" if native_active > 0 else ("stima" if estimated_active > 0 else "non disponibile")
     return {
         "steps":int(float(h.get("steps_today") or 0)),
         "active_calories":active,
@@ -1317,7 +1307,8 @@ if st.session_state.page=="Home":
     if b["using_observed"]:
         c1,c2,c3=st.columns(3)
         c1.metric("🔥 Consumo finora",f"{b['observed_burn']:,} kcal".replace(",","."))
-        c2.metric("⚡ Attive stimate finora",f"{b['active_observed']:,} kcal".replace(",","."))
+        active_display = f"{b['active_observed']:,} kcal".replace(",",".") if b.get("active_observed", 0) > 0 else "Non disponibili"
+        c2.metric("⚡ Attive stimate finora",active_display)
         c3.metric("🎯 Consumo stimato oggi",f"{b['projected_burn']:,} kcal".replace(",","."))
         st.caption(
             f"Il budget dinamico usa il consumo Health osservato ({b['observed_burn']} kcal) "
@@ -1330,7 +1321,7 @@ if st.session_state.page=="Home":
             st.markdown("**🏃 Attività di oggi**")
             ac1,ac2,ac3,ac4=st.columns(4)
             ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
-            ac2.metric("⚡ Calorie attive" if a["active_source"] != "stima" else "⚡ Calorie attive stimate", (f"{a['active_calories']:,} kcal".replace(",",".")) if a["active_source"] != "non disponibile" else "Non disponibili")
+            ac2.metric("⚡ Calorie attive stimate", f"{a['active_calories']:,} kcal".replace(",","."))
             ac3.metric("📏 Distanza", f"{a['distance_km']:.2f} km")
             ac4.metric("🏋️ Allenamenti", str(a['workouts']))
             if a["details"]:
