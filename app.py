@@ -738,14 +738,28 @@ def activity_summary():
             })
         except Exception:
             continue
+
+    # Prefer the native Health Connect active-calorie value when available.
+    # If it is not available, expose the existing transparent estimate from the
+    # energy balance. Never turn an unavailable value into a misleading 0 kcal.
     native_active=round(float(h.get("active_calories_today") or 0))
-    # Do not manufacture an "active calories" value from total expenditure.
-    # Active calories are already included in total calories burned, and the
-    # pro-rated BMR fallback can legitimately become zero late in the day.
-    # When Health Connect has no positive native active-calorie value, expose
-    # the field as unavailable rather than showing a misleading 0 kcal.
-    active=native_active if native_active > 0 else None
-    active_source="Health Connect" if native_active > 0 else "non disponibile"
+    estimated_active=0
+    try:
+        b=balance()
+        estimated_active=int(b.get("active_observed") or 0) if b.get("using_observed") else 0
+    except Exception:
+        estimated_active=0
+
+    if native_active > 0:
+        active=native_active
+        active_source="Health Connect"
+    elif estimated_active > 0:
+        active=estimated_active
+        active_source="stima"
+    else:
+        active=0
+        active_source="non disponibile"
+
     return {
         "steps":int(float(h.get("steps_today") or 0)),
         "active_calories":active,
@@ -759,14 +773,19 @@ def balance():
     h=st.session_state.health
     e=energy_profile()
     eaten=eaten_kcal()
-    observed=float(h.get("calories_today") or 0) if h.get("calories_source_verified") else 0.0
 
-    # Health total calories are cumulative from midnight to now. Do not subtract
-    # the deficit from the partial-day value directly: that would make the food
-    # budget artificially tiny in the afternoon. Instead, project the remaining
-    # resting expenditure (BMR) to midnight, while keeping the observed calories
-    # already recorded by Samsung Health. This is a transparent estimate and does
-    # not invent future workouts.
+    # Only a verified native Health Connect total from TODAY can drive the
+    # production budget. A stale snapshot or legacy/unverified value falls back
+    # to the profile estimate instead of silently presenting a false live budget.
+    snapshot_date=str(h.get("date") or "")
+    today_iso=today()
+    native_verified=bool(h.get("native_health_snapshot")) and bool(h.get("calories_source_verified"))
+    observed=float(h.get("calories_today") or 0) if native_verified and snapshot_date==today_iso else 0.0
+
+    # Samsung Health total calories are cumulative from local midnight to now.
+    # We therefore add ONLY the BMR/resting expenditure still expected until
+    # midnight. We never add active calories or workout calories again: they are
+    # already components of the observed total.
     bmr_health=float(h.get("bmr")) if h.get("bmr") is not None else 0.0
     bmr_for_projection=bmr_health if bmr_health > 0 else float(e["bmr_est"])
     now=datetime.now(ROME)
@@ -778,14 +797,18 @@ def balance():
     projected_burn=round(observed+remaining_rest) if observed > 0 else 0
     live_target=round(max(1200, projected_burn-e["deficit"])) if projected_burn > 0 else e["target"]
     active_observed=max(0,round(observed-bmr_for_projection*(elapsed/86400.0))) if observed > 0 else 0
+
+    source="Health Connect nativo · Samsung Health/Watch verificato" if observed > 0 else "Profilo · stima Mifflin + livello attività"
     return {
         "target":e["target"], "live_target":live_target, "eaten":eaten,
         "remaining":live_target-eaten, "observed_burn":round(observed),
         "projected_burn":projected_burn, "remaining_rest":remaining_rest,
-        "active_observed":active_observed if active_observed > 0 else None,
+        "active_observed":active_observed,
         "bmr_est":e["bmr_est"], "bmr_health":round(bmr_health) if bmr_health > 0 else None,
         "maintenance":e["maintenance_est"], "deficit":e["deficit"],
-        "using_observed":observed > 0
+        "using_observed":observed > 0, "source":source,
+        "snapshot_date":snapshot_date, "snapshot_is_today":snapshot_date==today_iso,
+        "native_verified":native_verified
     }
 
 def effective_bmr():
@@ -1288,26 +1311,26 @@ if st.session_state.page=="Home":
     target_label="budget dinamico" if b["using_observed"] else "target stimato"
     st.markdown(f"""<div class="card"><div class="muted">CALORIE ASSUNTE / {target_label.upper()}</div>
     <div class="big">{b["eaten"]:,} / {b["live_target"]:,} kcal</div>
-    <div class="muted">Target profilo {b["target"]:,} · deficit {b["deficit"]} kcal · BMR {b["bmr_health"] or b["bmr_est"]} kcal/giorno</div>
+    <div class="muted">Consumo previsto: {b["projected_burn"]:,} kcal · deficit: {b["deficit"]:,} kcal · BMR: {b["bmr_health"] or b["bmr_est"]} kcal/giorno</div>
     <div class="{cls}">{msg}</div></div>""".replace(",","."),unsafe_allow_html=True)
     st.progress(min(max(b["eaten"]/max(b["live_target"],1),0),1))
     if b["using_observed"]:
         c1,c2,c3=st.columns(3)
         c1.metric("🔥 Consumo finora",f"{b['observed_burn']:,} kcal".replace(",","."))
-        active_obs=b.get("active_observed")
-        c2.metric("⚡ Attive stimate finora",f"{active_obs:,} kcal".replace(",",".") if active_obs is not None else "Non disponibili")
+        c2.metric("⚡ Attive stimate finora",f"{b['active_observed']:,} kcal".replace(",","."))
         c3.metric("🎯 Consumo stimato oggi",f"{b['projected_burn']:,} kcal".replace(",","."))
         st.caption(
             f"Il budget dinamico usa il consumo Health osservato ({b['observed_burn']} kcal) "
             f"e aggiunge solo il consumo a riposo residuo fino a mezzanotte ({b['remaining_rest']} kcal). "
             "Non vengono inventate attività future."
         )
+        st.caption(f"Fonte del bilancio: {b['source']}. Snapshot Health: {b['snapshot_date'] or 'nessuno'}.")
         a=activity_summary()
         with st.container(border=True):
             st.markdown("**🏃 Attività di oggi**")
             ac1,ac2,ac3,ac4=st.columns(4)
             ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
-            ac2.metric("⚡ Calorie attive", f"{a['active_calories']:,} kcal".replace(",",".") if a['active_calories'] is not None else "Non disponibili")
+            ac2.metric("⚡ Calorie attive" if a["active_source"] != "stima" else "⚡ Calorie attive stimate", (f"{a['active_calories']:,} kcal".replace(",",".")) if a["active_source"] != "non disponibile" else "Non disponibili")
             ac3.metric("📏 Distanza", f"{a['distance_km']:.2f} km")
             ac4.metric("🏋️ Allenamenti", str(a['workouts']))
             if a["details"]:
@@ -1416,9 +1439,8 @@ if st.session_state.page=="Home":
             st.warning(f"Sei attualmente a **{net_so_far:,} kcal sopra il consumo osservato**. Il deficit obiettivo di oggi è **{b['deficit']} kcal**. È un dato provvisorio della giornata.".replace(",","."))
         else:
             st.info("Assunte e consumate sono momentaneamente allo stesso livello.")
-        native_active=h.get("active_calories_today")
-        active_txt=f"{float(native_active):.0f} kcal attive" if native_active is not None and float(native_active) > 0 else "calorie attive non disponibili"
-        st.caption(f"👣 {int(h.get('steps_today') or 0):,} passi · ⚡ {active_txt} · 🔥 {b['projected_burn']:,} kcal consumo stimato a fine giornata.".replace(",","."))
+        if h.get("active_calories_today") is not None:
+            st.caption(f"👣 {int(h.get('steps_today') or 0):,} passi · ⚡ {float(h['active_calories_today']):.0f} kcal attive · 🔥 {b['projected_burn']:,} kcal consumo stimato a fine giornata.".replace(",","."))
     else:
         st.info("Collega il bridge Health Connect per trasformare il target stimato in un budget dinamico basato sul consumo reale di oggi.")
 
@@ -1756,7 +1778,7 @@ elif st.session_state.page=="Attività":
         cards=[
             ("👣 Passi oggi",h.get("steps_today"),"passi"),
             ("🔥 Calorie totali",h.get("calories_today"),"kcal"),
-            ("⚡ Calorie attive",h.get("active_calories_today") if h.get("active_calories_today") is not None and float(h.get("active_calories_today") or 0) > 0 else None,"kcal"),
+            ("⚡ Calorie attive",h.get("active_calories_today"),"kcal"),
             ("⚖️ Peso",h.get("weight"),"kg"),
             ("🟠 Massa grassa",h.get("body_fat"),"%"),
             ("📏 Distanza",h.get("distance_today"),"km"),
