@@ -14,7 +14,7 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v42
+# MyDietApp v43
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
 # - recommendations adapt to the current dynamic calorie budget
@@ -762,14 +762,19 @@ def balance():
     h=st.session_state.health
     e=energy_profile()
     eaten=eaten_kcal()
-    observed=float(h.get("calories_today") or 0) if h.get("calories_source_verified") else 0.0
 
-    # Health total calories are cumulative from midnight to now. Do not subtract
-    # the deficit from the partial-day value directly: that would make the food
-    # budget artificially tiny in the afternoon. Instead, project the remaining
-    # resting expenditure (BMR) to midnight, while keeping the observed calories
-    # already recorded by Samsung Health. This is a transparent estimate and does
-    # not invent future workouts.
+    # Only a verified native Health Connect total from TODAY can drive the
+    # production budget. A stale snapshot or legacy/unverified value falls back
+    # to the profile estimate instead of silently presenting a false live budget.
+    snapshot_date=str(h.get("date") or "")
+    today_iso=today()
+    native_verified=bool(h.get("native_health_snapshot")) and bool(h.get("calories_source_verified"))
+    observed=float(h.get("calories_today") or 0) if native_verified and snapshot_date==today_iso else 0.0
+
+    # Samsung Health total calories are cumulative from local midnight to now.
+    # We therefore add ONLY the BMR/resting expenditure still expected until
+    # midnight. We never add active calories or workout calories again: they are
+    # already components of the observed total.
     bmr_health=float(h.get("bmr")) if h.get("bmr") is not None else 0.0
     bmr_for_projection=bmr_health if bmr_health > 0 else float(e["bmr_est"])
     now=datetime.now(ROME)
@@ -781,6 +786,8 @@ def balance():
     projected_burn=round(observed+remaining_rest) if observed > 0 else 0
     live_target=round(max(1200, projected_burn-e["deficit"])) if projected_burn > 0 else e["target"]
     active_observed=max(0,round(observed-bmr_for_projection*(elapsed/86400.0))) if observed > 0 else 0
+
+    source="Health Connect nativo · Samsung Health/Watch verificato" if observed > 0 else "Profilo · stima Mifflin + livello attività"
     return {
         "target":e["target"], "live_target":live_target, "eaten":eaten,
         "remaining":live_target-eaten, "observed_burn":round(observed),
@@ -788,7 +795,9 @@ def balance():
         "active_observed":active_observed,
         "bmr_est":e["bmr_est"], "bmr_health":round(bmr_health) if bmr_health > 0 else None,
         "maintenance":e["maintenance_est"], "deficit":e["deficit"],
-        "using_observed":observed > 0
+        "using_observed":observed > 0, "source":source,
+        "snapshot_date":snapshot_date, "snapshot_is_today":snapshot_date==today_iso,
+        "native_verified":native_verified
     }
 
 def effective_bmr():
@@ -1291,7 +1300,7 @@ if st.session_state.page=="Home":
     target_label="budget dinamico" if b["using_observed"] else "target stimato"
     st.markdown(f"""<div class="card"><div class="muted">CALORIE ASSUNTE / {target_label.upper()}</div>
     <div class="big">{b["eaten"]:,} / {b["live_target"]:,} kcal</div>
-    <div class="muted">Target profilo {b["target"]:,} · deficit {b["deficit"]} kcal · BMR {b["bmr_health"] or b["bmr_est"]} kcal/giorno</div>
+    <div class="muted">Consumo previsto: {b["projected_burn"]:,} kcal · deficit: {b["deficit"]:,} kcal · BMR: {b["bmr_health"] or b["bmr_est"]} kcal/giorno</div>
     <div class="{cls}">{msg}</div></div>""".replace(",","."),unsafe_allow_html=True)
     st.progress(min(max(b["eaten"]/max(b["live_target"],1),0),1))
     if b["using_observed"]:
@@ -1304,6 +1313,7 @@ if st.session_state.page=="Home":
             f"e aggiunge solo il consumo a riposo residuo fino a mezzanotte ({b['remaining_rest']} kcal). "
             "Non vengono inventate attività future."
         )
+        st.caption(f"Fonte del bilancio: {b['source']}. Snapshot Health: {b['snapshot_date'] or 'nessuno'}.")
         a=activity_summary()
         with st.container(border=True):
             st.markdown("**🏃 Attività di oggi**")
