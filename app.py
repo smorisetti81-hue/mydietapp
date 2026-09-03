@@ -14,7 +14,7 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v40
+# MyDietApp v42
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
 # - recommendations adapt to the current dynamic calorie budget
@@ -569,6 +569,21 @@ def smart_assistant_context(balance_data=None):
 def run_smart_food_advice(balance_data=None):
     """Ask Gemini to explain a deterministic next-meal decision; never let it recalculate the budget."""
     ctx=smart_assistant_context(balance_data)
+    next_ctx=ctx.get("next_meal", {})
+
+    # Fully registered day: this is a terminal state, not an AI recommendation.
+    if not next_ctx.get("meal"):
+        remaining=int(ctx.get("remaining_kcal", 0))
+        eaten=int(ctx.get("eaten_kcal", 0))
+        source_label="budget dinamico residuo" if ctx.get("budget_is_dynamic") else "target stimato residuo"
+        return (
+            "🍽️ GIORNATA ALIMENTARE COMPLETATA: tutti i pasti principali previsti per oggi risultano già registrati.\n"
+            "💡 CONSIGLIO: Non devi mangiare altro per 'recuperare' le calorie rimaste. "
+            "Se hai fame puoi scegliere liberamente uno spuntino leggero; se non hai fame, puoi semplicemente chiudere la giornata.\n"
+            f"🔥 MARGINE: {remaining} kcal {('di budget dinamico' if ctx.get('budget_is_dynamic') else 'rispetto al target alimentare stimato')}.\n"
+            f"📌 OGGI: circa {eaten} kcal registrate e nessun altro pasto pianificato da completare."
+        )
+
     prompt=f'''Sei l'assistente alimentare di MyDietApp. Devi dare un consiglio pratico sul PROSSIMO pasto, usando esclusivamente il contesto fornito.
 
 CONTESTO CALCOLATO DA MYDIETAPP:
@@ -577,8 +592,9 @@ CONTESTO CALCOLATO DA MYDIETAPP:
 REGOLE NON NEGOZIABILI:
 - MyDietApp calcola gia tutti i numeri. NON ricalcolare, correggere o inventare calorie.
 - "remaining_kcal" e il numero di kcal alimentari che restano oggi secondo MyDietApp.
-- Se "budget_is_dynamic" e false, il valore e un TARGET STIMATO dal profilo, NON chiamarlo budget dinamico e non dire che deriva da Health Connect.
-- Se "budget_is_dynamic" e true, puoi dire che il budget e dinamico e basato sul consumo Health osservato.
+- Se "budget_is_dynamic" e false, il valore e un TARGET STIMATO dal profilo: chiamalo sempre "target stimato" o "target alimentare stimato", MAI "budget dinamico" e MAI dire che deriva da Health Connect.
+- Se "budget_is_dynamic" e true, puoi chiamare il valore BUDGET DINAMICO e collegarlo al consumo Health osservato.
+- Non chiamare mai "disponibili" le kcal del target stimato come se fossero un dato misurato dal dispositivo.
 - Il campo "next_meal" identifica il pasto piu rilevante in questo momento: NON scegliere un altro pasto.
 - Se non esiste un prossimo pasto, dillo chiaramente.
 - Se il prossimo pasto e gia registrato, dillo chiaramente invece di suggerire di mangiarlo di nuovo.
@@ -593,7 +609,8 @@ REGOLE NON NEGOZIABILI:
 Rispondi in massimo 5 righe, in questo formato:
 🍽️ PROSSIMO PASTO: ...
 💡 CONSIGLIO: ...
-🔥 DISPONIBILI: ... kcal
+🔥 BUDGET DINAMICO: ... kcal  (solo se budget_is_dynamic=true)
+🔥 TARGET STIMATO: ... kcal  (solo se budget_is_dynamic=false)
 📌 MOTIVO: ...'''
     return gemini_interaction(prompt, thinking_level="minimal")
 
@@ -609,10 +626,11 @@ def show_daily_meal_recommendation(meal_name, day, balance_data):
         if rec["out_of_home"]:
             st.markdown("**📍 Oggi mangi fuori casa**")
             st.info("Se hai un menu, analizzalo in **Mensa Smart**: confronteremo le proposte con il tuo piano e con il budget calorico disponibile.")
+            source_label="Budget dinamico" if balance_data.get("using_observed") else "Target stimato"
             if rec["planned_kcal"]:
-                st.caption(f"Pasto previsto dal piano: circa {rec['planned_kcal']} kcal · Budget giornaliero rimasto: {rec['remaining']} kcal")
+                st.caption(f"Pasto previsto dal piano: circa {rec['planned_kcal']} kcal · {source_label} giornaliero rimasto: {rec['remaining']} kcal")
             else:
-                st.caption(f"Budget giornaliero rimasto: {rec['remaining']} kcal")
+                st.caption(f"{source_label} giornaliero rimasto: {rec['remaining']} kcal")
         else:
             st.markdown(f"**{rec['name']}**")
             if rec["items"]:
@@ -1339,7 +1357,8 @@ if st.session_state.page=="Home":
 
     with st.container(border=True):
         st.markdown("### 🤖 Consiglio intelligente")
-        st.caption("Il consiglio usa il prossimo pasto reale della giornata, ciò che hai già mangiato e il budget calcolato da MyDietApp. Gemini interpreta i dati: non calcola le calorie.")
+        source_note=("budget dinamico calcolato dai dati Health osservati" if b["using_observed"] else "target alimentare stimato dal profilo; non è un dato misurato da Health")
+        st.caption(f"Il consiglio usa il prossimo pasto reale della giornata, ciò che hai già mangiato e il {source_note}. Gemini interpreta i dati: non calcola le calorie.")
         if st.button("✨ Dammi un consiglio per il prossimo pasto", key="smart_food_advice_btn", use_container_width=True):
             with st.spinner("Sto valutando il tuo piano di oggi…"):
                 try:
