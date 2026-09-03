@@ -12,7 +12,7 @@ from collections import defaultdict
 import uuid
 
 # ============================================================
-# MyDietApp v22
+# MyDietApp v23
 # Health-first release:
 # - real Google Fit data diagnostics
 # - robust aggregation for cumulative vs point data
@@ -143,12 +143,12 @@ def init_plan():
 
 _defaults = {
     "page":"Home", "meal_plan":init_plan(), "overrides":{}, "eaten":{}, "manual_foods":[],
-    "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None
+    "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None, "water_history":{}
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
     "name":"Stefano", "weight":135.0, "height":180.0, "age":40, "sex":"male",
-    "activity_level":"moderata", "deficit":500
+    "activity_level":"moderata", "deficit":500, "water_goal_ml":2500
 }.items(): st.session_state.setdefault("p_"+k,v)
 
 
@@ -182,6 +182,18 @@ def grocery():
         for i in active_items(m):
             key=(i["name"].strip().lower(),i["unit"]); d[key][0]+=float(i["qty"]); d[key][1]=i["unit"]; d[key][2]=i["name"]
     return sorted(d.values(),key=lambda x:x[2].lower())
+
+def water_today_ml():
+    """Return today's water intake in ml, stored by calendar date."""
+    return int(st.session_state.water_history.get(today(), 0) or 0)
+
+def water_goal_ml():
+    return max(500, int(st.session_state.get("p_water_goal_ml", 2500) or 2500))
+
+def add_water_ml(delta):
+    d=today()
+    current=water_today_ml()
+    st.session_state.water_history[d]=max(0, current + int(delta))
 
 # ---------------- Energy model ----------------
 def bmr_mifflin(weight, height, age, sex):
@@ -799,6 +811,35 @@ if st.session_state.page=="Home":
             else:
                 st.caption("Nessuna sessione di allenamento registrata. I passi e le calorie attive continuano comunque ad aggiornarsi.")
             st.caption(f"Fonte calorie attive: {a['active_source']}. Sono già comprese nel consumo totale Health osservato e non vengono sommate una seconda volta.")
+    # ---------------- Water tracking ----------------
+    st.divider()
+    st.subheader("💧 Acqua")
+    water=water_today_ml()
+    goal=water_goal_ml()
+    pct=min(max(water/max(goal,1),0.0),1.0)
+    wc1,wc2=st.columns([5,2])
+    with wc1:
+        st.markdown(f"### {water/1000:.2f} L / {goal/1000:.2f} L")
+        st.progress(pct)
+        if water >= goal:
+            st.success("🎉 Obiettivo acqua raggiunto oggi.")
+        else:
+            st.caption(f"Ti mancano {(goal-water)/1000:.2f} L per raggiungere l'obiettivo di oggi.")
+    with wc2:
+        b1,b2=st.columns(2)
+        with b1:
+            if st.button("− 250 ml",key="water_minus",use_container_width=True):
+                add_water_ml(-250)
+                st.rerun()
+        with b2:
+            if st.button("+ 250 ml",key="water_plus",use_container_width=True,type="primary"):
+                add_water_ml(250)
+                st.rerun()
+        if st.button("Azzera oggi",key="water_reset",use_container_width=True):
+            st.session_state.water_history[today()]=0
+            st.rerun()
+    st.caption("Registrazione manuale · storico conservato per data in questa sessione.")
+
     st.subheader("🍽️ Oggi")
     st.caption("Registra i pasti quando li mangi: il totale in alto si aggiorna automaticamente.")
     d=current_day_name(); ms=st.session_state.meal_plan.get(d)
@@ -1085,13 +1126,16 @@ else:
             sex=st.selectbox("Sesso",["male","female"],index=0 if st.session_state.p_sex=="male" else 1)
             activity=st.selectbox("Attività abituale",list(ACTIVITY_FACTORS.keys()),index=list(ACTIVITY_FACTORS.keys()).index(st.session_state.p_activity_level))
             deficit=st.select_slider("Deficit desiderato",options=[300,500,700],value=int(st.session_state.p_deficit),format_func=lambda x:f"{x} kcal/giorno")
+            water_goal=st.select_slider("Obiettivo acqua",options=list(range(1500,4001,250)),value=int(st.session_state.p_water_goal_ml),format_func=lambda x:f"{x/1000:.2f} L/giorno")
         if st.form_submit_button("Salva",type="primary"):
-            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_deficit=deficit; st.success("Profilo aggiornato")
+            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_deficit=deficit; st.session_state.p_water_goal_ml=water_goal; st.success("Profilo aggiornato")
     ep=energy_profile()
     st.subheader("🎯 Obiettivo energetico")
     st.metric("Target alimentare stimato",f"{ep['target']:,} kcal/giorno".replace(",","."))
+    st.metric("💧 Obiettivo acqua",f"{water_goal_ml()/1000:.2f} L/giorno")
     c1,c2=st.columns(2); c1.metric("BMR stimato",f"{ep['bmr_est']:,} kcal".replace(",",".")); c2.metric("Mantenimento stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
     b=balance()
     if b["using_observed"]:
         st.info(f"🔥 Con i dati Health di oggi, il budget dinamico è circa **{b['live_target']:,} kcal**: consumo osservato {b['observed_burn']:,} + riposo residuo {b['remaining_rest']:,} → stima fine giornata {b['projected_burn']:,}, meno deficit {b['deficit']}.")
+    st.caption(f"Acqua di oggi: {water_today_ml()/1000:.2f} L / {water_goal_ml()/1000:.2f} L. La registrazione è separata dalle calorie e viene conservata per data nella sessione corrente.")
     st.caption("Il target di profilo è una stima basata su Mifflin-St Jeor + livello di attività + deficit scelto. Il budget dinamico usa il consumo totale osservato da Health quando disponibile; l’attività viene mostrata separatamente senza doppio conteggio. Non è una prescrizione medica.")
