@@ -13,7 +13,10 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v23
+# MyDietApp v27
+# - daily lunch/dinner recommendations linked to the active plan
+# - recommendations adapt to the current dynamic calorie budget
+# - Mensa Smart receives the planned meal and available calorie context
 # Health-first release:
 # - real Google Fit data diagnostics
 # - robust aggregation for cumulative vs point data
@@ -273,6 +276,62 @@ def plan_food_suggestions(current_day=None, current_meal=None, limit=8):
     values.sort(key=lambda x:(not x["current"],-x["uses"],x["name"].lower()))
     return values[:limit]
 
+
+def meal_recommendation(day, meal_name, balance_data=None):
+    """Build a deterministic suggestion for lunch/dinner from the active plan and live budget."""
+    ms=st.session_state.meal_plan.get(day,{})
+    meal=ms.get(meal_name)
+    if not meal:
+        return None
+    b=balance_data or balance()
+    items=active_items(meal)
+    planned_kcal=round(sum(item_kcal(i) for i in items))
+    planned_name=str(meal.get("name") or meal_name)
+    remaining=max(0,int(b.get("remaining") or 0))
+    # If the plan has a calorie value, use it as the primary recommendation and
+    # compare it with the live budget. For office meals, no kcal may be known yet.
+    if planned_kcal > 0:
+        budget_gap=planned_kcal-remaining
+        if budget_gap > 150:
+            advice="Il piatto previsto dal piano è piuttosto alto rispetto al budget rimasto: valuta una porzione più leggera."
+        elif budget_gap > 0:
+            advice="Il piano è leggermente sopra il budget rimasto: riduci una componente calorica, se necessario."
+        else:
+            advice="Il pasto è compatibile con il budget attuale e segue il piano."
+    else:
+        budget_gap=0
+        advice="Per questo pasto il piano non contiene ancora calorie: usa il budget indicato come riferimento."
+    office="UFFICIO" in planned_name.upper() or "UFFICIO" in str(meal_name).upper()
+    return {
+        "name":planned_name,
+        "planned_kcal":planned_kcal,
+        "remaining":remaining,
+        "advice":advice,
+        "office":office,
+        "items":items,
+    }
+
+def show_daily_meal_recommendation(meal_name, day, balance_data):
+    rec=meal_recommendation(day,meal_name,balance_data)
+    if not rec:
+        return
+    icon="🏢" if rec["office"] else ("🍽️" if meal_name=="🍽️ Pranzo" else "🌙")
+    title="Pranzo" if meal_name=="🍽️ Pranzo" else "Cena"
+    with st.container(border=True):
+        st.markdown(f"### {icon} {title}")
+        if rec["office"]:
+            st.markdown("**🏢 Oggi sei in mensa**")
+            st.info("Scatta il menu in **Mensa Smart**: confronteremo le proposte con il tuo piano e con il budget calorico disponibile.")
+            if rec["planned_kcal"]:
+                st.caption(f"Pasto previsto dal piano: circa {rec['planned_kcal']} kcal")
+            else:
+                st.caption("Il piano non assegna ancora calorie a questo pasto.")
+        else:
+            st.markdown(f"**{rec['name']}**")
+            if rec["items"]:
+                st.caption(" · ".join(f"{i['name']} {item_qty(i):g}{i['unit']}" for i in rec["items"]))
+            st.caption(f"Piano: {rec['planned_kcal']} kcal · Budget disponibile oggi: {rec['remaining']} kcal")
+        st.write("💡 " + rec["advice"])
 
 def grocery():
     d=defaultdict(lambda:[0,"",""])
@@ -938,6 +997,14 @@ if st.session_state.page=="Home":
             st.rerun()
     st.caption("Registrazione manuale · storico conservato per data in questa sessione.")
 
+    # ---------------- What should I eat today? ----------------
+    st.divider()
+    st.subheader("🍴 Cosa mangio oggi?")
+    st.caption("Suggerimenti collegati al piano di oggi e al budget calorico dinamico.")
+    d=current_day_name()
+    show_daily_meal_recommendation("🍽️ Pranzo", d, b)
+    show_daily_meal_recommendation("🌙 Cena", d, b)
+
     st.subheader("🍽️ Oggi")
     st.caption("Registra i pasti quando li mangi: il totale in alto si aggiorna automaticamente.")
     d=current_day_name(); ms=st.session_state.meal_plan.get(d)
@@ -1124,7 +1191,21 @@ elif st.session_state.page=="Piano":
         im=Image.open(img); st.image(im,width=420)
         if st.button("✨ Analizza menu",type="secondary"):
             try:
-                b=balance(); r=genai.GenerativeModel("gemini-2.5-flash").generate_content([f"Analizza questo menu. L'utente ha {b['remaining']} kcal disponibili oggi. Rispondi con COSA ORDINARE, PERCHÉ, COSA LIMITARE.",im]); st.info(r.text)
+                b=balance()
+                day=current_day_name()
+                rec=meal_recommendation(day,"🍽️ Pranzo",b)
+                planned=rec["name"] if rec else "nessun pranzo disponibile nel piano"
+                planned_kcal=rec["planned_kcal"] if rec else 0
+                prompt=f"""Analizza questo menu della mensa e consiglia la scelta migliore per oggi.
+Profilo operativo: piano del giorno con pranzo previsto: {planned}; calorie previste dal piano: {planned_kcal} kcal; calorie ancora disponibili oggi: {b['remaining']} kcal.
+Confronta le alternative del menu con il piano, senza inventare piatti non presenti nella foto.
+Rispondi in modo breve e pratico con:
+🟢 COSA ORDINARE: piatti esatti dalla foto
+💡 PERCHÉ: una frase collegata a piano e budget
+⚠️ COSA LIMITARE: eventuali elementi più calorici
+Se il budget residuo non consente di seguire esattamente il piano, proponi la combinazione più vicina e spiegalo."""
+                r=genai.GenerativeModel("gemini-2.5-flash").generate_content([prompt,im])
+                st.info(r.text)
             except Exception as e: st.error(str(e))
 
 # ---------------- Dispensa ----------------
