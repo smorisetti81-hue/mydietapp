@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from PIL import Image
 from collections import defaultdict
 import uuid
+import copy
 
 # ============================================================
 # MyDietApp v23
@@ -143,7 +144,8 @@ def init_plan():
 
 _defaults = {
     "page":"Home", "meal_plan":init_plan(), "overrides":{}, "eaten":{}, "manual_foods":[],
-    "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None, "water_history":{}
+    "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None, "water_history":{},
+    "plan_week_start":None, "plan_history":{}
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
@@ -155,6 +157,55 @@ for k,v in {
 def meals():
     for day, ms in st.session_state.meal_plan.items():
         for name, meal in ms.items(): yield day,name,meal
+
+def week_start(d=None):
+    d = d or datetime.now(ROME).date()
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+def week_label(start_iso):
+    start=date.fromisoformat(start_iso)
+    end=start+timedelta(days=6)
+    return f"{start.strftime('%d/%m/%Y')} – {end.strftime('%d/%m/%Y')}"
+
+def ensure_plan_metadata():
+    if not st.session_state.get("plan_week_start"):
+        st.session_state.plan_week_start=week_start()
+
+def archive_current_plan(reason="Nuovo piano"):
+    ensure_plan_metadata()
+    start=st.session_state.plan_week_start
+    if not st.session_state.meal_plan:
+        return None
+    archive_id=f"{start}_{datetime.now(ROME).strftime('%Y%m%d%H%M%S')}"
+    st.session_state.plan_history[archive_id]={
+        "week_start":start,
+        "label":week_label(start),
+        "created_at":datetime.now(ROME).isoformat(),
+        "reason":reason,
+        "plan":copy.deepcopy(st.session_state.meal_plan),
+    }
+    return archive_id
+
+def historical_food_library(limit=None):
+    foods={}
+    def add_from_plan(plan, source):
+        for day, ms in plan.items():
+            for meal_name, meal in ms.items():
+                for item in meal.get("ingredients",[]):
+                    name=str(item.get("name","Alimento")).strip()
+                    if not name: continue
+                    key=(name.lower(),str(item.get("unit","g")))
+                    if key not in foods:
+                        foods[key]={"name":name,"qty":float(item.get("qty",1)),"unit":str(item.get("unit","g")),"kcal":float(item.get("kcal",0)),"uses":0,"sources":set()}
+                    foods[key]["uses"]+=1; foods[key]["sources"].add(source)
+    add_from_plan(st.session_state.meal_plan,"Piano attuale")
+    for rec in st.session_state.plan_history.values(): add_from_plan(rec.get("plan",{}),f"Storico {rec.get('label','')}")
+    vals=list(foods.values())
+    vals.sort(key=lambda x:(-x["uses"],x["name"].lower()))
+    for x in vals: x["sources"]=list(x["sources"])
+    return vals[:limit] if limit else vals
+
+ensure_plan_metadata()
 
 def item_multiplier(item):
     return float(st.session_state.overrides.get(item["id"],{}).get("multiplier",1))
@@ -201,31 +252,27 @@ def eaten_kcal():
     return round(total)
 
 def plan_food_suggestions(current_day=None, current_meal=None, limit=8):
-    """Return unique foods already present somewhere in the weekly plan.
-    The current meal is excluded so suggestions are genuinely useful additions.
-    Sorted by frequency in the plan, then alphabetically.
-    """
+    """Suggest foods from current and historical plans, preferring current plan and recent reuse."""
     foods={}
-    for day, meal_name, meal in meals():
-        for item in meal.get("ingredients",[]):
-            if day == current_day and meal_name == current_meal:
-                continue
-            name=str(item.get("name","Alimento")).strip()
-            if not name:
-                continue
-            key=(name.lower(), str(item.get("unit","g")))
-            if key not in foods:
-                foods[key]={
-                    "name":name,
-                    "qty":float(item.get("qty",1)),
-                    "unit":str(item.get("unit","g")),
-                    "kcal":float(item.get("kcal",0)),
-                    "count":0,
-                }
-            foods[key]["count"] += 1
+    def collect(plan, source_rank, source_label):
+        for day, ms in plan.items():
+            for meal_name, meal in ms.items():
+                for item in meal.get("ingredients",[]):
+                    if source_rank==0 and day==current_day and meal_name==current_meal: continue
+                    name=str(item.get("name","Alimento")).strip()
+                    if not name: continue
+                    key=(name.lower(),str(item.get("unit","g")))
+                    if key not in foods:
+                        foods[key]={"name":name,"qty":float(item.get("qty",1)),"unit":str(item.get("unit","g")),"kcal":float(item.get("kcal",0)),"current":source_rank==0,"uses":0}
+                    foods[key]["uses"]+=1
+                    if source_rank==0: foods[key]["current"]=True
+    collect(st.session_state.meal_plan,0,"Piano attuale")
+    for rec in sorted(st.session_state.plan_history.values(), key=lambda x:x.get("created_at", ""), reverse=True):
+        collect(rec.get("plan",{}),1,rec.get("label","Storico"))
     values=list(foods.values())
-    values.sort(key=lambda x:(-x["count"], x["name"].lower()))
+    values.sort(key=lambda x:(not x["current"],-x["uses"],x["name"].lower()))
     return values[:limit]
+
 
 def grocery():
     d=defaultdict(lambda:[0,"",""])
@@ -1034,6 +1081,25 @@ elif st.session_state.page=="Piano":
                 with d:k=st.number_input("kcal",min_value=0,value=50,step=5,key=f"k_{day}_{mn}")
                 if st.button("Aggiungi al pasto",key=f"add_{day}_{mn}") and n.strip():
                     st.session_state.meal_plan[day][mn]["ingredients"].append({"id":sid(),"name":n.strip(),"qty":q,"unit":u,"kcal":k}); st.rerun()
+    st.divider()
+    st.subheader("📚 Storico dei piani")
+    st.caption("Ogni nuovo piano conserva automaticamente quello precedente. Le modifiche future non alterano le versioni storiche.")
+    ensure_plan_metadata()
+    st.info(f"🟢 Piano attivo · settimana {week_label(st.session_state.plan_week_start)}")
+    history_items=sorted(st.session_state.plan_history.values(), key=lambda x:x.get("created_at",""), reverse=True)
+    if history_items:
+        for idx,rec in enumerate(history_items):
+            with st.expander(f"📅 {rec.get('label','Settimana')} · piano storico", expanded=False):
+                st.caption(f"Creato: {rec.get('created_at','—')[:16].replace('T',' ')}")
+                for hday,hms in rec.get("plan",{}).items():
+                    day_kcal=round(sum(float(i.get("kcal",0)) for _,hm in hms.items() for i in hm.get("ingredients",[])))
+                    st.markdown(f"**{hday}** · {day_kcal} kcal")
+                    for hmn,hm in hms.items():
+                        names=", ".join(f"{i.get('name','Alimento')} {i.get('qty',1):g}{i.get('unit','g')}" for i in hm.get('ingredients',[]))
+                        st.caption(f"{hmn}: {names}")
+    else:
+        st.caption("Ancora nessun piano storico. Il primo verrà conservato automaticamente quando genererai il piano successivo.")
+
     st.divider(); st.subheader("🤖 Generazione AI")
     if st.button("Genera / rigenera piano settimanale",type="primary"):
         try:
@@ -1043,7 +1109,14 @@ elif st.session_state.page=="Piano":
             for day,ms in gen.items():
                 out[day]={}
                 for mn,m in ms.items(): out[day][mn]={"name":m.get("name","Pasto"),"ingredients":[{"id":sid(),"name":str(x.get("name","Alimento")),"qty":float(x.get("qty",1)),"unit":str(x.get("unit","g")),"kcal":round(float(x.get("kcal",0)))} for x in m.get("ingredients",[])]}
-            st.session_state.meal_plan=out; st.session_state.overrides={}; st.session_state.eaten={}; st.rerun()
+            # Conserva sempre il piano precedente prima di sostituirlo.
+            previous_week=st.session_state.plan_week_start
+            archive_current_plan(reason="Sostituito da un nuovo piano AI")
+            # La nuova generazione viene considerata la settimana successiva rispetto al piano archiviato.
+            new_start=(date.fromisoformat(previous_week)+timedelta(days=7)).isoformat() if previous_week else week_start(date.today()+timedelta(days=7))
+            st.session_state.meal_plan=out
+            st.session_state.plan_week_start=new_start
+            st.session_state.overrides={}; st.session_state.eaten={}; st.rerun()
         except Exception as e: st.error(f"Errore AI: {e}")
     st.subheader("📷 Mensa Smart")
     img=st.camera_input("Scatta il menu") or st.file_uploader("Carica una foto",type=["jpg","jpeg","png"],key="mensa3")
