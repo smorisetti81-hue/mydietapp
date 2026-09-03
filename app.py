@@ -13,7 +13,7 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v27
+# MyDietApp v29
 # - daily lunch/dinner recommendations linked to the active plan
 # - recommendations adapt to the current dynamic calorie budget
 # - Mensa Smart receives the planned meal and available calorie context
@@ -318,60 +318,95 @@ def plan_food_suggestions(current_day=None, current_meal=None, limit=8):
     return values[:limit]
 
 
+def _meal_kcal_for_day(day, meal_name):
+    ms=st.session_state.meal_plan.get(day,{})
+    meal=ms.get(meal_name)
+    if not meal:
+        return 0
+    return round(sum(item_kcal(i) for i in active_items(meal)))
+
+
+def _planned_remaining_after_meal(day, meal_name):
+    """Calories planned for meals after the selected meal, in displayed order."""
+    order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
+    if meal_name not in order:
+        return 0
+    idx=order.index(meal_name)
+    return sum(_meal_kcal_for_day(day, name) for name in order[idx+1:])
+
+
 def meal_recommendation(day, meal_name, balance_data=None):
-    """Build a deterministic suggestion for lunch/dinner from the active plan and live budget."""
+    """Build a deterministic recommendation from the active plan and live calorie budget."""
     ms=st.session_state.meal_plan.get(day,{})
     meal=ms.get(meal_name)
     if not meal:
         return None
+
     b=balance_data or balance()
     items=active_items(meal)
     planned_kcal=round(sum(item_kcal(i) for i in items))
     planned_name=str(meal.get("name") or meal_name)
     remaining=max(0,int(b.get("remaining") or 0))
-    # If the plan has a calorie value, use it as the primary recommendation and
-    # compare it with the live budget. For office meals, no kcal may be known yet.
-    if planned_kcal > 0:
-        budget_gap=planned_kcal-remaining
-        if budget_gap > 150:
-            advice="Il piatto previsto dal piano è piuttosto alto rispetto al budget rimasto: valuta una porzione più leggera."
-        elif budget_gap > 0:
-            advice="Il piano è leggermente sopra il budget rimasto: riduci una componente calorica, se necessario."
-        else:
-            advice="Il pasto è compatibile con il budget attuale e segue il piano."
-    else:
-        budget_gap=0
-        advice="Per questo pasto il piano non contiene ancora calorie: usa il budget indicato come riferimento."
+    future_planned=_planned_remaining_after_meal(day, meal_name)
+    budget_for_meal=max(0, remaining-future_planned)
+    after_meal=max(0, remaining-planned_kcal)
     office="UFFICIO" in planned_name.upper() or "UFFICIO" in str(meal_name).upper()
+
+    if office:
+        status="mensa"
+        advice="Il piano prevede la mensa: fotografa il menu in Mensa Smart e confronteremo le proposte con il budget di oggi."
+    elif planned_kcal <= 0:
+        status="unknown"
+        advice="Il piano non contiene ancora calorie per questo pasto: usa il budget disponibile come riferimento."
+    elif planned_kcal <= budget_for_meal:
+        status="good"
+        advice=f"🟢 Segui il piano: questo pasto rientra nel budget disponibile. Dopo il pasto resteranno circa {after_meal:,} kcal per il resto della giornata.".replace(",",".")
+    elif planned_kcal <= remaining:
+        status="adapt"
+        advice=f"🟡 Il pasto rientra ancora nel budget giornaliero, ma lascia meno spazio ai pasti successivi. Se vuoi restare più vicino al piano della giornata, valuta una porzione leggermente più leggera." 
+    else:
+        status="over"
+        advice=f"🔴 Il pasto supera di circa {planned_kcal-remaining} kcal il budget ancora disponibile. Meglio ridurre una componente calorica oppure scegliere un'alternativa."
+
     return {
         "name":planned_name,
         "planned_kcal":planned_kcal,
         "remaining":remaining,
+        "future_planned":future_planned,
+        "budget_for_meal":budget_for_meal,
+        "after_meal":after_meal,
         "advice":advice,
+        "status":status,
         "office":office,
         "items":items,
+        "registered": bool(items) and all(st.session_state.eaten.get(i["id"],False) for i in items),
     }
+
 
 def show_daily_meal_recommendation(meal_name, day, balance_data):
     rec=meal_recommendation(day,meal_name,balance_data)
     if not rec:
         return
-    icon="🏢" if rec["office"] else ("🍽️" if meal_name=="🍽️ Pranzo" else "🌙")
     title="Pranzo" if meal_name=="🍽️ Pranzo" else "Cena"
+    icon="🏢" if rec["office"] else ("🍽️" if meal_name=="🍽️ Pranzo" else "🌙")
+    status_labels={"good":"🟢 Segui il piano","adapt":"🟡 Adatta leggermente","over":"🔴 Da adattare","mensa":"🏢 Vai in Mensa Smart","unknown":"⚪ Calorie non definite"}
     with st.container(border=True):
         st.markdown(f"### {icon} {title}")
         if rec["office"]:
             st.markdown("**🏢 Oggi sei in mensa**")
             st.info("Scatta il menu in **Mensa Smart**: confronteremo le proposte con il tuo piano e con il budget calorico disponibile.")
             if rec["planned_kcal"]:
-                st.caption(f"Pasto previsto dal piano: circa {rec['planned_kcal']} kcal")
+                st.caption(f"Pasto previsto dal piano: circa {rec['planned_kcal']} kcal · Budget giornaliero rimasto: {rec['remaining']} kcal")
             else:
-                st.caption("Il piano non assegna ancora calorie a questo pasto.")
+                st.caption(f"Budget giornaliero rimasto: {rec['remaining']} kcal")
         else:
             st.markdown(f"**{rec['name']}**")
             if rec["items"]:
                 st.caption(" · ".join(f"{i['name']} {item_qty(i):g}{i['unit']}" for i in rec["items"]))
-            st.caption(f"Piano: {rec['planned_kcal']} kcal · Budget disponibile oggi: {rec['remaining']} kcal")
+            st.caption(f"Piano: {rec['planned_kcal']} kcal · Budget per questo pasto: circa {rec['budget_for_meal']} kcal")
+            if rec["registered"]:
+                st.success("✅ Questo pasto risulta già registrato come mangiato.")
+        st.markdown(f"**{status_labels.get(rec['status'], '💡 Suggerimento')}**")
         st.write("💡 " + rec["advice"])
 
 def grocery():
