@@ -13,8 +13,9 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v29
+# MyDietApp v31
 # - daily lunch/dinner recommendations linked to the active plan
+# - generic fuori-casa configuration for lunch/dinner, independent from the canteen
 # - recommendations adapt to the current dynamic calorie budget
 # - Mensa Smart receives the planned meal and available calorie context
 # Health-first release:
@@ -189,7 +190,7 @@ def init_plan():
 _defaults = {
     "page":"Home", "meal_plan":init_plan(), "overrides":{}, "eaten":{}, "manual_foods":[],
     "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None, "water_history":{},
-    "plan_week_start":None, "plan_history":{}
+    "plan_week_start":None, "plan_history":{}, "out_lunch_days":["Giovedì"], "out_dinner_days":["Giovedì"]
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
@@ -226,6 +227,8 @@ def archive_current_plan(reason="Nuovo piano"):
         "label":week_label(start),
         "created_at":datetime.now(ROME).isoformat(),
         "reason":reason,
+        "out_lunch_days":copy.deepcopy(st.session_state.get("out_lunch_days", [])),
+        "out_dinner_days":copy.deepcopy(st.session_state.get("out_dinner_days", [])),
         "plan":copy.deepcopy(st.session_state.meal_plan),
     }
     return archive_id
@@ -335,6 +338,14 @@ def _planned_remaining_after_meal(day, meal_name):
     return sum(_meal_kcal_for_day(day, name) for name in order[idx+1:])
 
 
+def out_of_home_meal_configured(day, meal_name):
+    """Return True when the selected weekday/meal is configured as fuori casa."""
+    if meal_name == "🍽️ Pranzo":
+        return day in st.session_state.get("out_lunch_days", [])
+    if meal_name == "🌙 Cena":
+        return day in st.session_state.get("out_dinner_days", [])
+    return False
+
 def meal_recommendation(day, meal_name, balance_data=None):
     """Build a deterministic recommendation from the active plan and live calorie budget."""
     ms=st.session_state.meal_plan.get(day,{})
@@ -350,11 +361,11 @@ def meal_recommendation(day, meal_name, balance_data=None):
     future_planned=_planned_remaining_after_meal(day, meal_name)
     budget_for_meal=max(0, remaining-future_planned)
     after_meal=max(0, remaining-planned_kcal)
-    office="UFFICIO" in planned_name.upper() or "UFFICIO" in str(meal_name).upper()
+    office=out_of_home_meal_configured(day, meal_name) or "UFFICIO" in planned_name.upper()
 
-    if office:
+    if out_of_home:
         status="mensa"
-        advice="Il piano prevede la mensa: fotografa il menu in Mensa Smart e confronteremo le proposte con il budget di oggi."
+        advice="Il piano prevede un pasto fuori casa: se hai un menu disponibile, possiamo confrontarlo con il piano e con il budget di oggi."
     elif planned_kcal <= 0:
         status="unknown"
         advice="Il piano non contiene ancora calorie per questo pasto: usa il budget disponibile come riferimento."
@@ -377,7 +388,7 @@ def meal_recommendation(day, meal_name, balance_data=None):
         "after_meal":after_meal,
         "advice":advice,
         "status":status,
-        "office":office,
+        "out_of_home":out_of_home,
         "items":items,
         "registered": bool(items) and all(st.session_state.eaten.get(i["id"],False) for i in items),
     }
@@ -389,12 +400,12 @@ def show_daily_meal_recommendation(meal_name, day, balance_data):
         return
     title="Pranzo" if meal_name=="🍽️ Pranzo" else "Cena"
     icon="🏢" if rec["office"] else ("🍽️" if meal_name=="🍽️ Pranzo" else "🌙")
-    status_labels={"good":"🟢 Segui il piano","adapt":"🟡 Adatta leggermente","over":"🔴 Da adattare","mensa":"🏢 Vai in Mensa Smart","unknown":"⚪ Calorie non definite"}
+    status_labels={"good":"🟢 Segui il piano","adapt":"🟡 Adatta leggermente","over":"🔴 Da adattare","mensa":"📍 Fuori casa","unknown":"⚪ Calorie non definite"}
     with st.container(border=True):
         st.markdown(f"### {icon} {title}")
-        if rec["office"]:
-            st.markdown("**🏢 Oggi sei in mensa**")
-            st.info("Scatta il menu in **Mensa Smart**: confronteremo le proposte con il tuo piano e con il budget calorico disponibile.")
+        if rec["out_of_home"]:
+            st.markdown("**📍 Oggi mangi fuori casa**")
+            st.info("Se hai un menu, analizzalo in **Mensa Smart**: confronteremo le proposte con il tuo piano e con il budget calorico disponibile.")
             if rec["planned_kcal"]:
                 st.caption(f"Pasto previsto dal piano: circa {rec['planned_kcal']} kcal · Budget giornaliero rimasto: {rec['remaining']} kcal")
             else:
@@ -1148,11 +1159,32 @@ if st.session_state.page=="Home":
 elif st.session_state.page=="Piano":
     st.title("🍽️ Il tuo piano")
     st.caption("Modifica direttamente le quantità: il totale del pasto e la lista della spesa si aggiornano automaticamente.")
+    st.subheader("📍 Pasti fuori casa")
+    st.caption("Imposta separatamente pranzo e cena: puoi avere entrambi fuori casa oppure, per esempio, solo il pranzo fuori casa e la cena a casa.")
+    days_week=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+    with st.expander("⚙️ Configura giorni e pasti fuori casa", expanded=False):
+        lunch_set=set(st.session_state.get("out_lunch_days", []))
+        dinner_set=set(st.session_state.get("out_dinner_days", []))
+        for od in days_week:
+            oc1,oc2,oc3=st.columns([2.4,2.2,2.2])
+            with oc1: st.markdown(f"**{od}**")
+            with oc2:
+                lunch_on=st.checkbox("📍 Pranzo fuori casa", value=od in lunch_set, key=f"office_lunch_{od}")
+            with oc3:
+                dinner_on=st.checkbox("📍 Cena fuori casa", value=od in dinner_set, key=f"office_dinner_{od}")
+            if lunch_on: lunch_set.add(od)
+            else: lunch_set.discard(od)
+            if dinner_on: dinner_set.add(od)
+            else: dinner_set.discard(od)
+        st.session_state.out_lunch_days=sorted(lunch_set, key=days_week.index)
+        st.session_state.out_dinner_days=sorted(dinner_set, key=days_week.index)
+        st.info(f"Pranzi fuori casa: {', '.join(st.session_state.out_lunch_days) if st.session_state.out_lunch_days else 'nessuno'} · Cene fuori casa: {', '.join(st.session_state.out_dinner_days) if st.session_state.out_dinner_days else 'nessuna'}")
     days=list(st.session_state.meal_plan.keys()); day=st.selectbox("Giorno",days)
     for mn,m in st.session_state.meal_plan[day].items():
         kcal=round(sum(item_kcal(i) for i in m.get("ingredients",[]) if not st.session_state.overrides.get(i["id"],{}).get("removed")))
         with st.container(border=True):
-            st.markdown(f"### {mn}"); st.caption(f"{m.get('name','Pasto')} · **{kcal} kcal**")
+            out_of_home_day=out_of_home_meal_configured(day, mn)
+            st.markdown(f"### {mn}"); st.caption(("📍 **Fuori casa** · " if out_of_home_day else "") + f"{m.get('name','Pasto')} · **{kcal} kcal**")
             for item in list(m.get("ingredients",[])):
                 ov=st.session_state.overrides.get(item["id"],{})
                 if ov.get("removed"): continue
@@ -1247,7 +1279,12 @@ elif st.session_state.page=="Piano":
     if st.button("Genera / rigenera piano settimanale",type="primary"):
         try:
             ep=energy_profile(); model=genai.GenerativeModel("gemini-2.5-flash")
-            prompt=f'''Crea un piano alimentare italiano di 7 giorni. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Target alimentare stimato: {ep["target"]} kcal/giorno. Restituisci SOLO JSON con giorni Lunedì-Domenica, 4 pasti al giorno e per ogni pasto name + ingredients. Ogni ingredient deve avere name, qty, unit, kcal.'''
+            lunch_days=st.session_state.get("out_lunch_days",[])
+            dinner_days=st.session_state.get("out_dinner_days",[])
+            prompt=f'''Crea un piano alimentare italiano di 7 giorni. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Target alimentare stimato: {ep["target"]} kcal/giorno.
+GIORNI PRANZO FUORI CASA: {", ".join(lunch_days) if lunch_days else "nessuno"}.
+GIORNI CENA FUORI CASA: {", ".join(dinner_days) if dinner_days else "nessuno"}.
+Per ogni giorno crea 4 pasti. Nei pasti segnati come fuori casa NON inventare un piatto domestico: usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche con ingredienti reali. Restituisci SOLO JSON con giorni Lunedì-Domenica e per ogni pasto name + ingredients. Ogni ingredient deve avere name, qty, unit, kcal.'''
             raw=model.generate_content(prompt).text.replace("```json","").replace("```","").strip(); gen=json.loads(raw); out={}
             for day,ms in gen.items():
                 out[day]={}
@@ -1272,7 +1309,7 @@ elif st.session_state.page=="Piano":
                 rec=meal_recommendation(day,"🍽️ Pranzo",b)
                 planned=rec["name"] if rec else "nessun pranzo disponibile nel piano"
                 planned_kcal=rec["planned_kcal"] if rec else 0
-                prompt=f"""Analizza questo menu della mensa e consiglia la scelta migliore per oggi.
+                prompt=f"""Analizza questo menu fuori casa e consiglia la scelta migliore per oggi.
 Profilo operativo: piano del giorno con pranzo previsto: {planned}; calorie previste dal piano: {planned_kcal} kcal; calorie ancora disponibili oggi: {b['remaining']} kcal.
 Confronta le alternative del menu con il piano, senza inventare piatti non presenti nella foto.
 Rispondi in modo breve e pratico con:
