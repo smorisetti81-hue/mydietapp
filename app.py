@@ -200,6 +200,33 @@ def eaten_kcal():
     total += sum(float(x["kcal"]) for x in st.session_state.manual_foods if x["date"]==today())
     return round(total)
 
+def plan_food_suggestions(current_day=None, current_meal=None, limit=8):
+    """Return unique foods already present somewhere in the weekly plan.
+    The current meal is excluded so suggestions are genuinely useful additions.
+    Sorted by frequency in the plan, then alphabetically.
+    """
+    foods={}
+    for day, meal_name, meal in meals():
+        for item in meal.get("ingredients",[]):
+            if day == current_day and meal_name == current_meal:
+                continue
+            name=str(item.get("name","Alimento")).strip()
+            if not name:
+                continue
+            key=(name.lower(), str(item.get("unit","g")))
+            if key not in foods:
+                foods[key]={
+                    "name":name,
+                    "qty":float(item.get("qty",1)),
+                    "unit":str(item.get("unit","g")),
+                    "kcal":float(item.get("kcal",0)),
+                    "count":0,
+                }
+            foods[key]["count"] += 1
+    values=list(foods.values())
+    values.sort(key=lambda x:(-x["count"], x["name"].lower()))
+    return values[:limit]
+
 def grocery():
     d=defaultdict(lambda:[0,"",""])
     for _,_,m in meals():
@@ -978,6 +1005,28 @@ elif st.session_state.page=="Piano":
                                 st.session_state.eaten[item["id"]]=False
                                 st.rerun()
             with st.expander("➕ Aggiungi alimento"):
+                suggestions=plan_food_suggestions(day,mn,limit=8)
+                if suggestions:
+                    st.markdown("**💡 Suggeriti dal tuo piano**")
+                    st.caption("Puoi riutilizzare un alimento già presente nella settimana: valori e porzione vengono copiati automaticamente.")
+                    for idx,sug in enumerate(suggestions):
+                        c1,c2=st.columns([5,1.4])
+                        with c1:
+                            st.markdown(f"**{sug['name']}** · {sug['qty']:g} {sug['unit']} · {round(sug['kcal'])} kcal")
+                        with c2:
+                            if st.button("+ Aggiungi",key=f"suggest_{day}_{mn}_{idx}",use_container_width=True):
+                                st.session_state.meal_plan[day][mn]["ingredients"].append({
+                                    "id":sid(),
+                                    "name":sug["name"],
+                                    "qty":sug["qty"],
+                                    "unit":sug["unit"],
+                                    "kcal":sug["kcal"],
+                                })
+                                st.rerun()
+                    st.divider()
+                else:
+                    st.info("Nel piano non ci sono ancora altri alimenti da suggerire.")
+                st.markdown("**🔎 Inserisci un alimento nuovo**")
                 a,b,c,d=st.columns([3,1,1,1])
                 with a:n=st.text_input("Nome",key=f"n_{day}_{mn}")
                 with b:q=st.number_input("Qtà",min_value=.1,value=10.,step=1.,key=f"q_{day}_{mn}")
