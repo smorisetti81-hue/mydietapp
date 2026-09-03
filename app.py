@@ -720,6 +720,9 @@ for col,(name,icon) in zip(cols,pages.items()):
 
 # ---------------- Home ----------------
 if st.session_state.page=="Home":
+    # Health snapshot received from the Android bridge for this session.
+    # Keep this local variable available to the whole Home block.
+    h=st.session_state.get("health",{})
     b=balance()
     rem=b["remaining"]
     msg=f"Ti restano {rem:,} kcal".replace(",",".") if rem>=0 else f"Sei sopra il target di {abs(rem):,} kcal".replace(",",".")
@@ -735,7 +738,11 @@ if st.session_state.page=="Home":
         c1.metric("🔥 Consumo finora",f"{b['observed_burn']:,} kcal".replace(",","."))
         c2.metric("⚡ Attive stimate finora",f"{b['active_observed']:,} kcal".replace(",","."))
         c3.metric("🎯 Consumo stimato oggi",f"{b['projected_burn']:,} kcal".replace(",","."))
-        st.caption(f"Il budget dinamico proietta fino a mezzanotte il solo consumo a riposo residuo ({b['remaining_rest']} kcal). Non vengono inventate attività future.")
+        st.caption(
+            f"Il budget dinamico usa il consumo Health osservato ({b['observed_burn']} kcal) "
+            f"e aggiunge solo il consumo a riposo residuo fino a mezzanotte ({b['remaining_rest']} kcal). "
+            "Non vengono inventate attività future."
+        )
     st.subheader("🍽️ Oggi")
     st.caption("Registra i pasti quando li mangi: il totale in alto si aggiorna automaticamente.")
     d=current_day_name(); ms=st.session_state.meal_plan.get(d)
