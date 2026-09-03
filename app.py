@@ -13,7 +13,7 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v32
+# MyDietApp v33
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
 # - recommendations adapt to the current dynamic calorie budget
@@ -195,7 +195,7 @@ _defaults = {
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
     "name":"Stefano", "weight":135.0, "height":180.0, "age":40, "sex":"male",
-    "activity_level":"moderata", "deficit":500, "water_goal_ml":2500
+    "activity_level":"moderata", "deficit":500, "water_goal_ml":2500, "quantity_mode":"porzioni"
 }.items(): st.session_state.setdefault("p_"+k,v)
 
 
@@ -262,6 +262,36 @@ def item_qty(item):
 
 def item_kcal(item):
     return float(item.get("kcal",0)) * item_multiplier(item)
+
+def quantity_mode():
+    return st.session_state.get("p_quantity_mode", "porzioni")
+
+def quantity_label(item):
+    """Human-friendly quantity according to the user's preferred display mode.
+    Internal grams/ml/units remain available to the calculation engine.
+    """
+    mode = quantity_mode()
+    q = item_qty(item)
+    unit = str(item.get("unit", "g")).lower()
+    if mode == "precise":
+        return f"{q:g}{unit}"
+    portions = item_multiplier(item)
+    if abs(portions - 1) < 0.01:
+        return "1 porzione"
+    if abs(portions - 0.5) < 0.01:
+        return "½ porzione"
+    if abs(portions - 1.5) < 0.01:
+        return "1½ porzioni"
+    if abs(portions - 2) < 0.01:
+        return "2 porzioni"
+    return f"{portions:g} porzioni"
+
+def quantity_caption(item):
+    mode = quantity_mode()
+    label = quantity_label(item)
+    if mode == "both":
+        return f"{label} · {item_qty(item):g}{item.get('unit','g')}"
+    return label
 
 def qty_step(unit, qty):
     unit=str(unit).lower()
@@ -1124,7 +1154,7 @@ if st.session_state.page=="Home":
                     st.metric("kcal",kcal)
                 with st.expander("Dettagli"):
                     for item in items:
-                        st.write(f"• {item['name']} — {item_qty(item):g}{item['unit']} · {round(item_kcal(item))} kcal")
+                        st.write(f"• {item['name']} — {quantity_caption(item)} · {round(item_kcal(item))} kcal")
 
     # ---------------- Live energy balance ----------------
     st.divider()
@@ -1159,7 +1189,7 @@ if st.session_state.page=="Home":
 # ---------------- Piano ----------------
 elif st.session_state.page=="Piano":
     st.title("🍽️ Il tuo piano")
-    st.caption("Modifica direttamente le quantità: il totale del pasto e la lista della spesa si aggiornano automaticamente.")
+    st.caption("Le quantità precise restano nel motore; qui puoi scegliere se vedere grammature, porzioni o entrambe. Il totale del pasto e la lista della spesa si aggiornano automaticamente.")
     st.subheader("📍 Pasti fuori casa")
     st.caption("Imposta separatamente pranzo e cena: puoi avere entrambi fuori casa oppure, per esempio, solo il pranzo fuori casa e la cena a casa.")
     days_week=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
@@ -1191,18 +1221,26 @@ elif st.session_state.page=="Piano":
                 if ov.get("removed"): continue
                 mult=item_multiplier(item); current_qty=item_qty(item); current_kcal=item_kcal(item)
                 step=qty_step(item.get("unit","g"), current_qty)
-                c1,c2,c3,c4,c5=st.columns([4.7,0.9,1.25,0.9,1.4])
+                c1,c2,c3,c4,c5=st.columns([4.7,0.9,1.45,0.9,1.4])
                 with c1:
-                    eaten=st.checkbox(f"{item['name']} · {current_qty:g}{item['unit']} · {round(current_kcal)} kcal",value=st.session_state.eaten.get(item['id'],False),key="eat_"+item['id'])
+                    eaten=st.checkbox(f"{item['name']} · {quantity_caption(item)} · {round(current_kcal)} kcal",value=st.session_state.eaten.get(item['id'],False),key="eat_"+item['id'])
                     st.session_state.eaten[item['id']]=eaten
                 with c2:
                     if st.button("−",key="minus_"+item['id'],use_container_width=True):
-                        set_item_qty(item,current_qty-step); st.rerun()
+                        if quantity_mode() == "precise":
+                            set_item_qty(item,current_qty-step)
+                        else:
+                            set_item_qty(item,max(0.5,mult-0.5)*float(item.get("qty",1)))
+                        st.rerun()
                 with c3:
-                    st.metric("Qtà",f"{current_qty:g} {item['unit']}")
+                    st.metric("Porzione" if quantity_mode() != "precise" else "Qtà", quantity_caption(item) if quantity_mode() != "precise" else f"{current_qty:g} {item['unit']}")
                 with c4:
                     if st.button("+",key="plus_"+item['id'],use_container_width=True):
-                        set_item_qty(item,current_qty+step); st.rerun()
+                        if quantity_mode() == "precise":
+                            set_item_qty(item,current_qty+step)
+                        else:
+                            set_item_qty(item,(mult+0.5)*float(item.get("qty",1)))
+                        st.rerun()
                 with c5:
                     if st.button("✏️ Modifica",key="edit_"+item['id'],use_container_width=True):
                         st.session_state[f"edit_open_{item['id']}"]=not st.session_state.get(f"edit_open_{item['id']}",False)
@@ -1235,7 +1273,8 @@ elif st.session_state.page=="Piano":
                     for idx,sug in enumerate(suggestions):
                         c1,c2=st.columns([5,1.4])
                         with c1:
-                            st.markdown(f"**{sug['name']}** · {sug['qty']:g} {sug['unit']} · {round(sug['kcal'])} kcal")
+                            sug_label = (f"{sug['qty']:g} {sug['unit']}" if quantity_mode()=="precise" else (f"1 porzione · {sug['qty']:g} {sug['unit']}" if quantity_mode()=="both" else "1 porzione"))
+                            st.markdown(f"**{sug['name']}** · {sug_label} · {round(sug['kcal'])} kcal")
                         with c2:
                             if st.button("+ Aggiungi",key=f"suggest_{day}_{mn}_{idx}",use_container_width=True):
                                 st.session_state.meal_plan[day][mn]["ingredients"].append({
@@ -1271,7 +1310,7 @@ elif st.session_state.page=="Piano":
                     day_kcal=round(sum(float(i.get("kcal",0)) for _,hm in hms.items() for i in hm.get("ingredients",[])))
                     st.markdown(f"**{hday}** · {day_kcal} kcal")
                     for hmn,hm in hms.items():
-                        names=", ".join(f"{i.get('name','Alimento')} {i.get('qty',1):g}{i.get('unit','g')}" for i in hm.get('ingredients',[]))
+                        names=", ".join(f"{i.get('name','Alimento')} · {i.get('qty',1):g}{i.get('unit','g')}" for i in hm.get('ingredients',[]))
                         st.caption(f"{hmn}: {names}")
     else:
         st.caption("Ancora nessun piano storico. Il primo verrà conservato automaticamente quando genererai il piano successivo.")
@@ -1497,8 +1536,24 @@ else:
             activity=st.selectbox("Attività abituale",list(ACTIVITY_FACTORS.keys()),index=list(ACTIVITY_FACTORS.keys()).index(st.session_state.p_activity_level))
             deficit=st.select_slider("Deficit desiderato",options=[300,500,700],value=int(st.session_state.p_deficit),format_func=lambda x:f"{x} kcal/giorno")
             water_goal=st.select_slider("Obiettivo acqua",options=list(range(1500,4001,250)),value=int(st.session_state.p_water_goal_ml),format_func=lambda x:f"{x/1000:.2f} L/giorno")
+            quantity_mode_value=st.radio(
+                "Come vuoi vedere le quantità?",
+                ["porzioni","both","precise"],
+                index=["porzioni","both","precise"].index(st.session_state.get("p_quantity_mode","porzioni")),
+                format_func=lambda x: {
+                    "porzioni":"👌 Porzioni — niente bilancia",
+                    "both":"⚖️ Porzioni + grammature",
+                    "precise":"⚖️ Preciso — mostra le grammature"
+                }[x],
+                help="Le grammature restano comunque nel motore per calcolare calorie e lista della spesa. Cambia solo ciò che vedi.",
+            )
         if st.form_submit_button("Salva",type="primary"):
-            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_deficit=deficit; st.session_state.p_water_goal_ml=water_goal; st.success("Profilo aggiornato")
+            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_deficit=deficit; st.session_state.p_water_goal_ml=water_goal; st.session_state.p_quantity_mode=quantity_mode_value; st.success("Profilo aggiornato")
+    st.caption({
+        "porzioni":"👌 Modalità quantità: **Porzioni** — niente bilancia. MyDietApp calcola comunque le quantità in background.",
+        "both":"⚖️ Modalità quantità: **Porzioni + grammature**.",
+        "precise":"⚖️ Modalità quantità: **Preciso** — grammature visibili."
+    }.get(quantity_mode(), "👌 Modalità quantità: **Porzioni**."))
     ep=energy_profile()
     st.subheader("🎯 Obiettivo energetico")
     st.metric("Target alimentare stimato",f"{ep['target']:,} kcal/giorno".replace(",","."))
