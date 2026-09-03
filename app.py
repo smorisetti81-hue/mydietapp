@@ -13,7 +13,7 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v31
+# MyDietApp v32
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
 # - recommendations adapt to the current dynamic calorie budget
@@ -361,7 +361,7 @@ def meal_recommendation(day, meal_name, balance_data=None):
     future_planned=_planned_remaining_after_meal(day, meal_name)
     budget_for_meal=max(0, remaining-future_planned)
     after_meal=max(0, remaining-planned_kcal)
-    office=out_of_home_meal_configured(day, meal_name) or "UFFICIO" in planned_name.upper()
+    out_of_home=out_of_home_meal_configured(day, meal_name) or "UFFICIO" in planned_name.upper() or "FUORI CASA" in planned_name.upper()
 
     if out_of_home:
         status="mensa"
@@ -399,7 +399,7 @@ def show_daily_meal_recommendation(meal_name, day, balance_data):
     if not rec:
         return
     title="Pranzo" if meal_name=="🍽️ Pranzo" else "Cena"
-    icon="🏢" if rec["office"] else ("🍽️" if meal_name=="🍽️ Pranzo" else "🌙")
+    icon="📍" if rec["out_of_home"] else ("🍽️" if meal_name=="🍽️ Pranzo" else "🌙")
     status_labels={"good":"🟢 Segui il piano","adapt":"🟡 Adatta leggermente","over":"🔴 Da adattare","mensa":"📍 Fuori casa","unknown":"⚪ Calorie non definite"}
     with st.container(border=True):
         st.markdown(f"### {icon} {title}")
@@ -439,6 +439,7 @@ def add_water_ml(delta):
     current=water_today_ml()
     st.session_state.water_history[d]=max(0, current + int(delta))
 
+# V32: fixed the out_of_home variable mismatch in meal_recommendation/show_daily_meal_recommendation.
 # ---------------- Energy model ----------------
 def bmr_mifflin(weight, height, age, sex):
     # Mifflin-St Jeor. This is an estimate, not a medical measurement.
