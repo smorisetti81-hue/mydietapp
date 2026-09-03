@@ -12,7 +12,7 @@ from collections import defaultdict
 import uuid
 
 # ============================================================
-# MyDietApp v18
+# MyDietApp v19
 # Health-first release:
 # - real Google Fit data diagnostics
 # - robust aggregation for cumulative vs point data
@@ -738,34 +738,59 @@ if st.session_state.page=="Home":
         st.caption(f"Il budget dinamico proietta fino a mezzanotte il solo consumo a riposo residuo ({b['remaining_rest']} kcal). Non vengono inventate attività future.")
     st.subheader("🍽️ Oggi")
     st.caption("Registra i pasti quando li mangi: il totale in alto si aggiorna automaticamente.")
-    d=current_day_name(); ms=st.session_state.meal_plan.get(d) or next(iter(st.session_state.meal_plan.values()))
+    d=current_day_name(); ms=st.session_state.meal_plan.get(d)
 
-    for idx,(mn,m) in enumerate(ms.items()):
-        items=active_items(m)
-        kcal=round(sum(float(i["kcal"])*float(st.session_state.overrides.get(i["id"],{}).get("multiplier",1)) for i in items))
-        meal_ids=[i["id"] for i in items]
-        registered=bool(meal_ids) and all(st.session_state.eaten.get(iid,False) for iid in meal_ids)
-        status="✅ Registrato" if registered else "○ Non registrato"
-        with st.container(border=True):
-            c1,c2,c3=st.columns([5,2,1])
-            with c1:
-                st.markdown(f"**{mn}**")
-                st.caption(f"{m.get('name','Pasto')} · {kcal} kcal · {status}")
-            with c2:
-                if not registered:
-                    if st.button("🍴 Ho mangiato",key=f"home_eat_{d}_{idx}",use_container_width=True):
-                        for iid in meal_ids: st.session_state.eaten[iid]=True
-                        st.rerun()
-                else:
-                    if st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True):
-                        for iid in meal_ids: st.session_state.eaten[iid]=False
-                        st.rerun()
-            with c3:
-                st.metric("kcal",kcal)
-            with st.expander("Dettagli"):
-                for item in items:
-                    mult=float(st.session_state.overrides.get(item["id"],{}).get("multiplier",1))
-                    st.write(f"• {item['name']} — {item['qty']*mult:g}{item['unit']} · {round(item['kcal']*mult)} kcal")
+    if not ms:
+        st.info(f"Non hai ancora un piano alimentare per {d}. Vai in **Piano** e genera il piano settimanale.")
+    else:
+        for idx,(mn,m) in enumerate(ms.items()):
+            items=active_items(m)
+            kcal=round(sum(float(i["kcal"])*float(st.session_state.overrides.get(i["id"],{}).get("multiplier",1)) for i in items))
+            meal_ids=[i["id"] for i in items]
+            registered=bool(meal_ids) and all(st.session_state.eaten.get(iid,False) for iid in meal_ids)
+            status="✅ Registrato" if registered else "○ Non registrato"
+            with st.container(border=True):
+                c1,c2,c3=st.columns([5,2,1])
+                with c1:
+                    st.markdown(f"**{mn}**")
+                    st.caption(f"{m.get('name','Pasto')} · {kcal} kcal · {status}")
+                with c2:
+                    if not registered:
+                        if st.button("🍴 Ho mangiato",key=f"home_eat_{d}_{idx}",use_container_width=True):
+                            for iid in meal_ids: st.session_state.eaten[iid]=True
+                            st.rerun()
+                    else:
+                        if st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True):
+                            for iid in meal_ids: st.session_state.eaten[iid]=False
+                            st.rerun()
+                with c3:
+                    st.metric("kcal",kcal)
+                with st.expander("Dettagli"):
+                    for item in items:
+                        mult=float(st.session_state.overrides.get(item["id"],{}).get("multiplier",1))
+                        st.write(f"• {item['name']} — {item['qty']*mult:g}{item['unit']} · {round(item['kcal']*mult)} kcal")
+
+    # ---------------- Live energy balance ----------------
+    st.divider()
+    st.subheader("⚡ Bilancio energetico di oggi")
+    if b["using_observed"]:
+        net_so_far=b["eaten"]-b["observed_burn"]
+        projected_deficit=b["projected_burn"]-b["eaten"]
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric("🍽️ Assunte",f"{b['eaten']:,} kcal".replace(",","."))
+        c2.metric("🔥 Consumate finora",f"{b['observed_burn']:,} kcal".replace(",","."))
+        c3.metric("🎯 Target alimentare",f"{b['live_target']:,} kcal".replace(",","."))
+        c4.metric("📉 Deficit previsto",f"{projected_deficit:,} kcal".replace(",","."))
+        if net_so_far < 0:
+            st.success(f"Sei attualmente a **{abs(net_so_far):,} kcal sotto il consumo osservato**. Il dato continua ad aggiornarsi con Health.".replace(",","."))
+        elif net_so_far > 0:
+            st.warning(f"Sei attualmente a **{net_so_far:,} kcal sopra il consumo osservato**. È un dato provvisorio della giornata.".replace(",","."))
+        else:
+            st.info("Assunte e consumate sono momentaneamente allo stesso livello.")
+        if h.get("active_calories_today") is not None:
+            st.caption(f"👣 {int(h.get('steps_today') or 0):,} passi · ⚡ {float(h['active_calories_today']):.0f} kcal attive · 🔥 {b['projected_burn']:,} kcal consumo stimato a fine giornata.".replace(",","."))
+    else:
+        st.info("Collega il bridge Health Connect per trasformare il target stimato in un budget dinamico basato sul consumo reale di oggi.")
 
     manual_today=[x for x in st.session_state.manual_foods if x["date"]==today()]
     if manual_today:
