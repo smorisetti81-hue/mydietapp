@@ -12,7 +12,7 @@ from collections import defaultdict
 import uuid
 
 # ============================================================
-# MyDietApp v15
+# MyDietApp v18
 # Health-first release:
 # - real Google Fit data diagnostics
 # - robust aggregation for cumulative vs point data
@@ -737,10 +737,43 @@ if st.session_state.page=="Home":
         c3.metric("🎯 Consumo stimato oggi",f"{b['projected_burn']:,} kcal".replace(",","."))
         st.caption(f"Il budget dinamico proietta fino a mezzanotte il solo consumo a riposo residuo ({b['remaining_rest']} kcal). Non vengono inventate attività future.")
     st.subheader("🍽️ Oggi")
+    st.caption("Registra i pasti quando li mangi: il totale in alto si aggiorna automaticamente.")
     d=current_day_name(); ms=st.session_state.meal_plan.get(d) or next(iter(st.session_state.meal_plan.values()))
-    for mn,m in list(ms.items())[:2]:
-        kcal=round(sum(float(i["kcal"])*float(st.session_state.overrides.get(i["id"],{}).get("multiplier",1)) for i in active_items(m)))
-        st.write(f"**{mn}** · {m.get('name','Pasto')} · {kcal} kcal")
+
+    for idx,(mn,m) in enumerate(ms.items()):
+        items=active_items(m)
+        kcal=round(sum(float(i["kcal"])*float(st.session_state.overrides.get(i["id"],{}).get("multiplier",1)) for i in items))
+        meal_ids=[i["id"] for i in items]
+        registered=bool(meal_ids) and all(st.session_state.eaten.get(iid,False) for iid in meal_ids)
+        status="✅ Registrato" if registered else "○ Non registrato"
+        with st.container(border=True):
+            c1,c2,c3=st.columns([5,2,1])
+            with c1:
+                st.markdown(f"**{mn}**")
+                st.caption(f"{m.get('name','Pasto')} · {kcal} kcal · {status}")
+            with c2:
+                if not registered:
+                    if st.button("🍴 Ho mangiato",key=f"home_eat_{d}_{idx}",use_container_width=True):
+                        for iid in meal_ids: st.session_state.eaten[iid]=True
+                        st.rerun()
+                else:
+                    if st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True):
+                        for iid in meal_ids: st.session_state.eaten[iid]=False
+                        st.rerun()
+            with c3:
+                st.metric("kcal",kcal)
+            with st.expander("Dettagli"):
+                for item in items:
+                    mult=float(st.session_state.overrides.get(item["id"],{}).get("multiplier",1))
+                    st.write(f"• {item['name']} — {item['qty']*mult:g}{item['unit']} · {round(item['kcal']*mult)} kcal")
+
+    manual_today=[x for x in st.session_state.manual_foods if x["date"]==today()]
+    if manual_today:
+        with st.container(border=True):
+            st.markdown("**🍴 Alimenti registrati manualmente**")
+            for j,x in enumerate(manual_today):
+                st.write(f"• {x['name']} · {round(float(x['kcal']))} kcal")
+
     if st.session_state.last_sync: st.caption("Ultima sincronizzazione Health: "+st.session_state.last_sync)
 
 # ---------------- Piano ----------------
