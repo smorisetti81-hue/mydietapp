@@ -3,6 +3,7 @@ import google.generativeai as genai
 import json
 import pandas as pd
 import urllib.parse
+import base64
 import requests
 from datetime import datetime, timedelta, timezone, date
 from zoneinfo import ZoneInfo
@@ -42,6 +43,88 @@ st.markdown("""
 .small {font-size:.82rem;color:#888;}
 </style>
 """, unsafe_allow_html=True)
+
+# ---------------- Native Health Connect bridge ----------------
+HEALTH_BRIDGE_PARAM = "mydiet_health"
+
+def _decode_health_bridge_payload(raw):
+    """Decode a compact URL-safe Health Connect snapshot from the Android bridge."""
+    if not raw:
+        return None
+    try:
+        pad = "=" * (-len(raw) % 4)
+        data = base64.urlsafe_b64decode((raw + pad).encode("ascii"))
+        obj = json.loads(data.decode("utf-8"))
+        if obj.get("schema") != "mydietapp.health.v1":
+            return None
+        return obj
+    except Exception:
+        return None
+
+def _ingest_native_health_bridge():
+    raw = st.query_params.get(HEALTH_BRIDGE_PARAM)
+    if not raw:
+        return False
+    payload = _decode_health_bridge_payload(raw)
+    if not payload:
+        return False
+    # Avoid rewriting state on every Streamlit rerun. The payload itself remains
+    # in the URL so a browser refresh can restore the latest bridge snapshot.
+    fingerprint = raw[:32]
+    if st.session_state.get("health_bridge_fingerprint") == fingerprint:
+        return False
+    metrics = payload.get("metrics", {})
+    health = {
+        "provider": {
+            "key": "health_connect_native",
+            "name": "Health Connect (Android nativo)",
+            "status": "active",
+            "schema": payload.get("schema"),
+            "received_at": datetime.now(ROME).isoformat(),
+            "bridge_version": payload.get("bridge_version"),
+        },
+        "date": payload.get("date") or today(),
+        "steps_today": metrics.get("steps"),
+        "calories_today": metrics.get("total_calories"),
+        "active_calories_today": metrics.get("active_calories"),
+        "distance_today": metrics.get("distance_km"),
+        "weight": metrics.get("weight_kg"),
+        "body_fat": metrics.get("body_fat_percent"),
+        "lean_mass": metrics.get("lean_mass_kg"),
+        "bmr": metrics.get("bmr_kcal_per_day"),
+        "workouts_today": metrics.get("workouts"),
+        "heart_rate_avg": metrics.get("heart_rate_avg"),
+        "heart_rate_min": metrics.get("heart_rate_min"),
+        "heart_rate_max": metrics.get("heart_rate_max"),
+        "heart_rate_samples": metrics.get("heart_rate_samples"),
+        "sleep_minutes": metrics.get("sleep_minutes"),
+        "steps_source_verified": bool(payload.get("trust", {}).get("steps", False)),
+        "calories_source_verified": bool(payload.get("trust", {}).get("total_calories", False)),
+        "native_health_snapshot": True,
+        "native_health_payload": payload,
+    }
+    # Keep the history contract simple for the first native bridge release.
+    hist = {}
+    for key, value in (("steps", metrics.get("steps")), ("calories", metrics.get("total_calories")),
+                       ("weight", metrics.get("weight_kg")), ("body_fat", metrics.get("body_fat_percent")),
+                       ("distance", metrics.get("distance_km"))):
+        if value is not None:
+            hist[key] = [{"date": health["date"], "value": value}]
+    st.session_state.health = health
+    st.session_state.health_history = hist
+    st.session_state.diagnostics = {
+        "native_bridge": {
+            "status": "available",
+            "type": "Health Connect native snapshot",
+            "bridge_version": payload.get("bridge_version"),
+            "received_at": health["provider"]["received_at"],
+        }
+    }
+    st.session_state.last_sync = datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+    st.session_state.health_bridge_fingerprint = fingerprint
+    return True
+
+_ingest_native_health_bridge()
 
 # ---------------- State ----------------
 def sid(): return uuid.uuid4().hex[:10]
@@ -124,7 +207,7 @@ def balance():
     return {
         "target":e["target"], "live_target":live_target, "eaten":eaten,
         "remaining":live_target-eaten, "observed_burn":round(observed),
-        "bmr_est":e["bmr_est"], "bmr_health":round(bmr_health) if bmr_health else None,
+        "bmr_est":e["bmr_est"], "bmr_health":round(float(h.get("bmr"))) if h.get("bmr") is not None else None,
         "maintenance":e["maintenance_est"], "deficit":e["deficit"],
         "using_observed":observed > 0
     }
@@ -168,17 +251,19 @@ class GoogleFitProvider(HealthProvider):
 class HealthConnectProvider(HealthProvider):
     key = "health_connect_native"
     name = "Health Connect (Android nativo)"
-    status = "planned"
+    status = "active"
 
     def sync(self, days=14):
-        raise RuntimeError(
-            "Health Connect richiede il componente Android nativo: "
-            "il server Streamlit non può leggere direttamente i dati locali del telefono."
-        )
+        h = st.session_state.get("health", {})
+        if not h.get("native_health_snapshot"):
+            raise RuntimeError("Nessun snapshot Health Connect ricevuto dal bridge Android.")
+        return h, st.session_state.get("health_history", {}), st.session_state.get("diagnostics", {})
 
 def get_health_provider():
-    # V14: Google Fit remains the compatibility provider. The selector is the
-    # only place that needs changing when the native Android bridge is ready.
+    # Native Health Connect snapshot wins whenever the Android bridge has pushed
+    # data into this Streamlit session. Google Fit remains diagnostic fallback.
+    if st.session_state.get("health", {}).get("native_health_snapshot"):
+        return HealthConnectProvider()
     return GoogleFitProvider()
 
 
@@ -587,7 +672,7 @@ def sync_google_fit_health(days=14):
     data["calories_today"]=None
     data["calories_untrusted_value"]=cal if cal is not None else None
     data["calories_source_verified"]=False
-    dist=next((x["value"] for x in hist["distance"] if x["date"]==t),None)
+    dist=next((x["value"] for x in hist["distance"] if x["date"]==today()),None)
     data["distance_today"]=dist/1000 if dist is not None else None
     data["source_catalogs"]=catalogs
     data["source_comparisons"]=comparisons
@@ -698,9 +783,16 @@ elif st.session_state.page=="Dispensa":
 # ---------------- Attività / Health ----------------
 elif st.session_state.page=="Attività":
     st.title("🏃 Attività & Health")
-    st.caption("Dati reali separati dal target alimentare. La sincronizzazione è manuale per evitare chiamate inutili a Google Fit.")
+    if st.session_state.get("health", {}).get("native_health_snapshot"):
+        p = st.session_state.health.get("provider", {})
+        st.success(f"✓ Health Connect nativo attivo · snapshot ricevuto {st.session_state.last_sync or '—'}")
+        st.caption(f"Bridge Android {p.get('bridge_version') or '—'} · Samsung Health → Health Connect → MyDietApp")
+    else:
+        st.caption("Dati reali separati dal target alimentare. Health Connect nativo è la fonte produttiva; Google Fit resta solo diagnostica.")
     cid=st.secrets.get("GOOGLE_CLIENT_ID"); cs=st.secrets.get("GOOGLE_CLIENT_SECRET"); ru=st.secrets.get("REDIRECT_URI")
-    if not cid or not cs or not ru: st.error("Mancano GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET o REDIRECT_URI nei secrets.")
+    if st.session_state.get("health", {}).get("native_health_snapshot"):
+        st.info("I dati mostrati sotto arrivano dal bridge Android Health Connect. Google Fit non viene interrogato per il bilancio.")
+    elif not cid or not cs or not ru: st.error("Mancano GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET o REDIRECT_URI nei secrets.")
     else:
         if "code" in st.query_params:
             r=requests.post("https://oauth2.googleapis.com/token",data={"client_id":cid,"client_secret":cs,"code":st.query_params["code"],"grant_type":"authorization_code","redirect_uri":ru},timeout=20)
@@ -742,7 +834,13 @@ elif st.session_state.page=="Attività":
                 fat=h["weight"]*h["body_fat"]/100; lean=h["weight"]-fat
                 c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
             st.divider(); st.subheader("🧪 Diagnostica")
-            st.info("📱 V15: i dati Google Fit legacy restano disponibili solo per diagnosi. I passi derivati (es. 6.299) e le calorie legacy (es. 3.789 kcal) NON vengono usati nel bilancio perché non possiamo dimostrare che rappresentino correttamente il Galaxy Watch Ultra 2. Il BMR Google Fit non viene usato: per ora il calcolo usa il profilo. Il provider definitivo sarà Samsung Health → Health Connect → componente Android nativo.")
+            st.info("📱 V16: Health Connect nativo è il provider produttivo quando è presente uno snapshot del bridge. Google Fit legacy resta disponibile solo come diagnostica. I passi derivati (es. 6.299) e le calorie legacy (es. 3.789 kcal) NON vengono usati nel bilancio perché non possiamo dimostrare che rappresentino correttamente il Galaxy Watch Ultra 2. Il BMR Google Fit non viene usato: per ora il calcolo usa il profilo. Il provider definitivo sarà Samsung Health → Health Connect → componente Android nativo.")
+            if h.get("native_health_snapshot"):
+                trust = h.get("native_health_payload", {}).get("trust", {})
+                st.write("**Fonte produttiva:** Health Connect nativo")
+                st.write("Passi verificati:", "Sì" if trust.get("steps") else "No")
+                st.write("Calorie totali verificate:", "Sì" if trust.get("total_calories") else "No")
+
             diag_view=st.session_state.get("diagnostics",{})
             comp_steps=diag_view.get("_source_compare_steps",[])
             comp_cal=diag_view.get("_source_compare_calories",[])

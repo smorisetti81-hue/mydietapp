@@ -1,2 +1,30 @@
 .streamlit/secrets.toml
 test_modelli.py
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Android / Gradle
+**/build/
+**/.gradle/
+**/local.properties/
+
+# Android Studio
+**/.idea/
+*.iml
+
+# Generated Android files
+**/captures/
+**/.externalNativeBuild/
+**/.cxx/
+
+# OS
+.DS_Store
+Thumbs.db
