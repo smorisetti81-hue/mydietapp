@@ -138,12 +138,53 @@ def sid(): return uuid.uuid4().hex[:10]
 
 def init_plan():
     def ing(n,q,u,k): return {"id":sid(),"name":n,"qty":q,"unit":u,"kcal":k}
-    return {"Lunedì": {
-        "☕ Colazione":{"name":"Yogurt, avena e frutta","ingredients":[ing("Yogurt greco",250,"g",180),ing("Avena",50,"g",190),ing("Miele",10,"g",30)]},
-        "🍎 Spuntino":{"name":"Mela e mandorle","ingredients":[ing("Mela",180,"g",95),ing("Mandorle",15,"g",90)]},
-        "🍽️ Pranzo":{"name":"Riso, pollo e verdure","ingredients":[ing("Riso basmati",90,"g",320),ing("Petto di pollo",180,"g",300),ing("Zucchine",250,"g",45),ing("Olio EVO",10,"g",90)]},
-        "🌙 Cena":{"name":"Uova, pane e verdure","ingredients":[ing("Uova",2,"pz",150),ing("Pane integrale",70,"g",175),ing("Insalata mista",250,"g",50),ing("Olio EVO",10,"g",90)]}
-    }}
+    # Piano demo completo per tutti i 7 giorni. In questo modo la Home non rimane
+    # senza il giorno corrente quando una nuova sessione Streamlit viene aperta.
+    return {
+        "Lunedì": {
+            "☕ Colazione":{"name":"Yogurt, avena e frutta","ingredients":[ing("Yogurt greco",250,"g",180),ing("Avena",50,"g",190),ing("Miele",10,"g",30)]},
+            "🍎 Spuntino":{"name":"Mela e mandorle","ingredients":[ing("Mela",180,"g",95),ing("Mandorle",15,"g",90)]},
+            "🍽️ Pranzo":{"name":"Riso, pollo e verdure","ingredients":[ing("Riso basmati",90,"g",320),ing("Petto di pollo",180,"g",300),ing("Zucchine",250,"g",45),ing("Olio EVO",10,"g",90)]},
+            "🌙 Cena":{"name":"Uova, pane e verdure","ingredients":[ing("Uova",2,"pz",150),ing("Pane integrale",70,"g",175),ing("Insalata mista",250,"g",50),ing("Olio EVO",10,"g",90)]}
+        },
+        "Martedì": {
+            "☕ Colazione":{"name":"Yogurt, banana e avena","ingredients":[ing("Yogurt greco",250,"g",180),ing("Banana",120,"g",105),ing("Avena",40,"g",152)]},
+            "🍎 Spuntino":{"name":"Frutta e noci","ingredients":[ing("Pera",180,"g",100),ing("Noci",15,"g",98)]},
+            "🍽️ Pranzo":{"name":"Pasta al pomodoro e tacchino","ingredients":[ing("Pasta",90,"g",320),ing("Passata di pomodoro",150,"g",45),ing("Fesa di tacchino",180,"g",200),ing("Olio EVO",10,"g",90)]},
+            "🌙 Cena":{"name":"Salmone, patate e verdure","ingredients":[ing("Salmone",160,"g",330),ing("Patate",250,"g",190),ing("Verdure miste",250,"g",70),ing("Olio EVO",5,"g",45)]}
+        },
+        "Mercoledì": {
+            "☕ Colazione":{"name":"Pane, ricotta e frutta","ingredients":[ing("Pane integrale",80,"g",200),ing("Ricotta",100,"g",170),ing("Frutta",150,"g",80)]},
+            "🍎 Spuntino":{"name":"Yogurt e frutta","ingredients":[ing("Yogurt greco",170,"g",120),ing("Frutti di bosco",100,"g",45)]},
+            "🍽️ Pranzo":{"name":"Riso, tacchino e broccoli","ingredients":[ing("Riso basmati",90,"g",320),ing("Fesa di tacchino",180,"g",200),ing("Broccoli",250,"g",85),ing("Olio EVO",10,"g",90)]},
+            "🌙 Cena":{"name":"Frittata e pane","ingredients":[ing("Uova",3,"pz",225),ing("Pane integrale",70,"g",175),ing("Spinaci",250,"g",60),ing("Olio EVO",5,"g",45)]}
+        },
+        "Giovedì": {
+            "☕ Colazione":{"name":"Yogurt, avena e mela","ingredients":[ing("Yogurt greco",250,"g",180),ing("Avena",50,"g",190),ing("Mela",150,"g",80)]},
+            "🍎 Spuntino":{"name":"Banana e mandorle","ingredients":[ing("Banana",120,"g",105),ing("Mandorle",15,"g",90)]},
+            "🍽️ Pranzo":{"name":"Pollo, riso e verdure","ingredients":[ing("Petto di pollo",180,"g",300),ing("Riso basmati",80,"g",285),ing("Verdure miste",250,"g",70),ing("Olio EVO",10,"g",90)]},
+            "🌙 Cena":{"name":"Merluzzo, patate e insalata","ingredients":[ing("Merluzzo",200,"g",170),ing("Patate",250,"g",190),ing("Insalata mista",250,"g",50),ing("Olio EVO",10,"g",90)]}
+        },
+        "Venerdì": {
+            "☕ Colazione":{"name":"Yogurt, banana e avena","ingredients":[ing("Yogurt greco",250,"g",180),ing("Banana",120,"g",105),ing("Avena",40,"g",152)]},
+            "🍎 Spuntino":{"name":"Mela e noci","ingredients":[ing("Mela",180,"g",95),ing("Noci",15,"g",98)]},
+            "🍽️ Pranzo":{"name":"Pasta, tonno e pomodoro","ingredients":[ing("Pasta",90,"g",320),ing("Tonno al naturale",120,"g",130),ing("Passata di pomodoro",150,"g",45),ing("Olio EVO",10,"g",90)]},
+            "🌙 Cena":{"name":"Pollo, pane e verdure","ingredients":[ing("Petto di pollo",180,"g",300),ing("Pane integrale",70,"g",175),ing("Verdure miste",300,"g",80),ing("Olio EVO",10,"g",90)]}
+        },
+        "Sabato": {
+            "☕ Colazione":{"name":"Uova, pane e frutta","ingredients":[ing("Uova",2,"pz",150),ing("Pane integrale",70,"g",175),ing("Frutta",150,"g",80)]},
+            "🍎 Spuntino":{"name":"Yogurt e mandorle","ingredients":[ing("Yogurt greco",170,"g",120),ing("Mandorle",15,"g",90)]},
+            "🍽️ Pranzo":{"name":"Pasta al ragù leggero e insalata","ingredients":[ing("Pasta",90,"g",320),ing("Carne macinata magra",150,"g",250),ing("Passata di pomodoro",150,"g",45),ing("Insalata mista",200,"g",40)]},
+            "🌙 Cena":{"name":"Salmone, riso e verdure","ingredients":[ing("Salmone",150,"g",310),ing("Riso basmati",70,"g",250),ing("Verdure miste",250,"g",70),ing("Olio EVO",5,"g",45)]}
+        },
+        "Domenica": {
+            "☕ Colazione":{"name":"Yogurt, avena e frutta","ingredients":[ing("Yogurt greco",250,"g",180),ing("Avena",50,"g",190),ing("Frutta",150,"g",80)]},
+            "🍎 Spuntino":{"name":"Frutta e noci","ingredients":[ing("Pera",180,"g",100),ing("Noci",15,"g",98)]},
+            "🍽️ Pranzo":{"name":"Pollo al forno, patate e verdure","ingredients":[ing("Petto di pollo",200,"g",330),ing("Patate",250,"g",190),ing("Verdure miste",250,"g",70),ing("Olio EVO",10,"g",90)]},
+            "🌙 Cena":{"name":"Uova, pane e insalata","ingredients":[ing("Uova",2,"pz",150),ing("Pane integrale",70,"g",175),ing("Insalata mista",300,"g",60),ing("Olio EVO",10,"g",90)]}
+        }
+    }
+
 
 _defaults = {
     "page":"Home", "meal_plan":init_plan(), "overrides":{}, "eaten":{}, "manual_foods":[],
