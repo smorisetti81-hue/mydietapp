@@ -12,7 +12,7 @@ from collections import defaultdict
 import uuid
 
 # ============================================================
-# MyDietApp v19
+# MyDietApp v21
 # Health-first release:
 # - real Google Fit data diagnostics
 # - robust aggregation for cumulative vs point data
@@ -95,6 +95,7 @@ def _ingest_native_health_bridge():
         "lean_mass": metrics.get("lean_mass_kg"),
         "bmr": metrics.get("bmr_kcal_per_day"),
         "workouts_today": metrics.get("workouts"),
+        "workout_details_today": metrics.get("workout_details", []),
         "heart_rate_avg": metrics.get("heart_rate_avg"),
         "heart_rate_min": metrics.get("heart_rate_min"),
         "heart_rate_max": metrics.get("heart_rate_max"),
@@ -196,6 +197,35 @@ def energy_profile():
     maintenance=round(bmr*ACTIVITY_FACTORS[p["activity_level"]])
     target=max(1200, maintenance-int(p["deficit"]))
     return {"bmr_est":bmr,"maintenance_est":maintenance,"target":target,"deficit":int(p["deficit"]),"factor":ACTIVITY_FACTORS[p["activity_level"]]}
+
+def activity_summary():
+    """Summarize activity already contained in the observed Health total.
+
+    Active calories and workouts are descriptive components of the observed day;
+    they must not be added again to total_calories because that would double count.
+    """
+    h=st.session_state.get("health",{})
+    details=h.get("workout_details_today") or []
+    normalized=[]
+    for w in details:
+        if not isinstance(w,dict):
+            continue
+        try:
+            normalized.append({
+                "name":str(w.get("name") or "Attività"),
+                "duration_minutes":round(float(w.get("duration_minutes") or 0)),
+                "start":str(w.get("start") or ""),
+                "end":str(w.get("end") or ""),
+            })
+        except Exception:
+            continue
+    return {
+        "steps":int(float(h.get("steps_today") or 0)),
+        "active_calories":round(float(h.get("active_calories_today") or 0)),
+        "distance_km":float(h.get("distance_today") or 0),
+        "workouts":int(float(h.get("workouts_today") or len(normalized) or 0)),
+        "details":normalized,
+    }
 
 def balance():
     h=st.session_state.health
@@ -743,6 +773,20 @@ if st.session_state.page=="Home":
             f"e aggiunge solo il consumo a riposo residuo fino a mezzanotte ({b['remaining_rest']} kcal). "
             "Non vengono inventate attività future."
         )
+        a=activity_summary()
+        with st.container(border=True):
+            st.markdown("**🏃 Attività di oggi**")
+            ac1,ac2,ac3,ac4=st.columns(4)
+            ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
+            ac2.metric("⚡ Calorie attive", f"{a['active_calories']:,} kcal".replace(",","."))
+            ac3.metric("📏 Distanza", f"{a['distance_km']:.2f} km")
+            ac4.metric("🏋️ Allenamenti", str(a['workouts']))
+            if a["details"]:
+                for w in a["details"]:
+                    st.write(f"• **{w['name']}** · {w['duration_minutes']} min")
+            else:
+                st.caption("Nessuna sessione di allenamento registrata. I passi e le calorie attive continuano comunque ad aggiornarsi.")
+            st.caption("Le calorie attive sono già comprese nel consumo totale Health osservato: non vengono sommate una seconda volta.")
     st.subheader("🍽️ Oggi")
     st.caption("Registra i pasti quando li mangi: il totale in alto si aggiorna automaticamente.")
     d=current_day_name(); ms=st.session_state.meal_plan.get(d)
@@ -949,6 +993,19 @@ elif st.session_state.page=="Attività":
                     except Exception: display=f"{val} {unit}"
                     st.metric(lab,display)
 
+        a=activity_summary()
+        st.divider(); st.subheader("🏃 Attività di oggi")
+        ac1,ac2,ac3=st.columns(3)
+        ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
+        ac2.metric("⚡ Calorie attive", f"{a['active_calories']:,} kcal".replace(",","."))
+        ac3.metric("📏 Distanza", f"{a['distance_km']:.2f} km")
+        if a["details"]:
+            for w in a["details"]:
+                st.write(f"🏃 **{w['name']}** · {w['duration_minutes']} min")
+        else:
+            st.caption("Nessuna sessione ExerciseSessionRecord registrata oggi.")
+        st.caption("Le calorie attive descrivono l'attività già inclusa nel consumo totale Health Connect; non vengono aggiunte nuovamente al bilancio.")
+
         if native:
             st.info("I dati mostrati sopra arrivano direttamente dal bridge Android tramite Health Connect. Google Fit non viene interrogato per il bilancio.")
             if h.get("calories_today") is not None and h.get("calories_source_verified"):
@@ -1026,4 +1083,4 @@ else:
     b=balance()
     if b["using_observed"]:
         st.info(f"🔥 Con i dati Health di oggi, il budget dinamico è circa **{b['live_target']:,} kcal**: consumo osservato {b['observed_burn']:,} + riposo residuo {b['remaining_rest']:,} → stima fine giornata {b['projected_burn']:,}, meno deficit {b['deficit']}.")
-    st.caption("Il target di profilo è una stima basata su Mifflin-St Jeor + livello di attività + deficit scelto. Il budget dinamico usa il consumo totale osservato da Health quando disponibile. Non è una prescrizione medica.")
+    st.caption("Il target di profilo è una stima basata su Mifflin-St Jeor + livello di attività + deficit scelto. Il budget dinamico usa il consumo totale osservato da Health quando disponibile; l’attività viene mostrata separatamente senza doppio conteggio. Non è una prescrizione medica.")
