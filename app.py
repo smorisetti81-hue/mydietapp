@@ -1,5 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
+from google import genai
+import io
 import json
 import pandas as pd
 import urllib.parse
@@ -13,7 +14,7 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v36
+# MyDietApp v37
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
 # - recommendations adapt to the current dynamic calorie budget
@@ -28,7 +29,36 @@ import copy
 # - prefer Google Fit derived/reconciled streams instead of summing every source
 # ============================================================
 st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", initial_sidebar_state="collapsed")
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+GEMINI_MODEL = "gemini-3.6-flash"
+gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+def gemini_interaction(prompt, image=None):
+    """Call Gemini via the current Interactions API. Supports text and optional image input."""
+    if image is None:
+        interaction = gemini_client.interactions.create(
+            model=GEMINI_MODEL,
+            input=prompt,
+        )
+    else:
+        if hasattr(image, "getvalue"):
+            image_bytes = image.getvalue()
+        else:
+            buf = io.BytesIO()
+            image.save(buf, format="JPEG")
+            image_bytes = buf.getvalue()
+        mime_type = getattr(image, "type", None) or "image/jpeg"
+        if mime_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+            mime_type = "image/jpeg"
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        interaction = gemini_client.interactions.create(
+            model=GEMINI_MODEL,
+            input=[
+                {"type": "text", "text": prompt},
+                {"type": "image", "data": image_b64, "mime_type": mime_type},
+            ],
+        )
+    return interaction.output_text.strip()
+
 
 FIT_BASE = "https://www.googleapis.com/fitness/v1/users/me"
 FIT_SCOPES = (
@@ -493,7 +523,7 @@ Rispondi in massimo 5 righe, con questo formato:
 💡 CONSIGLIO: ...
 🔥 BUDGET: ... kcal disponibili
 📌 MOTIVO: ...'''
-    return genai.GenerativeModel("gemini-2.5-flash").generate_content(prompt).text.strip()
+    return gemini_interaction(prompt)
 
 
 def show_daily_meal_recommendation(meal_name, day, balance_data):
@@ -1449,14 +1479,14 @@ elif st.session_state.page=="Piano":
     st.divider(); st.subheader("🤖 Generazione AI")
     if st.button("Genera / rigenera piano settimanale",type="primary"):
         try:
-            ep=energy_profile(); model=genai.GenerativeModel("gemini-2.5-flash")
+            ep=energy_profile()
             lunch_days=st.session_state.get("out_lunch_days",[])
             dinner_days=st.session_state.get("out_dinner_days",[])
             prompt=f'''Crea un piano alimentare italiano di 7 giorni. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Target alimentare stimato: {ep["target"]} kcal/giorno.
 GIORNI PRANZO FUORI CASA: {", ".join(lunch_days) if lunch_days else "nessuno"}.
 GIORNI CENA FUORI CASA: {", ".join(dinner_days) if dinner_days else "nessuno"}.
 Per ogni giorno crea 4 pasti. Nei pasti segnati come fuori casa NON inventare un piatto domestico: usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche con ingredienti reali. Restituisci SOLO JSON con giorni Lunedì-Domenica e per ogni pasto name + ingredients. Ogni ingredient deve avere name, qty, unit, kcal.'''
-            raw=model.generate_content(prompt).text.replace("```json","").replace("```","").strip(); gen=json.loads(raw); out={}
+            raw=gemini_interaction(prompt).replace("```json","").replace("```","").strip(); gen=json.loads(raw); out={}
             for day,ms in gen.items():
                 out[day]={}
                 for mn,m in ms.items(): out[day][mn]={"name":m.get("name","Pasto"),"ingredients":[{"id":sid(),"name":str(x.get("name","Alimento")),"qty":float(x.get("qty",1)),"unit":str(x.get("unit","g")),"kcal":round(float(x.get("kcal",0)))} for x in m.get("ingredients",[])]}
@@ -1488,8 +1518,8 @@ Rispondi in modo breve e pratico con:
 💡 PERCHÉ: una frase collegata a piano e budget
 ⚠️ COSA LIMITARE: eventuali elementi più calorici
 Se il budget residuo non consente di seguire esattamente il piano, proponi la combinazione più vicina e spiegalo."""
-                r=genai.GenerativeModel("gemini-2.5-flash").generate_content([prompt,im])
-                st.info(r.text)
+                r=gemini_interaction(prompt, image=img)
+                st.info(r)
             except Exception as e: st.error(str(e))
 
 # ---------------- Dispensa ----------------

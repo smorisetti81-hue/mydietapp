@@ -4,3 +4,4 @@ pandas
 Pillow 
 streamlit-option-menu
 requests
+google-genai>=2.3.0
