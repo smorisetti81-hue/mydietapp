@@ -202,13 +202,30 @@ def balance():
     e=energy_profile()
     eaten=eaten_kcal()
     observed=float(h.get("calories_today") or 0) if h.get("calories_source_verified") else 0.0
-    # Google Fit calories.expended is a total expenditure stream and may include
-    # basal expenditure. Use the observed total only for the live food budget.
-    live_target=round(max(1200, observed-e["deficit"])) if observed > 0 else e["target"]
+
+    # Health total calories are cumulative from midnight to now. Do not subtract
+    # the deficit from the partial-day value directly: that would make the food
+    # budget artificially tiny in the afternoon. Instead, project the remaining
+    # resting expenditure (BMR) to midnight, while keeping the observed calories
+    # already recorded by Samsung Health. This is a transparent estimate and does
+    # not invent future workouts.
+    bmr_health=float(h.get("bmr")) if h.get("bmr") is not None else 0.0
+    bmr_for_projection=bmr_health if bmr_health > 0 else float(e["bmr_est"])
+    now=datetime.now(ROME)
+    midnight=(now+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)
+    day_start=now.replace(hour=0,minute=0,second=0,microsecond=0)
+    elapsed=max(0.0,(now-day_start).total_seconds())
+    remaining_seconds=max(0.0,(midnight-now).total_seconds())
+    remaining_rest=round(bmr_for_projection*(remaining_seconds/86400.0))
+    projected_burn=round(observed+remaining_rest) if observed > 0 else 0
+    live_target=round(max(1200, projected_burn-e["deficit"])) if projected_burn > 0 else e["target"]
+    active_observed=max(0,round(observed-bmr_for_projection*(elapsed/86400.0))) if observed > 0 else 0
     return {
         "target":e["target"], "live_target":live_target, "eaten":eaten,
         "remaining":live_target-eaten, "observed_burn":round(observed),
-        "bmr_est":e["bmr_est"], "bmr_health":round(float(h.get("bmr"))) if h.get("bmr") is not None else None,
+        "projected_burn":projected_burn, "remaining_rest":remaining_rest,
+        "active_observed":active_observed,
+        "bmr_est":e["bmr_est"], "bmr_health":round(bmr_health) if bmr_health > 0 else None,
         "maintenance":e["maintenance_est"], "deficit":e["deficit"],
         "using_observed":observed > 0
     }
@@ -710,9 +727,15 @@ if st.session_state.page=="Home":
     target_label="budget dinamico" if b["using_observed"] else "target stimato"
     st.markdown(f"""<div class="card"><div class="muted">CALORIE ASSUNTE / {target_label.upper()}</div>
     <div class="big">{b["eaten"]:,} / {b["live_target"]:,} kcal</div>
-    <div class="muted">Target profilo {b["target"]:,} · deficit {b["deficit"]} kcal · BMR stimato {b["bmr_est"]} kcal</div>
+    <div class="muted">Target profilo {b["target"]:,} · deficit {b["deficit"]} kcal · BMR {b["bmr_health"] or b["bmr_est"]} kcal/giorno</div>
     <div class="{cls}">{msg}</div></div>""".replace(",","."),unsafe_allow_html=True)
     st.progress(min(max(b["eaten"]/max(b["live_target"],1),0),1))
+    if b["using_observed"]:
+        c1,c2,c3=st.columns(3)
+        c1.metric("🔥 Consumo finora",f"{b['observed_burn']:,} kcal".replace(",","."))
+        c2.metric("⚡ Attive stimate finora",f"{b['active_observed']:,} kcal".replace(",","."))
+        c3.metric("🎯 Consumo stimato oggi",f"{b['projected_burn']:,} kcal".replace(",","."))
+        st.caption(f"Il budget dinamico proietta fino a mezzanotte il solo consumo a riposo residuo ({b['remaining_rest']} kcal). Non vengono inventate attività future.")
     st.subheader("🍽️ Oggi")
     d=current_day_name(); ms=st.session_state.meal_plan.get(d) or next(iter(st.session_state.meal_plan.values()))
     for mn,m in list(ms.items())[:2]:
@@ -864,9 +887,8 @@ elif st.session_state.page=="Attività":
         if native:
             st.info("I dati mostrati sopra arrivano direttamente dal bridge Android tramite Health Connect. Google Fit non viene interrogato per il bilancio.")
             if h.get("calories_today") is not None and h.get("calories_source_verified"):
-                active=max(0,round(float(h["calories_today"])-effective_bmr()))
                 b=balance()
-                st.info(f"🔥 Consumo osservato **{round(float(h['calories_today'])):,} kcal**. Sopra il BMR stimato: circa **{active:,} kcal**. Budget alimentare dinamico: **{b['live_target']:,} kcal**.".replace(",","."))
+                st.info(f"🔥 Consumo osservato **{b['observed_burn']:,} kcal**. Stima fine giornata **{b['projected_burn']:,} kcal**. Budget alimentare dinamico **{b['live_target']:,} kcal**.".replace(",","."))
             elif h.get("calories_today") is not None:
                 st.warning("⚠️ Le calorie totali Health Connect sono ricevute, ma non sono ancora considerate verificate per il calcolo del budget. Prima validiamo la provenienza Galaxy Watch.")
         else:
@@ -938,5 +960,5 @@ else:
     c1,c2=st.columns(2); c1.metric("BMR stimato",f"{ep['bmr_est']:,} kcal".replace(",",".")); c2.metric("Mantenimento stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
     b=balance()
     if b["using_observed"]:
-        st.info(f"🔥 Con i dati Health di oggi, il budget dinamico è circa **{b['live_target']:,} kcal/giorno**: consumo osservato {b['observed_burn']:,} − deficit {b['deficit']} kcal.")
+        st.info(f"🔥 Con i dati Health di oggi, il budget dinamico è circa **{b['live_target']:,} kcal**: consumo osservato {b['observed_burn']:,} + riposo residuo {b['remaining_rest']:,} → stima fine giornata {b['projected_burn']:,}, meno deficit {b['deficit']}.")
     st.caption("Il target di profilo è una stima basata su Mifflin-St Jeor + livello di attività + deficit scelto. Il budget dinamico usa il consumo totale osservato da Health quando disponibile. Non è una prescrizione medica.")
