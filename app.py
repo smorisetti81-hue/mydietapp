@@ -156,12 +156,36 @@ def meals():
     for day, ms in st.session_state.meal_plan.items():
         for name, meal in ms.items(): yield day,name,meal
 
+def item_multiplier(item):
+    return float(st.session_state.overrides.get(item["id"],{}).get("multiplier",1))
+
+def item_qty(item):
+    return float(item.get("qty",0)) * item_multiplier(item)
+
+def item_kcal(item):
+    return float(item.get("kcal",0)) * item_multiplier(item)
+
+def qty_step(unit, qty):
+    unit=str(unit).lower()
+    if unit == "pz": return 1.0
+    if unit in ("ml", "g"): return 10.0 if float(qty) >= 20 else 1.0
+    return 1.0
+
+def set_item_qty(item, new_qty):
+    base=float(item.get("qty",0))
+    if base <= 0: return
+    minimum=1.0 if str(item.get("unit","g")).lower()=="pz" else 0.1
+    q=max(minimum, float(new_qty))
+    st.session_state.overrides[item["id"]]={
+        "multiplier": q/base
+    }
+
 def active_items(meal):
     out=[]
     for item in meal.get("ingredients",[]):
         ov=st.session_state.overrides.get(item["id"],{})
         if ov.get("removed"): continue
-        x=dict(item); x["qty"]=float(item.get("qty",0))*float(ov.get("multiplier",1)); out.append(x)
+        x=dict(item); x["qty"]=item_qty(item); x["kcal"]=item_kcal(item); out.append(x)
     return out
 
 def eaten_kcal():
@@ -849,7 +873,7 @@ if st.session_state.page=="Home":
     else:
         for idx,(mn,m) in enumerate(ms.items()):
             items=active_items(m)
-            kcal=round(sum(float(i["kcal"])*float(st.session_state.overrides.get(i["id"],{}).get("multiplier",1)) for i in items))
+            kcal=round(sum(item_kcal(i) for i in items))
             meal_ids=[i["id"] for i in items]
             registered=bool(meal_ids) and all(st.session_state.eaten.get(iid,False) for iid in meal_ids)
             status="✅ Registrato" if registered else "○ Non registrato"
@@ -871,8 +895,7 @@ if st.session_state.page=="Home":
                     st.metric("kcal",kcal)
                 with st.expander("Dettagli"):
                     for item in items:
-                        mult=float(st.session_state.overrides.get(item["id"],{}).get("multiplier",1))
-                        st.write(f"• {item['name']} — {item['qty']*mult:g}{item['unit']} · {round(item['kcal']*mult)} kcal")
+                        st.write(f"• {item['name']} — {item_qty(item):g}{item['unit']} · {round(item_kcal(item))} kcal")
 
     # ---------------- Live energy balance ----------------
     st.divider()
@@ -907,23 +930,53 @@ if st.session_state.page=="Home":
 # ---------------- Piano ----------------
 elif st.session_state.page=="Piano":
     st.title("🍽️ Il tuo piano")
+    st.caption("Modifica direttamente le quantità: il totale del pasto e la lista della spesa si aggiornano automaticamente.")
     days=list(st.session_state.meal_plan.keys()); day=st.selectbox("Giorno",days)
     for mn,m in st.session_state.meal_plan[day].items():
-        kcal=sum(float(i["kcal"])*float(st.session_state.overrides.get(i["id"],{}).get("multiplier",1)) for i in active_items(m))
+        kcal=round(sum(item_kcal(i) for i in m.get("ingredients",[]) if not st.session_state.overrides.get(i["id"],{}).get("removed")))
         with st.container(border=True):
-            st.markdown(f"### {mn}"); st.caption(f"{m.get('name','Pasto')} · **{round(kcal)} kcal**")
+            st.markdown(f"### {mn}"); st.caption(f"{m.get('name','Pasto')} · **{kcal} kcal**")
             for item in list(m.get("ingredients",[])):
-                ov=st.session_state.overrides.get(item["id"],{}); mult=float(ov.get("multiplier",1))
+                ov=st.session_state.overrides.get(item["id"],{})
                 if ov.get("removed"): continue
-                c1,c2,c3,c4=st.columns([5,1,1,1])
+                mult=item_multiplier(item); current_qty=item_qty(item); current_kcal=item_kcal(item)
+                step=qty_step(item.get("unit","g"), current_qty)
+                c1,c2,c3,c4,c5=st.columns([4.7,0.9,1.25,0.9,1.4])
                 with c1:
-                    eaten=st.checkbox(f"{item['name']} — {item['qty']*mult:g}{item['unit']} · {round(item['kcal']*mult)} kcal",value=st.session_state.eaten.get(item['id'],False),key="eat_"+item['id']); st.session_state.eaten[item['id']]=eaten
+                    eaten=st.checkbox(f"{item['name']} · {current_qty:g}{item['unit']} · {round(current_kcal)} kcal",value=st.session_state.eaten.get(item['id'],False),key="eat_"+item['id'])
+                    st.session_state.eaten[item['id']]=eaten
                 with c2:
-                    if st.button("−",key="minus_"+item['id'],use_container_width=True): st.session_state.overrides[item['id']]={"multiplier":max(.25,mult-.25)}; st.rerun()
-                with c3: st.write(f"x{mult:g}")
+                    if st.button("−",key="minus_"+item['id'],use_container_width=True):
+                        set_item_qty(item,current_qty-step); st.rerun()
+                with c3:
+                    st.metric("Qtà",f"{current_qty:g} {item['unit']}")
                 with c4:
-                    if st.button("+",key="plus_"+item['id'],use_container_width=True): st.session_state.overrides[item['id']]={"multiplier":min(3,mult+.25)}; st.rerun()
-                if st.button("✕ Rimuovi",key="remove_"+item['id']): st.session_state.overrides[item['id']]={"removed":True,"multiplier":mult}; st.rerun()
+                    if st.button("+",key="plus_"+item['id'],use_container_width=True):
+                        set_item_qty(item,current_qty+step); st.rerun()
+                with c5:
+                    if st.button("✏️ Modifica",key="edit_"+item['id'],use_container_width=True):
+                        st.session_state[f"edit_open_{item['id']}"]=not st.session_state.get(f"edit_open_{item['id']}",False)
+                        st.rerun()
+                if st.session_state.get(f"edit_open_{item['id']}",False):
+                    with st.expander("Modifica / sostituisci alimento",expanded=True):
+                        a,b,c,d=st.columns([3,1,1,1])
+                        with a: new_name=st.text_input("Alimento",value=item['name'],key=f"rn_{item['id']}")
+                        with b: new_qty=st.number_input("Qtà",min_value=.1,value=float(current_qty),step=step,key=f"rq_{item['id']}")
+                        with c: new_unit=st.selectbox("Unità",["g","ml","pz"],index=["g","ml","pz"].index(item.get('unit','g')) if item.get('unit','g') in ["g","ml","pz"] else 0,key=f"ru_{item['id']}")
+                        with d: new_kcal=st.number_input("kcal",min_value=0,value=int(round(current_kcal)),step=5,key=f"rk_{item['id']}")
+                        s1,s2=st.columns(2)
+                        with s1:
+                            if st.button("💾 Salva modifica",key=f"save_edit_{item['id']}",use_container_width=True,type="primary") and new_name.strip():
+                                item["name"]=new_name.strip(); item["unit"]=new_unit; item["qty"]=float(new_qty); item["kcal"]=int(new_kcal)
+                                st.session_state.overrides[item["id"]]={"multiplier":1}
+                                st.session_state.eaten[item["id"]]=False
+                                st.session_state[f"edit_open_{item['id']}"]=False
+                                st.rerun()
+                        with s2:
+                            if st.button("✕ Rimuovi",key="remove_"+item['id'],use_container_width=True):
+                                st.session_state.overrides[item["id"]]={"removed":True,"multiplier":mult}
+                                st.session_state.eaten[item["id"]]=False
+                                st.rerun()
             with st.expander("➕ Aggiungi alimento"):
                 a,b,c,d=st.columns([3,1,1,1])
                 with a:n=st.text_input("Nome",key=f"n_{day}_{mn}")
