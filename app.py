@@ -1,6 +1,5 @@
 import streamlit as st
-from google import genai
-import io
+import google.generativeai as genai
 import json
 import pandas as pd
 import urllib.parse
@@ -11,14 +10,9 @@ from zoneinfo import ZoneInfo
 from PIL import Image
 from collections import defaultdict
 import uuid
-import copy
 
 # ============================================================
-# MyDietApp v43
-# - daily lunch/dinner recommendations linked to the active plan
-# - generic fuori-casa configuration for lunch/dinner, independent from the canteen
-# - recommendations adapt to the current dynamic calorie budget
-# - Mensa Smart receives the planned meal and available calorie context
+# MyDietApp v22
 # Health-first release:
 # - real Google Fit data diagnostics
 # - robust aggregation for cumulative vs point data
@@ -29,40 +23,7 @@ import copy
 # - prefer Google Fit derived/reconciled streams instead of summing every source
 # ============================================================
 st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", initial_sidebar_state="collapsed")
-GEMINI_MODEL = "gemini-3.6-flash"
-gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-
-def gemini_interaction(prompt, image=None, thinking_level=None):
-    """Call Gemini via the current Interactions API. Supports text and optional image input."""
-    generation_config = {"thinking_level": thinking_level} if thinking_level else None
-    if image is None:
-        kwargs = {"model": GEMINI_MODEL, "input": prompt}
-        if generation_config:
-            kwargs["generation_config"] = generation_config
-        interaction = gemini_client.interactions.create(**kwargs)
-    else:
-        if hasattr(image, "getvalue"):
-            image_bytes = image.getvalue()
-        else:
-            buf = io.BytesIO()
-            image.save(buf, format="JPEG")
-            image_bytes = buf.getvalue()
-        mime_type = getattr(image, "type", None) or "image/jpeg"
-        if mime_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
-            mime_type = "image/jpeg"
-        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-        kwargs = {
-            "model": GEMINI_MODEL,
-            "input": [
-                {"type": "text", "text": prompt},
-                {"type": "image", "data": image_b64, "mime_type": mime_type},
-            ],
-        }
-        if generation_config:
-            kwargs["generation_config"] = generation_config
-        interaction = gemini_client.interactions.create(**kwargs)
-    return interaction.output_text.strip()
-
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 FIT_BASE = "https://www.googleapis.com/fitness/v1/users/me"
 FIT_SCOPES = (
@@ -173,64 +134,21 @@ def sid(): return uuid.uuid4().hex[:10]
 
 def init_plan():
     def ing(n,q,u,k): return {"id":sid(),"name":n,"qty":q,"unit":u,"kcal":k}
-    # Piano demo completo per tutti i 7 giorni. In questo modo la Home non rimane
-    # senza il giorno corrente quando una nuova sessione Streamlit viene aperta.
-    return {
-        "Lunedì": {
-            "☕ Colazione":{"name":"Yogurt, avena e frutta","ingredients":[ing("Yogurt greco",250,"g",180),ing("Avena",50,"g",190),ing("Miele",10,"g",30)]},
-            "🍎 Spuntino":{"name":"Mela e mandorle","ingredients":[ing("Mela",180,"g",95),ing("Mandorle",15,"g",90)]},
-            "🍽️ Pranzo":{"name":"Riso, pollo e verdure","ingredients":[ing("Riso basmati",90,"g",320),ing("Petto di pollo",180,"g",300),ing("Zucchine",250,"g",45),ing("Olio EVO",10,"g",90)]},
-            "🌙 Cena":{"name":"Uova, pane e verdure","ingredients":[ing("Uova",2,"pz",150),ing("Pane integrale",70,"g",175),ing("Insalata mista",250,"g",50),ing("Olio EVO",10,"g",90)]}
-        },
-        "Martedì": {
-            "☕ Colazione":{"name":"Yogurt, banana e avena","ingredients":[ing("Yogurt greco",250,"g",180),ing("Banana",120,"g",105),ing("Avena",40,"g",152)]},
-            "🍎 Spuntino":{"name":"Frutta e noci","ingredients":[ing("Pera",180,"g",100),ing("Noci",15,"g",98)]},
-            "🍽️ Pranzo":{"name":"Pasta al pomodoro e tacchino","ingredients":[ing("Pasta",90,"g",320),ing("Passata di pomodoro",150,"g",45),ing("Fesa di tacchino",180,"g",200),ing("Olio EVO",10,"g",90)]},
-            "🌙 Cena":{"name":"Salmone, patate e verdure","ingredients":[ing("Salmone",160,"g",330),ing("Patate",250,"g",190),ing("Verdure miste",250,"g",70),ing("Olio EVO",5,"g",45)]}
-        },
-        "Mercoledì": {
-            "☕ Colazione":{"name":"Pane, ricotta e frutta","ingredients":[ing("Pane integrale",80,"g",200),ing("Ricotta",100,"g",170),ing("Frutta",150,"g",80)]},
-            "🍎 Spuntino":{"name":"Yogurt e frutta","ingredients":[ing("Yogurt greco",170,"g",120),ing("Frutti di bosco",100,"g",45)]},
-            "🍽️ Pranzo":{"name":"Riso, tacchino e broccoli","ingredients":[ing("Riso basmati",90,"g",320),ing("Fesa di tacchino",180,"g",200),ing("Broccoli",250,"g",85),ing("Olio EVO",10,"g",90)]},
-            "🌙 Cena":{"name":"Frittata e pane","ingredients":[ing("Uova",3,"pz",225),ing("Pane integrale",70,"g",175),ing("Spinaci",250,"g",60),ing("Olio EVO",5,"g",45)]}
-        },
-        "Giovedì": {
-            "☕ Colazione":{"name":"Yogurt, avena e mela","ingredients":[ing("Yogurt greco",250,"g",180),ing("Avena",50,"g",190),ing("Mela",150,"g",80)]},
-            "🍎 Spuntino":{"name":"Banana e mandorle","ingredients":[ing("Banana",120,"g",105),ing("Mandorle",15,"g",90)]},
-            "🍽️ Pranzo":{"name":"Pollo, riso e verdure","ingredients":[ing("Petto di pollo",180,"g",300),ing("Riso basmati",80,"g",285),ing("Verdure miste",250,"g",70),ing("Olio EVO",10,"g",90)]},
-            "🌙 Cena":{"name":"Merluzzo, patate e insalata","ingredients":[ing("Merluzzo",200,"g",170),ing("Patate",250,"g",190),ing("Insalata mista",250,"g",50),ing("Olio EVO",10,"g",90)]}
-        },
-        "Venerdì": {
-            "☕ Colazione":{"name":"Yogurt, banana e avena","ingredients":[ing("Yogurt greco",250,"g",180),ing("Banana",120,"g",105),ing("Avena",40,"g",152)]},
-            "🍎 Spuntino":{"name":"Mela e noci","ingredients":[ing("Mela",180,"g",95),ing("Noci",15,"g",98)]},
-            "🍽️ Pranzo":{"name":"Pasta, tonno e pomodoro","ingredients":[ing("Pasta",90,"g",320),ing("Tonno al naturale",120,"g",130),ing("Passata di pomodoro",150,"g",45),ing("Olio EVO",10,"g",90)]},
-            "🌙 Cena":{"name":"Pollo, pane e verdure","ingredients":[ing("Petto di pollo",180,"g",300),ing("Pane integrale",70,"g",175),ing("Verdure miste",300,"g",80),ing("Olio EVO",10,"g",90)]}
-        },
-        "Sabato": {
-            "☕ Colazione":{"name":"Uova, pane e frutta","ingredients":[ing("Uova",2,"pz",150),ing("Pane integrale",70,"g",175),ing("Frutta",150,"g",80)]},
-            "🍎 Spuntino":{"name":"Yogurt e mandorle","ingredients":[ing("Yogurt greco",170,"g",120),ing("Mandorle",15,"g",90)]},
-            "🍽️ Pranzo":{"name":"Pasta al ragù leggero e insalata","ingredients":[ing("Pasta",90,"g",320),ing("Carne macinata magra",150,"g",250),ing("Passata di pomodoro",150,"g",45),ing("Insalata mista",200,"g",40)]},
-            "🌙 Cena":{"name":"Salmone, riso e verdure","ingredients":[ing("Salmone",150,"g",310),ing("Riso basmati",70,"g",250),ing("Verdure miste",250,"g",70),ing("Olio EVO",5,"g",45)]}
-        },
-        "Domenica": {
-            "☕ Colazione":{"name":"Yogurt, avena e frutta","ingredients":[ing("Yogurt greco",250,"g",180),ing("Avena",50,"g",190),ing("Frutta",150,"g",80)]},
-            "🍎 Spuntino":{"name":"Frutta e noci","ingredients":[ing("Pera",180,"g",100),ing("Noci",15,"g",98)]},
-            "🍽️ Pranzo":{"name":"Pollo al forno, patate e verdure","ingredients":[ing("Petto di pollo",200,"g",330),ing("Patate",250,"g",190),ing("Verdure miste",250,"g",70),ing("Olio EVO",10,"g",90)]},
-            "🌙 Cena":{"name":"Uova, pane e insalata","ingredients":[ing("Uova",2,"pz",150),ing("Pane integrale",70,"g",175),ing("Insalata mista",300,"g",60),ing("Olio EVO",10,"g",90)]}
-        }
-    }
-
+    return {"Lunedì": {
+        "☕ Colazione":{"name":"Yogurt, avena e frutta","ingredients":[ing("Yogurt greco",250,"g",180),ing("Avena",50,"g",190),ing("Miele",10,"g",30)]},
+        "🍎 Spuntino":{"name":"Mela e mandorle","ingredients":[ing("Mela",180,"g",95),ing("Mandorle",15,"g",90)]},
+        "🍽️ Pranzo":{"name":"Riso, pollo e verdure","ingredients":[ing("Riso basmati",90,"g",320),ing("Petto di pollo",180,"g",300),ing("Zucchine",250,"g",45),ing("Olio EVO",10,"g",90)]},
+        "🌙 Cena":{"name":"Uova, pane e verdure","ingredients":[ing("Uova",2,"pz",150),ing("Pane integrale",70,"g",175),ing("Insalata mista",250,"g",50),ing("Olio EVO",10,"g",90)]}
+    }}
 
 _defaults = {
     "page":"Home", "meal_plan":init_plan(), "overrides":{}, "eaten":{}, "manual_foods":[],
-    "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None, "water_history":{},
-    "plan_week_start":None, "plan_history":{}, "out_lunch_days":["Giovedì"], "out_dinner_days":["Giovedì"],
-    "pantry":{}, "shopping_checked":{}, "smart_food_advice":None
+    "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
     "name":"Stefano", "weight":135.0, "height":180.0, "age":40, "sex":"male",
-    "activity_level":"moderata", "deficit":500, "water_goal_ml":2500, "quantity_mode":"porzioni"
+    "activity_level":"moderata", "deficit":500
 }.items(): st.session_state.setdefault("p_"+k,v)
 
 
@@ -238,117 +156,12 @@ def meals():
     for day, ms in st.session_state.meal_plan.items():
         for name, meal in ms.items(): yield day,name,meal
 
-def week_start(d=None):
-    d = d or datetime.now(ROME).date()
-    return (d - timedelta(days=d.weekday())).isoformat()
-
-def week_label(start_iso):
-    start=date.fromisoformat(start_iso)
-    end=start+timedelta(days=6)
-    return f"{start.strftime('%d/%m/%Y')} – {end.strftime('%d/%m/%Y')}"
-
-def ensure_plan_metadata():
-    if not st.session_state.get("plan_week_start"):
-        st.session_state.plan_week_start=week_start()
-
-def archive_current_plan(reason="Nuovo piano"):
-    ensure_plan_metadata()
-    start=st.session_state.plan_week_start
-    if not st.session_state.meal_plan:
-        return None
-    archive_id=f"{start}_{datetime.now(ROME).strftime('%Y%m%d%H%M%S')}"
-    st.session_state.plan_history[archive_id]={
-        "week_start":start,
-        "label":week_label(start),
-        "created_at":datetime.now(ROME).isoformat(),
-        "reason":reason,
-        "out_lunch_days":copy.deepcopy(st.session_state.get("out_lunch_days", [])),
-        "out_dinner_days":copy.deepcopy(st.session_state.get("out_dinner_days", [])),
-        "plan":copy.deepcopy(st.session_state.meal_plan),
-    }
-    return archive_id
-
-def historical_food_library(limit=None):
-    foods={}
-    def add_from_plan(plan, source):
-        for day, ms in plan.items():
-            for meal_name, meal in ms.items():
-                for item in meal.get("ingredients",[]):
-                    name=str(item.get("name","Alimento")).strip()
-                    if not name: continue
-                    key=(name.lower(),str(item.get("unit","g")))
-                    if key not in foods:
-                        foods[key]={"name":name,"qty":float(item.get("qty",1)),"unit":str(item.get("unit","g")),"kcal":float(item.get("kcal",0)),"uses":0,"sources":set()}
-                    foods[key]["uses"]+=1; foods[key]["sources"].add(source)
-    add_from_plan(st.session_state.meal_plan,"Piano attuale")
-    for rec in st.session_state.plan_history.values(): add_from_plan(rec.get("plan",{}),f"Storico {rec.get('label','')}")
-    vals=list(foods.values())
-    vals.sort(key=lambda x:(-x["uses"],x["name"].lower()))
-    for x in vals: x["sources"]=list(x["sources"])
-    return vals[:limit] if limit else vals
-
-ensure_plan_metadata()
-
-def item_multiplier(item):
-    return float(st.session_state.overrides.get(item["id"],{}).get("multiplier",1))
-
-def item_qty(item):
-    return float(item.get("qty",0)) * item_multiplier(item)
-
-def item_kcal(item):
-    return float(item.get("kcal",0)) * item_multiplier(item)
-
-def quantity_mode():
-    return st.session_state.get("p_quantity_mode", "porzioni")
-
-def quantity_label(item):
-    """Human-friendly quantity according to the user's preferred display mode.
-    Internal grams/ml/units remain available to the calculation engine.
-    """
-    mode = quantity_mode()
-    q = item_qty(item)
-    unit = str(item.get("unit", "g")).lower()
-    if mode == "precise":
-        return f"{q:g}{unit}"
-    portions = item_multiplier(item)
-    if abs(portions - 1) < 0.01:
-        return "1 porzione"
-    if abs(portions - 0.5) < 0.01:
-        return "½ porzione"
-    if abs(portions - 1.5) < 0.01:
-        return "1½ porzioni"
-    if abs(portions - 2) < 0.01:
-        return "2 porzioni"
-    return f"{portions:g} porzioni"
-
-def quantity_caption(item):
-    mode = quantity_mode()
-    label = quantity_label(item)
-    if mode == "both":
-        return f"{label} · {item_qty(item):g}{item.get('unit','g')}"
-    return label
-
-def qty_step(unit, qty):
-    unit=str(unit).lower()
-    if unit == "pz": return 1.0
-    if unit in ("ml", "g"): return 10.0 if float(qty) >= 20 else 1.0
-    return 1.0
-
-def set_item_qty(item, new_qty):
-    base=float(item.get("qty",0))
-    if base <= 0: return
-    minimum=1.0 if str(item.get("unit","g")).lower()=="pz" else 0.1
-    q=max(minimum, float(new_qty))
-    st.session_state.overrides[item["id"]]={
-        "multiplier": q/base
-    }
-
 def active_items(meal):
     out=[]
     for item in meal.get("ingredients",[]):
         ov=st.session_state.overrides.get(item["id"],{})
         if ov.get("removed"): continue
-        x=dict(item); x["qty"]=item_qty(item); x["kcal"]=item_kcal(item); out.append(x)
+        x=dict(item); x["qty"]=float(item.get("qty",0))*float(ov.get("multiplier",1)); out.append(x)
     return out
 
 def eaten_kcal():
@@ -363,345 +176,13 @@ def eaten_kcal():
     total += sum(float(x["kcal"]) for x in st.session_state.manual_foods if x["date"]==today())
     return round(total)
 
-def plan_food_suggestions(current_day=None, current_meal=None, limit=8):
-    """Suggest foods from current and historical plans, preferring current plan and recent reuse."""
-    foods={}
-    def collect(plan, source_rank, source_label):
-        for day, ms in plan.items():
-            for meal_name, meal in ms.items():
-                for item in meal.get("ingredients",[]):
-                    if source_rank==0 and day==current_day and meal_name==current_meal: continue
-                    name=str(item.get("name","Alimento")).strip()
-                    if not name: continue
-                    key=(name.lower(),str(item.get("unit","g")))
-                    if key not in foods:
-                        foods[key]={"name":name,"qty":float(item.get("qty",1)),"unit":str(item.get("unit","g")),"kcal":float(item.get("kcal",0)),"current":source_rank==0,"uses":0}
-                    foods[key]["uses"]+=1
-                    if source_rank==0: foods[key]["current"]=True
-    collect(st.session_state.meal_plan,0,"Piano attuale")
-    for rec in sorted(st.session_state.plan_history.values(), key=lambda x:x.get("created_at", ""), reverse=True):
-        collect(rec.get("plan",{}),1,rec.get("label","Storico"))
-    values=list(foods.values())
-    values.sort(key=lambda x:(not x["current"],-x["uses"],x["name"].lower()))
-    return values[:limit]
-
-
-def _meal_kcal_for_day(day, meal_name):
-    ms=st.session_state.meal_plan.get(day,{})
-    meal=ms.get(meal_name)
-    if not meal:
-        return 0
-    return round(sum(item_kcal(i) for i in active_items(meal)))
-
-
-def _planned_remaining_after_meal(day, meal_name):
-    """Calories planned for meals after the selected meal, in displayed order."""
-    order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
-    if meal_name not in order:
-        return 0
-    idx=order.index(meal_name)
-    return sum(_meal_kcal_for_day(day, name) for name in order[idx+1:])
-
-
-def out_of_home_meal_configured(day, meal_name):
-    """Return True when the selected weekday/meal is configured as fuori casa."""
-    if meal_name == "🍽️ Pranzo":
-        return day in st.session_state.get("out_lunch_days", [])
-    if meal_name == "🌙 Cena":
-        return day in st.session_state.get("out_dinner_days", [])
-    return False
-
-def meal_recommendation(day, meal_name, balance_data=None):
-    """Build a deterministic recommendation from the active plan and live calorie budget."""
-    ms=st.session_state.meal_plan.get(day,{})
-    meal=ms.get(meal_name)
-    if not meal:
-        return None
-
-    b=balance_data or balance()
-    items=active_items(meal)
-    planned_kcal=round(sum(item_kcal(i) for i in items))
-    planned_name=str(meal.get("name") or meal_name)
-    remaining=max(0,int(b.get("remaining") or 0))
-    future_planned=_planned_remaining_after_meal(day, meal_name)
-    budget_for_meal=max(0, remaining-future_planned)
-    after_meal=max(0, remaining-planned_kcal)
-    out_of_home=out_of_home_meal_configured(day, meal_name) or "UFFICIO" in planned_name.upper() or "FUORI CASA" in planned_name.upper()
-
-    if out_of_home:
-        status="mensa"
-        advice="Il piano prevede un pasto fuori casa: se hai un menu disponibile, possiamo confrontarlo con il piano e con il budget di oggi."
-    elif planned_kcal <= 0:
-        status="unknown"
-        advice="Il piano non contiene ancora calorie per questo pasto: usa il budget disponibile come riferimento."
-    elif planned_kcal <= budget_for_meal:
-        status="good"
-        advice=f"🟢 Segui il piano: questo pasto rientra nel budget disponibile. Dopo il pasto resteranno circa {after_meal:,} kcal per il resto della giornata.".replace(",",".")
-    elif planned_kcal <= remaining:
-        status="adapt"
-        advice=f"🟡 Il pasto rientra ancora nel budget giornaliero, ma lascia meno spazio ai pasti successivi. Se vuoi restare più vicino al piano della giornata, valuta una porzione leggermente più leggera." 
-    else:
-        status="over"
-        advice=f"🔴 Il pasto supera di circa {planned_kcal-remaining} kcal il budget ancora disponibile. Meglio ridurre una componente calorica oppure scegliere un'alternativa."
-
-    return {
-        "name":planned_name,
-        "planned_kcal":planned_kcal,
-        "remaining":remaining,
-        "future_planned":future_planned,
-        "budget_for_meal":budget_for_meal,
-        "after_meal":after_meal,
-        "advice":advice,
-        "status":status,
-        "out_of_home":out_of_home,
-        "items":items,
-        "registered": bool(items) and all(st.session_state.eaten.get(i["id"],False) for i in items),
-    }
-
-
-def eaten_items_today():
-    """Return foods actually registered as eaten today, for the smart assistant context."""
-    d=current_day_name()
-    out=[]
-    for meal_name, meal in st.session_state.meal_plan.get(d, {}).items():
-        for item in active_items(meal):
-            if st.session_state.eaten.get(item["id"], False):
-                out.append({"meal":meal_name,"name":item["name"],"kcal":round(item_kcal(item)),"quantity":quantity_caption(item)})
-    for x in st.session_state.manual_foods:
-        if x.get("date")==today():
-            out.append({"meal":"Registrato manualmente","name":x.get("name","Alimento"),"kcal":round(float(x.get("kcal",0))),"quantity":""})
-    return out
-
-
-def _meal_is_registered(day, meal_name):
-    meal=st.session_state.meal_plan.get(day,{}).get(meal_name)
-    if not meal:
-        return False
-    items=active_items(meal)
-    return bool(items) and all(st.session_state.eaten.get(i["id"],False) for i in items)
-
-
-def _next_meal_for_today(day):
-    """Choose the most relevant next meal using clock time + registration state."""
-    ms=st.session_state.meal_plan.get(day,{})
-    order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
-    if not ms:
-        return None
-    now=datetime.now(ROME)
-    now_hour=now.hour + now.minute/60
-    windows={
-        "☕ Colazione":(5,10.5),
-        "🍎 Spuntino":(10.5,12.5),
-        "🍽️ Pranzo":(12,16.5),
-        "🌙 Cena":(18,23.99),
-    }
-    candidates=[]
-    for idx,name in enumerate(order):
-        if name not in ms or _meal_is_registered(day,name):
-            continue
-        start_h,end_h=windows[name]
-        if now_hour <= end_h:
-            distance=0 if start_h <= now_hour <= end_h else max(0,start_h-now_hour)
-            candidates.append((distance,idx,name))
-    if candidates:
-        return ms[candidates[0][2]] | {"_meal_name":candidates[0][2]}
-    for name in order:
-        if name in ms and not _meal_is_registered(day,name):
-            return ms[name] | {"_meal_name":name}
-    return None
-
-
-def _next_meal_context(day, balance_data):
-    b=balance_data or balance()
-    next_meal=_next_meal_for_today(day)
-    if not next_meal:
-        return {"meal":None,"meal_budget_kcal":max(0,int(b.get("remaining",0))),"future_planned_kcal":0}
-    meal_name=next_meal.get("_meal_name")
-    planned_kcal=round(sum(item_kcal(i) for i in active_items(next_meal)))
-    future_planned=round(_planned_remaining_after_meal(day,meal_name))
-    meal_budget=max(0,int(b.get("remaining",0))-future_planned)
-    return {
-        "meal":meal_name,
-        "name":str(next_meal.get("name") or meal_name),
-        "planned_kcal":planned_kcal,
-        "meal_budget_kcal":meal_budget,
-        "future_planned_kcal":future_planned,
-        "out_of_home":out_of_home_meal_configured(day,meal_name) or "FUORI CASA" in str(next_meal.get("name","")).upper() or "UFFICIO" in str(next_meal.get("name","")).upper(),
-        "items":[i.get("name") for i in active_items(next_meal)],
-    }
-
-
-def smart_assistant_context(balance_data=None):
-    """Build factual context. Python determines budget and next meal; Gemini only interprets it."""
-    b=balance_data or balance()
-    d=current_day_name()
-    ms=st.session_state.meal_plan.get(d,{})
-    planned=[]
-    for meal_name in ["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]:
-        meal=ms.get(meal_name)
-        if not meal: continue
-        items=active_items(meal)
-        planned.append({
-            "meal":meal_name,
-            "name":meal.get("name",meal_name),
-            "kcal":round(sum(item_kcal(i) for i in items)),
-            "registered":_meal_is_registered(d,meal_name),
-            "out_of_home":out_of_home_meal_configured(d,meal_name) or "FUORI CASA" in str(meal.get("name","")).upper() or "UFFICIO" in str(meal.get("name","")).upper()
-        })
-    next_ctx=_next_meal_context(d,b)
-    return {
-        "day":d,
-        "budget_is_dynamic":bool(b.get("using_observed")),
-        "budget_label":"budget dinamico da Health Connect" if b.get("using_observed") else "target alimentare stimato dal profilo",
-        "remaining_kcal":int(b.get("remaining",0)),
-        "daily_food_target":int(b.get("live_target") or b.get("target") or 0),
-        "eaten_kcal":int(b.get("eaten",0)),
-        "deficit_target":int(b.get("deficit",0)),
-        "observed_burn":int(b.get("observed_burn",0) or 0),
-        "projected_burn":int(b.get("projected_burn",0) or 0),
-        "steps":int(b.get("steps",0) or 0),
-        "next_meal":next_ctx,
-        "planned_meals":planned,
-        "eaten_items":eaten_items_today(),
-    }
-
-
-def run_smart_food_advice(balance_data=None):
-    """Ask Gemini to explain a deterministic next-meal decision; never let it recalculate the budget."""
-    ctx=smart_assistant_context(balance_data)
-    next_ctx=ctx.get("next_meal", {})
-
-    # Fully registered day: this is a terminal state, not an AI recommendation.
-    if not next_ctx.get("meal"):
-        remaining=int(ctx.get("remaining_kcal", 0))
-        eaten=int(ctx.get("eaten_kcal", 0))
-        source_label="budget dinamico residuo" if ctx.get("budget_is_dynamic") else "target stimato residuo"
-        return (
-            "🍽️ GIORNATA ALIMENTARE COMPLETATA: tutti i pasti principali previsti per oggi risultano già registrati.\n"
-            "💡 CONSIGLIO: Non devi mangiare altro per 'recuperare' le calorie rimaste. "
-            "Se hai fame puoi scegliere liberamente uno spuntino leggero; se non hai fame, puoi semplicemente chiudere la giornata.\n"
-            f"🔥 MARGINE: {remaining} kcal {('di budget dinamico' if ctx.get('budget_is_dynamic') else 'rispetto al target alimentare stimato')}.\n"
-            f"📌 OGGI: circa {eaten} kcal registrate e nessun altro pasto pianificato da completare."
-        )
-
-    prompt=f'''Sei l'assistente alimentare di MyDietApp. Devi dare un consiglio pratico sul PROSSIMO pasto, usando esclusivamente il contesto fornito.
-
-CONTESTO CALCOLATO DA MYDIETAPP:
-{json.dumps(ctx,ensure_ascii=False,indent=2)}
-
-REGOLE NON NEGOZIABILI:
-- MyDietApp calcola gia tutti i numeri. NON ricalcolare, correggere o inventare calorie.
-- "remaining_kcal" e il numero di kcal alimentari che restano oggi secondo MyDietApp.
-- Se "budget_is_dynamic" e false, il valore e un TARGET STIMATO dal profilo: chiamalo sempre "target stimato" o "target alimentare stimato", MAI "budget dinamico" e MAI dire che deriva da Health Connect.
-- Se "budget_is_dynamic" e true, puoi chiamare il valore BUDGET DINAMICO e collegarlo al consumo Health osservato.
-- Non chiamare mai "disponibili" le kcal del target stimato come se fossero un dato misurato dal dispositivo.
-- Il campo "next_meal" identifica il pasto piu rilevante in questo momento: NON scegliere un altro pasto.
-- Se non esiste un prossimo pasto, dillo chiaramente.
-- Se il prossimo pasto e gia registrato, dillo chiaramente invece di suggerire di mangiarlo di nuovo.
-- Confronta "planned_kcal" con "meal_budget_kcal". Se rientra, consiglia semplicemente di seguire il piano.
-- Se supera il budget del pasto, proponi una modifica semplice usando gli alimenti gia presenti nel piano quando possibile.
-- Se "out_of_home" e true, non inventare un piatto: suggerisci di usare Mensa Smart per scegliere dal menu reale.
-- L'utente odia pesare gli alimenti: usa SOLO concetti come porzione normale, mezza porzione, porzione abbondante. MAI grammi.
-- Se l'utente ha gia registrato un alimento manualmente (es. pizza), consideralo nel consiglio.
-- Non inventare proteine o altri valori nutrizionali non presenti.
-- Non dare consigli medici.
-
-Rispondi in massimo 5 righe, in questo formato:
-🍽️ PROSSIMO PASTO: ...
-💡 CONSIGLIO: ...
-🔥 BUDGET DINAMICO: ... kcal  (solo se budget_is_dynamic=true)
-🔥 TARGET STIMATO: ... kcal  (solo se budget_is_dynamic=false)
-📌 MOTIVO: ...'''
-    return gemini_interaction(prompt, thinking_level="minimal")
-
-def show_daily_meal_recommendation(meal_name, day, balance_data):
-    rec=meal_recommendation(day,meal_name,balance_data)
-    if not rec:
-        return
-    title="Pranzo" if meal_name=="🍽️ Pranzo" else "Cena"
-    icon="📍" if rec["out_of_home"] else ("🍽️" if meal_name=="🍽️ Pranzo" else "🌙")
-    status_labels={"good":"🟢 Segui il piano","adapt":"🟡 Adatta leggermente","over":"🔴 Da adattare","mensa":"📍 Fuori casa","unknown":"⚪ Calorie non definite"}
-    with st.container(border=True):
-        st.markdown(f"### {icon} {title}")
-        if rec["out_of_home"]:
-            st.markdown("**📍 Oggi mangi fuori casa**")
-            st.info("Se hai un menu, analizzalo in **Mensa Smart**: confronteremo le proposte con il tuo piano e con il budget calorico disponibile.")
-            source_label="Budget dinamico" if balance_data.get("using_observed") else "Target stimato"
-            if rec["planned_kcal"]:
-                st.caption(f"Pasto previsto dal piano: circa {rec['planned_kcal']} kcal · {source_label} giornaliero rimasto: {rec['remaining']} kcal")
-            else:
-                st.caption(f"{source_label} giornaliero rimasto: {rec['remaining']} kcal")
-        else:
-            st.markdown(f"**{rec['name']}**")
-            if rec["items"]:
-                st.caption(" · ".join(f"{i['name']} {item_qty(i):g}{i['unit']}" for i in rec["items"]))
-            st.caption(f"Piano: {rec['planned_kcal']} kcal · Budget per questo pasto: circa {rec['budget_for_meal']} kcal")
-            if rec["registered"]:
-                st.success("✅ Questo pasto risulta già registrato come mangiato.")
-        st.markdown(f"**{status_labels.get(rec['status'], '💡 Suggerimento')}**")
-        st.write("💡 " + rec["advice"])
-
 def grocery():
-    """Aggregate quantities required by the active weekly plan."""
     d=defaultdict(lambda:[0,"",""])
     for _,_,m in meals():
         for i in active_items(m):
             key=(i["name"].strip().lower(),i["unit"]); d[key][0]+=float(i["qty"]); d[key][1]=i["unit"]; d[key][2]=i["name"]
     return sorted(d.values(),key=lambda x:x[2].lower())
 
-def _pantry_key(name, unit):
-    return f"{str(name).strip().lower()}|{str(unit).strip().lower()}"
-
-def pantry_items():
-    """Return pantry items as a sorted list with display names and quantities."""
-    out=[]
-    for key,item in st.session_state.get("pantry",{}).items():
-        if not isinstance(item,dict):
-            continue
-        q=float(item.get("qty",0) or 0)
-        if q <= 0:
-            continue
-        out.append({
-            "key":key, "name":str(item.get("name", "Alimento")),
-            "qty":q, "unit":str(item.get("unit", "g")),
-        })
-    return sorted(out,key=lambda x:x["name"].lower())
-
-def set_pantry_qty(name, unit, qty):
-    key=_pantry_key(name,unit)
-    q=max(0.0,float(qty))
-    if q <= 0:
-        st.session_state.pantry.pop(key,None)
-    else:
-        st.session_state.pantry[key]={"name":str(name).strip(),"unit":str(unit).strip(),"qty":q}
-
-def add_pantry_qty(name, unit, delta):
-    key=_pantry_key(name,unit)
-    current=float(st.session_state.get("pantry",{}).get(key,{}).get("qty",0) or 0)
-    set_pantry_qty(name,unit,current+float(delta))
-
-def shopping_list():
-    """Return plan needs minus what is currently in the pantry."""
-    rows=[]
-    for required,unit,name in grocery():
-        stock=float(st.session_state.get("pantry",{}).get(_pantry_key(name,unit),{}).get("qty",0) or 0)
-        need=max(0.0,float(required)-stock)
-        rows.append({"name":name,"unit":unit,"required":float(required),"pantry":stock,"need":need})
-    return rows
-
-def water_today_ml():
-    """Return today's water intake in ml, stored by calendar date."""
-    return int(st.session_state.water_history.get(today(), 0) or 0)
-
-def water_goal_ml():
-    return max(500, int(st.session_state.get("p_water_goal_ml", 2500) or 2500))
-
-def add_water_ml(delta):
-    d=today()
-    current=water_today_ml()
-    st.session_state.water_history[d]=max(0, current + int(delta))
-
-# V32: fixed the out_of_home variable mismatch in meal_recommendation/show_daily_meal_recommendation.
 # ---------------- Energy model ----------------
 def bmr_mifflin(weight, height, age, sex):
     # Mifflin-St Jeor. This is an estimate, not a medical measurement.
@@ -739,16 +220,11 @@ def activity_summary():
         except Exception:
             continue
     native_active=round(float(h.get("active_calories_today") or 0))
-    # If Health Connect does not expose active calories, use the same transparent
-    # estimate already used by the energy balance instead of displaying 0.
-    estimated_active=0
-    try:
-        b=balance()
-        estimated_active=int(b.get("active_observed") or 0) if b.get("using_observed") else 0
-    except Exception:
-        estimated_active=0
-    active=max(native_active, estimated_active)
-    active_source="Health Connect" if native_active > 0 else ("stima" if estimated_active > 0 else "non disponibile")
+    # Do not expose the pro-rated BMR residual as "active calories": that
+    # estimate can legitimately fall back to zero late in the day and would
+    # look like activity disappeared. Show native Health active calories only.
+    active=native_active if native_active > 0 else None
+    active_source="Health Connect" if native_active > 0 else "non disponibile"
     return {
         "steps":int(float(h.get("steps_today") or 0)),
         "active_calories":active,
@@ -762,19 +238,14 @@ def balance():
     h=st.session_state.health
     e=energy_profile()
     eaten=eaten_kcal()
+    observed=float(h.get("calories_today") or 0) if h.get("calories_source_verified") else 0.0
 
-    # Only a verified native Health Connect total from TODAY can drive the
-    # production budget. A stale snapshot or legacy/unverified value falls back
-    # to the profile estimate instead of silently presenting a false live budget.
-    snapshot_date=str(h.get("date") or "")
-    today_iso=today()
-    native_verified=bool(h.get("native_health_snapshot")) and bool(h.get("calories_source_verified"))
-    observed=float(h.get("calories_today") or 0) if native_verified and snapshot_date==today_iso else 0.0
-
-    # Samsung Health total calories are cumulative from local midnight to now.
-    # We therefore add ONLY the BMR/resting expenditure still expected until
-    # midnight. We never add active calories or workout calories again: they are
-    # already components of the observed total.
+    # Health total calories are cumulative from midnight to now. Do not subtract
+    # the deficit from the partial-day value directly: that would make the food
+    # budget artificially tiny in the afternoon. Instead, project the remaining
+    # resting expenditure (BMR) to midnight, while keeping the observed calories
+    # already recorded by Samsung Health. This is a transparent estimate and does
+    # not invent future workouts.
     bmr_health=float(h.get("bmr")) if h.get("bmr") is not None else 0.0
     bmr_for_projection=bmr_health if bmr_health > 0 else float(e["bmr_est"])
     now=datetime.now(ROME)
@@ -786,8 +257,6 @@ def balance():
     projected_burn=round(observed+remaining_rest) if observed > 0 else 0
     live_target=round(max(1200, projected_burn-e["deficit"])) if projected_burn > 0 else e["target"]
     active_observed=max(0,round(observed-bmr_for_projection*(elapsed/86400.0))) if observed > 0 else 0
-
-    source="Health Connect nativo · Samsung Health/Watch verificato" if observed > 0 else "Profilo · stima Mifflin + livello attività"
     return {
         "target":e["target"], "live_target":live_target, "eaten":eaten,
         "remaining":live_target-eaten, "observed_burn":round(observed),
@@ -795,9 +264,7 @@ def balance():
         "active_observed":active_observed,
         "bmr_est":e["bmr_est"], "bmr_health":round(bmr_health) if bmr_health > 0 else None,
         "maintenance":e["maintenance_est"], "deficit":e["deficit"],
-        "using_observed":observed > 0, "source":source,
-        "snapshot_date":snapshot_date, "snapshot_is_today":snapshot_date==today_iso,
-        "native_verified":native_verified
+        "using_observed":observed > 0
     }
 
 def effective_bmr():
@@ -1300,7 +767,7 @@ if st.session_state.page=="Home":
     target_label="budget dinamico" if b["using_observed"] else "target stimato"
     st.markdown(f"""<div class="card"><div class="muted">CALORIE ASSUNTE / {target_label.upper()}</div>
     <div class="big">{b["eaten"]:,} / {b["live_target"]:,} kcal</div>
-    <div class="muted">Consumo previsto: {b["projected_burn"]:,} kcal · deficit: {b["deficit"]:,} kcal · BMR: {b["bmr_health"] or b["bmr_est"]} kcal/giorno</div>
+    <div class="muted">Target profilo {b["target"]:,} · deficit {b["deficit"]} kcal · BMR {b["bmr_health"] or b["bmr_est"]} kcal/giorno</div>
     <div class="{cls}">{msg}</div></div>""".replace(",","."),unsafe_allow_html=True)
     st.progress(min(max(b["eaten"]/max(b["live_target"],1),0),1))
     if b["using_observed"]:
@@ -1313,13 +780,14 @@ if st.session_state.page=="Home":
             f"e aggiunge solo il consumo a riposo residuo fino a mezzanotte ({b['remaining_rest']} kcal). "
             "Non vengono inventate attività future."
         )
-        st.caption(f"Fonte del bilancio: {b['source']}. Snapshot Health: {b['snapshot_date'] or 'nessuno'}.")
         a=activity_summary()
         with st.container(border=True):
             st.markdown("**🏃 Attività di oggi**")
             ac1,ac2,ac3,ac4=st.columns(4)
             ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
-            ac2.metric("⚡ Calorie attive stimate", f"{a['active_calories']:,} kcal".replace(",","."))
+            active_display = (f"{a['active_calories']:,} kcal".replace(",",".")
+                              if a['active_calories'] is not None else "Non disponibile")
+            ac2.metric("⚡ Calorie attive", active_display)
             ac3.metric("📏 Distanza", f"{a['distance_km']:.2f} km")
             ac4.metric("🏋️ Allenamenti", str(a['workouts']))
             if a["details"]:
@@ -1328,57 +796,6 @@ if st.session_state.page=="Home":
             else:
                 st.caption("Nessuna sessione di allenamento registrata. I passi e le calorie attive continuano comunque ad aggiornarsi.")
             st.caption(f"Fonte calorie attive: {a['active_source']}. Sono già comprese nel consumo totale Health osservato e non vengono sommate una seconda volta.")
-    # ---------------- Water tracking ----------------
-    st.divider()
-    st.subheader("💧 Acqua")
-    water=water_today_ml()
-    goal=water_goal_ml()
-    pct=min(max(water/max(goal,1),0.0),1.0)
-    wc1,wc2=st.columns([5,2])
-    with wc1:
-        st.markdown(f"### {water/1000:.2f} L / {goal/1000:.2f} L")
-        st.progress(pct)
-        if water >= goal:
-            st.success("🎉 Obiettivo acqua raggiunto oggi.")
-        else:
-            st.caption(f"Ti mancano {(goal-water)/1000:.2f} L per raggiungere l'obiettivo di oggi.")
-    with wc2:
-        b1,b2=st.columns(2)
-        with b1:
-            if st.button("− 250 ml",key="water_minus",use_container_width=True):
-                add_water_ml(-250)
-                st.rerun()
-        with b2:
-            if st.button("+ 250 ml",key="water_plus",use_container_width=True,type="primary"):
-                add_water_ml(250)
-                st.rerun()
-        if st.button("Azzera oggi",key="water_reset",use_container_width=True):
-            st.session_state.water_history[today()]=0
-            st.rerun()
-    st.caption("Registrazione manuale · storico conservato per data in questa sessione.")
-
-    # ---------------- What should I eat today? ----------------
-    st.divider()
-    st.subheader("🍴 Cosa mangio oggi?")
-    st.caption("Suggerimenti collegati al piano di oggi e al budget calorico dinamico.")
-    d=current_day_name()
-    show_daily_meal_recommendation("🍽️ Pranzo", d, b)
-    show_daily_meal_recommendation("🌙 Cena", d, b)
-
-    with st.container(border=True):
-        st.markdown("### 🤖 Consiglio intelligente")
-        source_note=("budget dinamico calcolato dai dati Health osservati" if b["using_observed"] else "target alimentare stimato dal profilo; non è un dato misurato da Health")
-        st.caption(f"Il consiglio usa il prossimo pasto reale della giornata, ciò che hai già mangiato e il {source_note}. Gemini interpreta i dati: non calcola le calorie.")
-        if st.button("✨ Dammi un consiglio per il prossimo pasto", key="smart_food_advice_btn", use_container_width=True):
-            with st.spinner("Sto valutando il tuo piano di oggi…"):
-                try:
-                    advice=run_smart_food_advice(b)
-                    st.session_state.smart_food_advice=advice
-                except Exception as e:
-                    st.error(f"Errore nel consiglio AI: {e}")
-        if st.session_state.get("smart_food_advice"):
-            st.info(st.session_state.smart_food_advice)
-
     st.subheader("🍽️ Oggi")
     st.caption("Registra i pasti quando li mangi: il totale in alto si aggiorna automaticamente.")
     d=current_day_name(); ms=st.session_state.meal_plan.get(d)
@@ -1388,7 +805,7 @@ if st.session_state.page=="Home":
     else:
         for idx,(mn,m) in enumerate(ms.items()):
             items=active_items(m)
-            kcal=round(sum(item_kcal(i) for i in items))
+            kcal=round(sum(float(i["kcal"])*float(st.session_state.overrides.get(i["id"],{}).get("multiplier",1)) for i in items))
             meal_ids=[i["id"] for i in items]
             registered=bool(meal_ids) and all(st.session_state.eaten.get(iid,False) for iid in meal_ids)
             status="✅ Registrato" if registered else "○ Non registrato"
@@ -1410,7 +827,8 @@ if st.session_state.page=="Home":
                     st.metric("kcal",kcal)
                 with st.expander("Dettagli"):
                     for item in items:
-                        st.write(f"• {item['name']} — {quantity_caption(item)} · {round(item_kcal(item))} kcal")
+                        mult=float(st.session_state.overrides.get(item["id"],{}).get("multiplier",1))
+                        st.write(f"• {item['name']} — {item['qty']*mult:g}{item['unit']} · {round(item['kcal']*mult)} kcal")
 
     # ---------------- Live energy balance ----------------
     st.divider()
@@ -1440,125 +858,29 @@ if st.session_state.page=="Home":
             for j,x in enumerate(manual_today):
                 st.write(f"• {x['name']} · {round(float(x['kcal']))} kcal")
 
-    with st.expander("🍴 Registra qualcosa che hai mangiato fuori dal piano", expanded=False):
-        st.caption("Utile, ad esempio, se hai mangiato una pizza o un pasto diverso da quello previsto.")
-        c1,c2=st.columns([3,1])
-        with c1:n=st.text_input("Alimento",placeholder="Pizza margherita",key="manual_food_name_home")
-        with c2:k=st.number_input("kcal",0,3000,500,10,key="manual_food_kcal_home")
-        if st.button("Registra",type="primary",key="manual_food_register_home") and n.strip():
-            st.session_state.manual_foods.append({"name":n.strip(),"kcal":k,"date":today()})
-            st.rerun()
-
     if st.session_state.last_sync: st.caption("Ultima sincronizzazione Health: "+st.session_state.last_sync)
 
 # ---------------- Piano ----------------
 elif st.session_state.page=="Piano":
     st.title("🍽️ Il tuo piano")
-    st.caption("Le quantità precise restano nel motore; qui puoi scegliere se vedere grammature, porzioni o entrambe. Il totale del pasto e la lista della spesa si aggiornano automaticamente.")
-    st.subheader("📍 Pasti fuori casa")
-    st.caption("Imposta separatamente pranzo e cena: puoi avere entrambi fuori casa oppure, per esempio, solo il pranzo fuori casa e la cena a casa.")
-    days_week=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
-    with st.expander("⚙️ Configura giorni e pasti fuori casa", expanded=False):
-        lunch_set=set(st.session_state.get("out_lunch_days", []))
-        dinner_set=set(st.session_state.get("out_dinner_days", []))
-        for od in days_week:
-            oc1,oc2,oc3=st.columns([2.4,2.2,2.2])
-            with oc1: st.markdown(f"**{od}**")
-            with oc2:
-                lunch_on=st.checkbox("📍 Pranzo fuori casa", value=od in lunch_set, key=f"office_lunch_{od}")
-            with oc3:
-                dinner_on=st.checkbox("📍 Cena fuori casa", value=od in dinner_set, key=f"office_dinner_{od}")
-            if lunch_on: lunch_set.add(od)
-            else: lunch_set.discard(od)
-            if dinner_on: dinner_set.add(od)
-            else: dinner_set.discard(od)
-        st.session_state.out_lunch_days=sorted(lunch_set, key=days_week.index)
-        st.session_state.out_dinner_days=sorted(dinner_set, key=days_week.index)
-        st.info(f"Pranzi fuori casa: {', '.join(st.session_state.out_lunch_days) if st.session_state.out_lunch_days else 'nessuno'} · Cene fuori casa: {', '.join(st.session_state.out_dinner_days) if st.session_state.out_dinner_days else 'nessuna'}")
     days=list(st.session_state.meal_plan.keys()); day=st.selectbox("Giorno",days)
     for mn,m in st.session_state.meal_plan[day].items():
-        kcal=round(sum(item_kcal(i) for i in m.get("ingredients",[]) if not st.session_state.overrides.get(i["id"],{}).get("removed")))
+        kcal=sum(float(i["kcal"])*float(st.session_state.overrides.get(i["id"],{}).get("multiplier",1)) for i in active_items(m))
         with st.container(border=True):
-            out_of_home_day=out_of_home_meal_configured(day, mn)
-            st.markdown(f"### {mn}"); st.caption(("📍 **Fuori casa** · " if out_of_home_day else "") + f"{m.get('name','Pasto')} · **{kcal} kcal**")
+            st.markdown(f"### {mn}"); st.caption(f"{m.get('name','Pasto')} · **{round(kcal)} kcal**")
             for item in list(m.get("ingredients",[])):
-                ov=st.session_state.overrides.get(item["id"],{})
+                ov=st.session_state.overrides.get(item["id"],{}); mult=float(ov.get("multiplier",1))
                 if ov.get("removed"): continue
-                mult=item_multiplier(item); current_qty=item_qty(item); current_kcal=item_kcal(item)
-                step=qty_step(item.get("unit","g"), current_qty)
-                c1,c2,c3,c4,c5=st.columns([4.7,0.9,1.45,0.9,1.4])
+                c1,c2,c3,c4=st.columns([5,1,1,1])
                 with c1:
-                    eaten=st.checkbox(f"{item['name']} · {quantity_caption(item)} · {round(current_kcal)} kcal",value=st.session_state.eaten.get(item['id'],False),key="eat_"+item['id'])
-                    st.session_state.eaten[item['id']]=eaten
+                    eaten=st.checkbox(f"{item['name']} — {item['qty']*mult:g}{item['unit']} · {round(item['kcal']*mult)} kcal",value=st.session_state.eaten.get(item['id'],False),key="eat_"+item['id']); st.session_state.eaten[item['id']]=eaten
                 with c2:
-                    if st.button("−",key="minus_"+item['id'],use_container_width=True):
-                        if quantity_mode() == "precise":
-                            set_item_qty(item,current_qty-step)
-                        else:
-                            set_item_qty(item,max(0.5,mult-0.5)*float(item.get("qty",1)))
-                        st.rerun()
-                with c3:
-                    if quantity_mode() != "precise":
-                        st.caption("Porzione")
-                        st.markdown(f"**{quantity_caption(item)}**")
-                    else:
-                        st.caption("Qtà")
-                        st.markdown(f"**{current_qty:g} {item['unit']}**")
+                    if st.button("−",key="minus_"+item['id'],use_container_width=True): st.session_state.overrides[item['id']]={"multiplier":max(.25,mult-.25)}; st.rerun()
+                with c3: st.write(f"x{mult:g}")
                 with c4:
-                    if st.button("+",key="plus_"+item['id'],use_container_width=True):
-                        if quantity_mode() == "precise":
-                            set_item_qty(item,current_qty+step)
-                        else:
-                            set_item_qty(item,(mult+0.5)*float(item.get("qty",1)))
-                        st.rerun()
-                with c5:
-                    if st.button("✏️ Modifica",key="edit_"+item['id'],use_container_width=True):
-                        st.session_state[f"edit_open_{item['id']}"]=not st.session_state.get(f"edit_open_{item['id']}",False)
-                        st.rerun()
-                if st.session_state.get(f"edit_open_{item['id']}",False):
-                    with st.expander("Modifica / sostituisci alimento",expanded=True):
-                        a,b,c,d=st.columns([3,1,1,1])
-                        with a: new_name=st.text_input("Alimento",value=item['name'],key=f"rn_{item['id']}")
-                        with b: new_qty=st.number_input("Qtà",min_value=.1,value=float(current_qty),step=step,key=f"rq_{item['id']}")
-                        with c: new_unit=st.selectbox("Unità",["g","ml","pz"],index=["g","ml","pz"].index(item.get('unit','g')) if item.get('unit','g') in ["g","ml","pz"] else 0,key=f"ru_{item['id']}")
-                        with d: new_kcal=st.number_input("kcal",min_value=0,value=int(round(current_kcal)),step=5,key=f"rk_{item['id']}")
-                        s1,s2=st.columns(2)
-                        with s1:
-                            if st.button("💾 Salva modifica",key=f"save_edit_{item['id']}",use_container_width=True,type="primary") and new_name.strip():
-                                item["name"]=new_name.strip(); item["unit"]=new_unit; item["qty"]=float(new_qty); item["kcal"]=int(new_kcal)
-                                st.session_state.overrides[item["id"]]={"multiplier":1}
-                                st.session_state.eaten[item["id"]]=False
-                                st.session_state[f"edit_open_{item['id']}"]=False
-                                st.rerun()
-                        with s2:
-                            if st.button("✕ Rimuovi",key="remove_"+item['id'],use_container_width=True):
-                                st.session_state.overrides[item["id"]]={"removed":True,"multiplier":mult}
-                                st.session_state.eaten[item["id"]]=False
-                                st.rerun()
+                    if st.button("+",key="plus_"+item['id'],use_container_width=True): st.session_state.overrides[item['id']]={"multiplier":min(3,mult+.25)}; st.rerun()
+                if st.button("✕ Rimuovi",key="remove_"+item['id']): st.session_state.overrides[item['id']]={"removed":True,"multiplier":mult}; st.rerun()
             with st.expander("➕ Aggiungi alimento"):
-                suggestions=plan_food_suggestions(day,mn,limit=8)
-                if suggestions:
-                    st.markdown("**💡 Suggeriti dal tuo piano**")
-                    st.caption("Puoi riutilizzare un alimento già presente nella settimana: valori e porzione vengono copiati automaticamente.")
-                    for idx,sug in enumerate(suggestions):
-                        c1,c2=st.columns([5,1.4])
-                        with c1:
-                            sug_label = (f"{sug['qty']:g} {sug['unit']}" if quantity_mode()=="precise" else (f"1 porzione · {sug['qty']:g} {sug['unit']}" if quantity_mode()=="both" else "1 porzione"))
-                            st.markdown(f"**{sug['name']}** · {sug_label} · {round(sug['kcal'])} kcal")
-                        with c2:
-                            if st.button("+ Aggiungi",key=f"suggest_{day}_{mn}_{idx}",use_container_width=True):
-                                st.session_state.meal_plan[day][mn]["ingredients"].append({
-                                    "id":sid(),
-                                    "name":sug["name"],
-                                    "qty":sug["qty"],
-                                    "unit":sug["unit"],
-                                    "kcal":sug["kcal"],
-                                })
-                                st.rerun()
-                    st.divider()
-                else:
-                    st.info("Nel piano non ci sono ancora altri alimenti da suggerire.")
-                st.markdown("**🔎 Inserisci un alimento nuovo**")
                 a,b,c,d=st.columns([3,1,1,1])
                 with a:n=st.text_input("Nome",key=f"n_{day}_{mn}")
                 with b:q=st.number_input("Qtà",min_value=.1,value=10.,step=1.,key=f"q_{day}_{mn}")
@@ -1566,47 +888,16 @@ elif st.session_state.page=="Piano":
                 with d:k=st.number_input("kcal",min_value=0,value=50,step=5,key=f"k_{day}_{mn}")
                 if st.button("Aggiungi al pasto",key=f"add_{day}_{mn}") and n.strip():
                     st.session_state.meal_plan[day][mn]["ingredients"].append({"id":sid(),"name":n.strip(),"qty":q,"unit":u,"kcal":k}); st.rerun()
-    st.divider()
-    st.subheader("📚 Storico dei piani")
-    st.caption("Ogni nuovo piano conserva automaticamente quello precedente. Le modifiche future non alterano le versioni storiche.")
-    ensure_plan_metadata()
-    st.info(f"🟢 Piano attivo · settimana {week_label(st.session_state.plan_week_start)}")
-    history_items=sorted(st.session_state.plan_history.values(), key=lambda x:x.get("created_at",""), reverse=True)
-    if history_items:
-        for idx,rec in enumerate(history_items):
-            with st.expander(f"📅 {rec.get('label','Settimana')} · piano storico", expanded=False):
-                st.caption(f"Creato: {rec.get('created_at','—')[:16].replace('T',' ')}")
-                for hday,hms in rec.get("plan",{}).items():
-                    day_kcal=round(sum(float(i.get("kcal",0)) for _,hm in hms.items() for i in hm.get("ingredients",[])))
-                    st.markdown(f"**{hday}** · {day_kcal} kcal")
-                    for hmn,hm in hms.items():
-                        names=", ".join(f"{i.get('name','Alimento')} · {i.get('qty',1):g}{i.get('unit','g')}" for i in hm.get('ingredients',[]))
-                        st.caption(f"{hmn}: {names}")
-    else:
-        st.caption("Ancora nessun piano storico. Il primo verrà conservato automaticamente quando genererai il piano successivo.")
-
     st.divider(); st.subheader("🤖 Generazione AI")
     if st.button("Genera / rigenera piano settimanale",type="primary"):
         try:
-            ep=energy_profile()
-            lunch_days=st.session_state.get("out_lunch_days",[])
-            dinner_days=st.session_state.get("out_dinner_days",[])
-            prompt=f'''Crea un piano alimentare italiano di 7 giorni. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Target alimentare stimato: {ep["target"]} kcal/giorno.
-GIORNI PRANZO FUORI CASA: {", ".join(lunch_days) if lunch_days else "nessuno"}.
-GIORNI CENA FUORI CASA: {", ".join(dinner_days) if dinner_days else "nessuno"}.
-Per ogni giorno crea 4 pasti. Nei pasti segnati come fuori casa NON inventare un piatto domestico: usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche con ingredienti reali. Restituisci SOLO JSON con giorni Lunedì-Domenica e per ogni pasto name + ingredients. Ogni ingredient deve avere name, qty, unit, kcal.'''
-            raw=gemini_interaction(prompt).replace("```json","").replace("```","").strip(); gen=json.loads(raw); out={}
+            ep=energy_profile(); model=genai.GenerativeModel("gemini-2.5-flash")
+            prompt=f'''Crea un piano alimentare italiano di 7 giorni. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Target alimentare stimato: {ep["target"]} kcal/giorno. Restituisci SOLO JSON con giorni Lunedì-Domenica, 4 pasti al giorno e per ogni pasto name + ingredients. Ogni ingredient deve avere name, qty, unit, kcal.'''
+            raw=model.generate_content(prompt).text.replace("```json","").replace("```","").strip(); gen=json.loads(raw); out={}
             for day,ms in gen.items():
                 out[day]={}
                 for mn,m in ms.items(): out[day][mn]={"name":m.get("name","Pasto"),"ingredients":[{"id":sid(),"name":str(x.get("name","Alimento")),"qty":float(x.get("qty",1)),"unit":str(x.get("unit","g")),"kcal":round(float(x.get("kcal",0)))} for x in m.get("ingredients",[])]}
-            # Conserva sempre il piano precedente prima di sostituirlo.
-            previous_week=st.session_state.plan_week_start
-            archive_current_plan(reason="Sostituito da un nuovo piano AI")
-            # La nuova generazione viene considerata la settimana successiva rispetto al piano archiviato.
-            new_start=(date.fromisoformat(previous_week)+timedelta(days=7)).isoformat() if previous_week else week_start(date.today()+timedelta(days=7))
-            st.session_state.meal_plan=out
-            st.session_state.plan_week_start=new_start
-            st.session_state.overrides={}; st.session_state.eaten={}; st.rerun()
+            st.session_state.meal_plan=out; st.session_state.overrides={}; st.session_state.eaten={}; st.rerun()
         except Exception as e: st.error(f"Errore AI: {e}")
     st.subheader("📷 Mensa Smart")
     img=st.camera_input("Scatta il menu") or st.file_uploader("Carica una foto",type=["jpg","jpeg","png"],key="mensa3")
@@ -1614,99 +905,21 @@ Per ogni giorno crea 4 pasti. Nei pasti segnati come fuori casa NON inventare un
         im=Image.open(img); st.image(im,width=420)
         if st.button("✨ Analizza menu",type="secondary"):
             try:
-                b=balance()
-                day=current_day_name()
-                rec=meal_recommendation(day,"🍽️ Pranzo",b)
-                planned=rec["name"] if rec else "nessun pranzo disponibile nel piano"
-                planned_kcal=rec["planned_kcal"] if rec else 0
-                prompt=f"""Analizza questo menu fuori casa e consiglia la scelta migliore per oggi.
-Profilo operativo: piano del giorno con pranzo previsto: {planned}; calorie previste dal piano: {planned_kcal} kcal; calorie ancora disponibili oggi: {b['remaining']} kcal.
-Confronta le alternative del menu con il piano, senza inventare piatti non presenti nella foto.
-Rispondi in modo breve e pratico con:
-🟢 COSA ORDINARE: piatti esatti dalla foto
-💡 PERCHÉ: una frase collegata a piano e budget
-⚠️ COSA LIMITARE: eventuali elementi più calorici
-Se il budget residuo non consente di seguire esattamente il piano, proponi la combinazione più vicina e spiegalo."""
-                r=gemini_interaction(prompt, image=img)
-                st.info(r)
+                b=balance(); r=genai.GenerativeModel("gemini-2.5-flash").generate_content([f"Analizza questo menu. L'utente ha {b['remaining']} kcal disponibili oggi. Rispondi con COSA ORDINARE, PERCHÉ, COSA LIMITARE.",im]); st.info(r.text)
             except Exception as e: st.error(str(e))
 
 # ---------------- Dispensa ----------------
 elif st.session_state.page=="Dispensa":
-    st.title("🛒 Dispensa & Spesa")
-    st.caption("La lista della spesa nasce dal piano settimanale e viene ridotta automaticamente da ciò che hai già in casa.")
-
-    tab_shop, tab_pantry = st.tabs(["🛒 Lista della spesa", "📦 La mia dispensa"])
-
-    with tab_shop:
-        rows=shopping_list()
-        if not rows:
-            st.info("Il piano non contiene ancora alimenti da acquistare.")
-        else:
-            total=len(rows)
-            to_buy=sum(1 for r in rows if r["need"]>0)
-            st.subheader(f"🛒 Da acquistare · {to_buy}/{total}")
-            st.caption("La quantità richiesta è quella del piano. La colonna 'Hai' viene sottratta automaticamente.")
-            for r in rows:
-                key=_pantry_key(r["name"],r["unit"])
-                checked_key="shop_"+key.replace("|","_")
-                if r["need"]<=0:
-                    st.success(f"✓ {r['name']} · {r['required']:g} {r['unit']} · hai già {r['pantry']:g} {r['unit']}")
-                else:
-                    c1,c2,c3,c4=st.columns([3,1.2,1.2,1.3])
-                    with c1:
-                        st.checkbox(f"{r['name']}",key=checked_key,value=bool(st.session_state.shopping_checked.get(key,False)))
-                    with c2: st.write(f"Piano **{r['required']:g} {r['unit']}**")
-                    with c3: st.write(f"Hai **{r['pantry']:g} {r['unit']}**")
-                    with c4:
-                        if st.button("➕ In dispensa",key="buy_"+key.replace("|","_"),use_container_width=True):
-                            add_pantry_qty(r["name"],r["unit"],r["need"])
-                            st.session_state.shopping_checked[key]=True
-                            st.rerun()
-
-            st.divider()
-            st.caption("💡 Quando aggiungi un prodotto alla dispensa, la quantità da acquistare si aggiorna subito.")
-
-    with tab_pantry:
-        st.subheader("📦 Cosa hai già in casa")
-        pantry=pantry_items()
-        if pantry:
-            for item in pantry:
-                c1,c2,c3,c4=st.columns([3,1,1,1])
-                with c1: st.write(f"**{item['name']}**")
-                with c2:
-                    st.write(f"{item['qty']:g} {item['unit']}")
-                with c3:
-                    if st.button("−",key="pantry_minus_"+item["key"].replace("|","_"),use_container_width=True):
-                        step=1 if item["unit"]=="pz" else 50
-                        add_pantry_qty(item["name"],item["unit"],-step); st.rerun()
-                with c4:
-                    if st.button("+",key="pantry_plus_"+item["key"].replace("|","_"),use_container_width=True):
-                        step=1 if item["unit"]=="pz" else 50
-                        add_pantry_qty(item["name"],item["unit"],step); st.rerun()
-        else:
-            st.info("La dispensa è vuota. Puoi aggiungere qui quello che hai già in casa.")
-
-        st.divider()
-        st.markdown("**➕ Aggiungi alimento alla dispensa**")
-        suggestions=[{"name":r["name"],"unit":r["unit"]} for r in shopping_list()]
-        names=sorted({x["name"] for x in suggestions})
-        c1,c2,c3=st.columns([3,1,1])
-        with c1:
-            selected=st.selectbox("Alimento",["Nuovo alimento…"]+names,key="pantry_select")
-        with c2:
-            qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=50.0,key="pantry_qty")
-        with c3:
-            unit=st.selectbox("Unità",["g","ml","pz"],key="pantry_unit")
-        if selected=="Nuovo alimento…":
-            custom_name=st.text_input("Nome alimento",placeholder="es. Pasta")
-        else:
-            custom_name=selected
-            suggested_unit=next((x["unit"] for x in suggestions if x["name"]==selected),None)
-            if suggested_unit in ("g","ml","pz"):
-                st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
-        if st.button("Salva in dispensa",type="primary") and custom_name.strip() and qty>0:
-            add_pantry_qty(custom_name.strip(),unit,qty); st.rerun()
+    st.title("🛒 Dispensa")
+    st.caption("La lista viene calcolata localmente dal piano: rimuovi o aggiungi un alimento e cambia subito.")
+    for q,u,n in grocery(): st.checkbox(f"{n} — {q:g} {u}",key="g_"+n+u)
+    st.divider(); st.subheader("🍴 Registra qualcosa che hai mangiato")
+    c1,c2=st.columns([3,1])
+    with c1:n=st.text_input("Alimento",placeholder="Pizza margherita")
+    with c2:k=st.number_input("kcal",0,3000,500,10)
+    if st.button("Registra",type="primary") and n.strip(): st.session_state.manual_foods.append({"name":n.strip(),"kcal":k,"date":today()}); st.rerun()
+    for x in reversed(st.session_state.manual_foods):
+        if x["date"]==today(): st.write(f"🍴 {x['name']} · {x['kcal']} kcal")
 
 # ---------------- Attività / Health ----------------
 elif st.session_state.page=="Attività":
@@ -1792,7 +1005,9 @@ elif st.session_state.page=="Attività":
         st.divider(); st.subheader("🏃 Attività di oggi")
         ac1,ac2,ac3=st.columns(3)
         ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
-        ac2.metric("⚡ Calorie attive stimate", f"{a['active_calories']:,} kcal".replace(",","."))
+        active_display = (f"{a['active_calories']:,} kcal".replace(",",".")
+                          if a['active_calories'] is not None else "Non disponibile")
+        ac2.metric("⚡ Calorie attive", active_display)
         ac3.metric("📏 Distanza", f"{a['distance_km']:.2f} km")
         if a["details"]:
             for w in a["details"]:
@@ -1869,32 +1084,13 @@ else:
             sex=st.selectbox("Sesso",["male","female"],index=0 if st.session_state.p_sex=="male" else 1)
             activity=st.selectbox("Attività abituale",list(ACTIVITY_FACTORS.keys()),index=list(ACTIVITY_FACTORS.keys()).index(st.session_state.p_activity_level))
             deficit=st.select_slider("Deficit desiderato",options=[300,500,700],value=int(st.session_state.p_deficit),format_func=lambda x:f"{x} kcal/giorno")
-            water_goal=st.select_slider("Obiettivo acqua",options=list(range(1500,4001,250)),value=int(st.session_state.p_water_goal_ml),format_func=lambda x:f"{x/1000:.2f} L/giorno")
-            quantity_mode_value=st.radio(
-                "Come vuoi vedere le quantità?",
-                ["porzioni","both","precise"],
-                index=["porzioni","both","precise"].index(st.session_state.get("p_quantity_mode","porzioni")),
-                format_func=lambda x: {
-                    "porzioni":"👌 Porzioni — niente bilancia",
-                    "both":"⚖️ Porzioni + grammature",
-                    "precise":"⚖️ Preciso — mostra le grammature"
-                }[x],
-                help="Le grammature restano comunque nel motore per calcolare calorie e lista della spesa. Cambia solo ciò che vedi.",
-            )
         if st.form_submit_button("Salva",type="primary"):
-            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_deficit=deficit; st.session_state.p_water_goal_ml=water_goal; st.session_state.p_quantity_mode=quantity_mode_value; st.success("Profilo aggiornato")
-    st.caption({
-        "porzioni":"👌 Modalità quantità: **Porzioni** — niente bilancia. MyDietApp calcola comunque le quantità in background.",
-        "both":"⚖️ Modalità quantità: **Porzioni + grammature**.",
-        "precise":"⚖️ Modalità quantità: **Preciso** — grammature visibili."
-    }.get(quantity_mode(), "👌 Modalità quantità: **Porzioni**."))
+            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_deficit=deficit; st.success("Profilo aggiornato")
     ep=energy_profile()
     st.subheader("🎯 Obiettivo energetico")
     st.metric("Target alimentare stimato",f"{ep['target']:,} kcal/giorno".replace(",","."))
-    st.metric("💧 Obiettivo acqua",f"{water_goal_ml()/1000:.2f} L/giorno")
     c1,c2=st.columns(2); c1.metric("BMR stimato",f"{ep['bmr_est']:,} kcal".replace(",",".")); c2.metric("Mantenimento stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
     b=balance()
     if b["using_observed"]:
         st.info(f"🔥 Con i dati Health di oggi, il budget dinamico è circa **{b['live_target']:,} kcal**: consumo osservato {b['observed_burn']:,} + riposo residuo {b['remaining_rest']:,} → stima fine giornata {b['projected_burn']:,}, meno deficit {b['deficit']}.")
-    st.caption(f"Acqua di oggi: {water_today_ml()/1000:.2f} L / {water_goal_ml()/1000:.2f} L. La registrazione è separata dalle calorie e viene conservata per data nella sessione corrente.")
     st.caption("Il target di profilo è una stima basata su Mifflin-St Jeor + livello di attività + deficit scelto. Il budget dinamico usa il consumo totale osservato da Health quando disponibile; l’attività viene mostrata separatamente senza doppio conteggio. Non è una prescrizione medica.")
