@@ -1233,7 +1233,12 @@ elif st.session_state.page=="Piano":
                             set_item_qty(item,max(0.5,mult-0.5)*float(item.get("qty",1)))
                         st.rerun()
                 with c3:
-                    st.metric("Porzione" if quantity_mode() != "precise" else "Qtà", quantity_caption(item) if quantity_mode() != "precise" else f"{current_qty:g} {item['unit']}")
+                    if quantity_mode() != "precise":
+                        st.caption("Porzione")
+                        st.markdown(f"**{quantity_caption(item)}**")
+                    else:
+                        st.caption("Qtà")
+                        st.markdown(f"**{current_qty:g} {item['unit']}**")
                 with c4:
                     if st.button("+",key="plus_"+item['id'],use_container_width=True):
                         if quantity_mode() == "precise":
