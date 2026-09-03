@@ -14,7 +14,7 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v37
+# MyDietApp v40
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
 # - recommendations adapt to the current dynamic calorie budget
@@ -32,13 +32,14 @@ st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", init
 GEMINI_MODEL = "gemini-3.6-flash"
 gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
-def gemini_interaction(prompt, image=None):
+def gemini_interaction(prompt, image=None, thinking_level=None):
     """Call Gemini via the current Interactions API. Supports text and optional image input."""
+    generation_config = {"thinking_level": thinking_level} if thinking_level else None
     if image is None:
-        interaction = gemini_client.interactions.create(
-            model=GEMINI_MODEL,
-            input=prompt,
-        )
+        kwargs = {"model": GEMINI_MODEL, "input": prompt}
+        if generation_config:
+            kwargs["generation_config"] = generation_config
+        interaction = gemini_client.interactions.create(**kwargs)
     else:
         if hasattr(image, "getvalue"):
             image_bytes = image.getvalue()
@@ -50,13 +51,16 @@ def gemini_interaction(prompt, image=None):
         if mime_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
             mime_type = "image/jpeg"
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-        interaction = gemini_client.interactions.create(
-            model=GEMINI_MODEL,
-            input=[
+        kwargs = {
+            "model": GEMINI_MODEL,
+            "input": [
                 {"type": "text", "text": prompt},
                 {"type": "image", "data": image_b64, "mime_type": mime_type},
             ],
-        )
+        }
+        if generation_config:
+            kwargs["generation_config"] = generation_config
+        interaction = gemini_client.interactions.create(**kwargs)
     return interaction.output_text.strip()
 
 
@@ -469,8 +473,66 @@ def eaten_items_today():
     return out
 
 
+def _meal_is_registered(day, meal_name):
+    meal=st.session_state.meal_plan.get(day,{}).get(meal_name)
+    if not meal:
+        return False
+    items=active_items(meal)
+    return bool(items) and all(st.session_state.eaten.get(i["id"],False) for i in items)
+
+
+def _next_meal_for_today(day):
+    """Choose the most relevant next meal using clock time + registration state."""
+    ms=st.session_state.meal_plan.get(day,{})
+    order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
+    if not ms:
+        return None
+    now=datetime.now(ROME)
+    now_hour=now.hour + now.minute/60
+    windows={
+        "☕ Colazione":(5,10.5),
+        "🍎 Spuntino":(10.5,12.5),
+        "🍽️ Pranzo":(12,16.5),
+        "🌙 Cena":(18,23.99),
+    }
+    candidates=[]
+    for idx,name in enumerate(order):
+        if name not in ms or _meal_is_registered(day,name):
+            continue
+        start_h,end_h=windows[name]
+        if now_hour <= end_h:
+            distance=0 if start_h <= now_hour <= end_h else max(0,start_h-now_hour)
+            candidates.append((distance,idx,name))
+    if candidates:
+        return ms[candidates[0][2]] | {"_meal_name":candidates[0][2]}
+    for name in order:
+        if name in ms and not _meal_is_registered(day,name):
+            return ms[name] | {"_meal_name":name}
+    return None
+
+
+def _next_meal_context(day, balance_data):
+    b=balance_data or balance()
+    next_meal=_next_meal_for_today(day)
+    if not next_meal:
+        return {"meal":None,"meal_budget_kcal":max(0,int(b.get("remaining",0))),"future_planned_kcal":0}
+    meal_name=next_meal.get("_meal_name")
+    planned_kcal=round(sum(item_kcal(i) for i in active_items(next_meal)))
+    future_planned=round(_planned_remaining_after_meal(day,meal_name))
+    meal_budget=max(0,int(b.get("remaining",0))-future_planned)
+    return {
+        "meal":meal_name,
+        "name":str(next_meal.get("name") or meal_name),
+        "planned_kcal":planned_kcal,
+        "meal_budget_kcal":meal_budget,
+        "future_planned_kcal":future_planned,
+        "out_of_home":out_of_home_meal_configured(day,meal_name) or "FUORI CASA" in str(next_meal.get("name","")).upper() or "UFFICIO" in str(next_meal.get("name","")).upper(),
+        "items":[i.get("name") for i in active_items(next_meal)],
+    }
+
+
 def smart_assistant_context(balance_data=None):
-    """Build a compact, factual context for an optional AI recommendation."""
+    """Build factual context. Python determines budget and next meal; Gemini only interprets it."""
     b=balance_data or balance()
     d=current_day_name()
     ms=st.session_state.meal_plan.get(d,{})
@@ -483,48 +545,57 @@ def smart_assistant_context(balance_data=None):
             "meal":meal_name,
             "name":meal.get("name",meal_name),
             "kcal":round(sum(item_kcal(i) for i in items)),
-            "items":[i.get("name") for i in items],
-            "out_of_home":out_of_home_meal_configured(d,meal_name) or "FUORI CASA" in str(meal.get("name","")).upper()
+            "registered":_meal_is_registered(d,meal_name),
+            "out_of_home":out_of_home_meal_configured(d,meal_name) or "FUORI CASA" in str(meal.get("name","")).upper() or "UFFICIO" in str(meal.get("name","")).upper()
         })
+    next_ctx=_next_meal_context(d,b)
     return {
         "day":d,
+        "budget_is_dynamic":bool(b.get("using_observed")),
+        "budget_label":"budget dinamico da Health Connect" if b.get("using_observed") else "target alimentare stimato dal profilo",
         "remaining_kcal":int(b.get("remaining",0)),
         "daily_food_target":int(b.get("live_target") or b.get("target") or 0),
         "eaten_kcal":int(b.get("eaten",0)),
         "deficit_target":int(b.get("deficit",0)),
-        "steps":int(b.get("steps",0) or 0),
         "observed_burn":int(b.get("observed_burn",0) or 0),
         "projected_burn":int(b.get("projected_burn",0) or 0),
+        "steps":int(b.get("steps",0) or 0),
+        "next_meal":next_ctx,
         "planned_meals":planned,
         "eaten_items":eaten_items_today(),
     }
 
 
 def run_smart_food_advice(balance_data=None):
-    """Ask Gemini for a practical next-meal suggestion. Arithmetic stays in Python."""
+    """Ask Gemini to explain a deterministic next-meal decision; never let it recalculate the budget."""
     ctx=smart_assistant_context(balance_data)
-    prompt=f'''Sei l'assistente alimentare di MyDietApp. Dai un consiglio pratico per il PROSSIMO pasto della giornata, usando esclusivamente i dati forniti.
+    prompt=f'''Sei l'assistente alimentare di MyDietApp. Devi dare un consiglio pratico sul PROSSIMO pasto, usando esclusivamente il contesto fornito.
 
-CONTESTO:
+CONTESTO CALCOLATO DA MYDIETAPP:
 {json.dumps(ctx,ensure_ascii=False,indent=2)}
 
-REGOLE IMPORTANTI:
-- Il numero "remaining_kcal" è il budget alimentare residuo calcolato da MyDietApp: non ricalcolarlo e non modificarlo.
-- Non inventare calorie bruciate, attività future, alimenti o dati nutrizionali non presenti.
-- L'utente preferisce mangiare a porzioni e ODIA pesare gli alimenti: parla di porzioni normali, non di grammi.
-- Se il pasto previsto rientra nel budget, suggerisci di seguirlo senza complicarlo.
-- Se il pasto previsto supera il budget, proponi una modifica semplice o un'alternativa già presente nel piano.
-- Se il pasto è FUORI CASA, suggerisci di usare Mensa Smart invece di inventare un piatto.
+REGOLE NON NEGOZIABILI:
+- MyDietApp calcola gia tutti i numeri. NON ricalcolare, correggere o inventare calorie.
+- "remaining_kcal" e il numero di kcal alimentari che restano oggi secondo MyDietApp.
+- Se "budget_is_dynamic" e false, il valore e un TARGET STIMATO dal profilo, NON chiamarlo budget dinamico e non dire che deriva da Health Connect.
+- Se "budget_is_dynamic" e true, puoi dire che il budget e dinamico e basato sul consumo Health osservato.
+- Il campo "next_meal" identifica il pasto piu rilevante in questo momento: NON scegliere un altro pasto.
+- Se non esiste un prossimo pasto, dillo chiaramente.
+- Se il prossimo pasto e gia registrato, dillo chiaramente invece di suggerire di mangiarlo di nuovo.
+- Confronta "planned_kcal" con "meal_budget_kcal". Se rientra, consiglia semplicemente di seguire il piano.
+- Se supera il budget del pasto, proponi una modifica semplice usando gli alimenti gia presenti nel piano quando possibile.
+- Se "out_of_home" e true, non inventare un piatto: suggerisci di usare Mensa Smart per scegliere dal menu reale.
+- L'utente odia pesare gli alimenti: usa SOLO concetti come porzione normale, mezza porzione, porzione abbondante. MAI grammi.
+- Se l'utente ha gia registrato un alimento manualmente (es. pizza), consideralo nel consiglio.
+- Non inventare proteine o altri valori nutrizionali non presenti.
 - Non dare consigli medici.
-- Non inventare valori di proteine: il database attuale non fornisce ancora dati proteici completi.
 
-Rispondi in massimo 5 righe, con questo formato:
+Rispondi in massimo 5 righe, in questo formato:
 🍽️ PROSSIMO PASTO: ...
 💡 CONSIGLIO: ...
-🔥 BUDGET: ... kcal disponibili
+🔥 DISPONIBILI: ... kcal
 📌 MOTIVO: ...'''
-    return gemini_interaction(prompt)
-
+    return gemini_interaction(prompt, thinking_level="minimal")
 
 def show_daily_meal_recommendation(meal_name, day, balance_data):
     rec=meal_recommendation(day,meal_name,balance_data)
@@ -1268,7 +1339,7 @@ if st.session_state.page=="Home":
 
     with st.container(border=True):
         st.markdown("### 🤖 Consiglio intelligente")
-        st.caption("Un consiglio opzionale basato su ciò che hai già mangiato, sul piano di oggi e sulle calorie ancora disponibili. I calcoli del budget restano gestiti da MyDietApp.")
+        st.caption("Il consiglio usa il prossimo pasto reale della giornata, ciò che hai già mangiato e il budget calcolato da MyDietApp. Gemini interpreta i dati: non calcola le calorie.")
         if st.button("✨ Dammi un consiglio per il prossimo pasto", key="smart_food_advice_btn", use_container_width=True):
             with st.spinner("Sto valutando il tuo piano di oggi…"):
                 try:
