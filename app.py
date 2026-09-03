@@ -1340,6 +1340,15 @@ if st.session_state.page=="Home":
             for j,x in enumerate(manual_today):
                 st.write(f"• {x['name']} · {round(float(x['kcal']))} kcal")
 
+    with st.expander("🍴 Registra qualcosa che hai mangiato fuori dal piano", expanded=False):
+        st.caption("Utile, ad esempio, se hai mangiato una pizza o un pasto diverso da quello previsto.")
+        c1,c2=st.columns([3,1])
+        with c1:n=st.text_input("Alimento",placeholder="Pizza margherita",key="manual_food_name_home")
+        with c2:k=st.number_input("kcal",0,3000,500,10,key="manual_food_kcal_home")
+        if st.button("Registra",type="primary",key="manual_food_register_home") and n.strip():
+            st.session_state.manual_foods.append({"name":n.strip(),"kcal":k,"date":today()})
+            st.rerun()
+
     if st.session_state.last_sync: st.caption("Ultima sincronizzazione Health: "+st.session_state.last_sync)
 
 # ---------------- Piano ----------------
@@ -1598,14 +1607,6 @@ elif st.session_state.page=="Dispensa":
                 st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
         if st.button("Salva in dispensa",type="primary") and custom_name.strip() and qty>0:
             add_pantry_qty(custom_name.strip(),unit,qty); st.rerun()
-
-    st.divider(); st.subheader("🍴 Registra qualcosa che hai mangiato")
-    c1,c2=st.columns([3,1])
-    with c1:n=st.text_input("Alimento",placeholder="Pizza margherita")
-    with c2:k=st.number_input("kcal",0,3000,500,10)
-    if st.button("Registra",type="primary") and n.strip(): st.session_state.manual_foods.append({"name":n.strip(),"kcal":k,"date":today()}); st.rerun()
-    for x in reversed(st.session_state.manual_foods):
-        if x["date"]==today(): st.write(f"🍴 {x['name']} · {x['kcal']} kcal")
 
 # ---------------- Attività / Health ----------------
 elif st.session_state.page=="Attività":
