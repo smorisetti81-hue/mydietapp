@@ -1827,6 +1827,16 @@ elif st.session_state.page=="Piano":
         label_visibility="collapsed",
     )
 
+    # Mantieni sempre disponibile lo stato canonico usato dal resto della
+    # pagina. Nella V62 questo valore non veniva inizializzato prima del
+    # riepilogo giornaliero, causando AttributeError al primo caricamento.
+    if selected_view==next_label:
+        st.session_state.plan_view_mode="next"
+    elif selected_view==history_label:
+        st.session_state.plan_view_mode="history"
+    else:
+        st.session_state.plan_view_mode="current"
+
     # ------------------------------------------------------------------
     # STORICO: consultazione separata, senza mischiarla con il piano.
     # ------------------------------------------------------------------
