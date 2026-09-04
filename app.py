@@ -945,12 +945,11 @@ def energy_profile():
     return {"bmr_est":bmr,"maintenance_est":maintenance,"target":target,"deficit":int(p["deficit"]),"factor":ACTIVITY_FACTORS[p["activity_level"]]}
 
 def weight_projection():
-    """Build an illustrative weight-loss trajectory from current to desired weight.
+    """Build a clean weekly reference trajectory from today's weight to the goal.
 
-    The projection uses the current internal calorie deficit as a simple planning
-    estimate (7700 kcal ≈ 1 kg). It is not a prediction of actual weight change.
-    Actual weight readings can be added later and should be compared with this
-    reference trajectory rather than treated as a guarantee.
+    This is only a planning reference based on the profile deficit (7700 kcal ≈ 1 kg).
+    It deliberately contains no invented real-weight readings. Later, Health Connect
+    measurements can be overlaid as the actual trajectory.
     """
     try:
         current=float(st.session_state.get("p_weight",0) or 0)
@@ -958,21 +957,23 @@ def weight_projection():
         deficit=max(0,int(st.session_state.get("p_deficit",500) or 500))
     except Exception:
         return None
+
     if current <= 0 or goal <= 0 or goal >= current or deficit <= 0:
         return None
+
     kg_per_week=(deficit*7)/7700.0
-    if kg_per_week <= 0:
-        return None
     total_kg=current-goal
     weeks=max(1,int((total_kg/kg_per_week)+0.999999))
-    rows=[]
     start=datetime.now(ROME).date()
+
+    rows=[]
     for w in range(weeks+1):
         d=start+timedelta(days=7*w)
         projected=max(goal,current-(kg_per_week*w))
         if w==weeks:
             projected=goal
-        rows.append({"Data":d.strftime("%d/%m/%Y"),"Peso stimato":round(projected,1)})
+        rows.append({"Data":d,"Peso teorico":round(projected,1)})
+
     return {
         "current":current,
         "goal":goal,
@@ -2319,8 +2320,10 @@ else:
         c1.metric("Peso attuale",f"{projection['current']:.1f} kg")
         c2.metric("Peso desiderato",f"{projection['goal']:.1f} kg")
         c3.metric("Stima obiettivo",target_date)
-        st.line_chart(pd.DataFrame(projection["rows"]).set_index("Data"),use_container_width=True)
-        st.caption(f"Ritmo teorico usato per il grafico: circa {projection['kg_per_week']:.2f} kg/settimana. È una **proiezione orientativa**, non una previsione garantita: il peso reale può scendere più velocemente o più lentamente.")
+        chart_df=pd.DataFrame(projection["rows"])
+        chart_df["Data"]=pd.to_datetime(chart_df["Data"])
+        st.line_chart(chart_df,x="Data",y="Peso teorico",use_container_width=True,height=360)
+        st.caption(f"Ogni punto rappresenta una settimana. Ritmo teorico: circa {projection['kg_per_week']:.2f} kg/settimana. È una **proiezione orientativa**, non una previsione garantita: il peso reale può scendere più velocemente o più lentamente.")
     else:
         current=float(st.session_state.get("p_weight",0) or 0)
         goal=float(st.session_state.get("p_goal_weight",current) or current)
