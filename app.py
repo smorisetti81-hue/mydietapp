@@ -12,9 +12,12 @@ from PIL import Image
 from collections import defaultdict
 import uuid
 import copy
+import re
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v65 SMART SHOPPING
+# MyDietApp v66 SMART SHOPPING LIVE
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -67,6 +70,179 @@ def gemini_interaction(prompt, image=None, thinking_level=None):
         interaction = gemini_client.interactions.create(**kwargs)
     return interaction.output_text.strip()
 
+
+
+# ============================================================
+# Smart Shopping live data
+# ============================================================
+SMART_SHOPPING_STORES = [
+    "Conad", "Esselunga", "Carrefour", "Eurospin", "Tosano", "Lidl",
+    "Iper", "Tigros", "Coop", "Penny", "Aldi", "PAM", "Bennet",
+    "Sigma", "Il Gigante", "Famila"
+]
+
+
+def _money_value(value):
+    try:
+        return float(str(value).replace("€", "").replace(".", "").replace(",", ".").strip())
+    except Exception:
+        return None
+
+
+def _comprissimo_search_url(product_name, sort="unit_price"):
+    q = urllib.parse.quote_plus(str(product_name).strip())
+    return (
+        "https://comprissimo.ai/search?brand=&category=&has_price=True&on_sale=False"
+        f"&page=1&per_page=24&q={q}&sort={sort}&supermarket="
+    )
+
+
+def _clean_spaces(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _tokens(text):
+    return set(re.findall(r"[a-zàèéìòù0-9]+", str(text).lower()))
+
+
+def _match_score(query, product):
+    q = _tokens(query)
+    p = _tokens(product)
+    if not q or not p:
+        return 0.0
+    return len(q & p) / max(1, len(q))
+
+
+def _parse_comprissimo_search(html, query, limit=8):
+    """Parse the public Comprissimo catalog page without inventing prices.
+
+    The parser is deliberately conservative: a row is returned only when a
+    product name, a euro price and a unit price are all visible in the page.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    products = []
+    seen = set()
+    for h3 in soup.find_all("h3"):
+        name = _clean_spaces(h3.get_text(" ", strip=True))
+        if not name or name.lower() in {"catalogo prodotti", "confronto prezzi"}:
+            continue
+        card = h3
+        card_text = ""
+        # Walk up only a few levels: this avoids swallowing the whole page.
+        for parent in h3.parents:
+            if parent.name not in {"div", "article", "li", "section"}:
+                continue
+            txt = _clean_spaces(parent.get_text(" ", strip=True))
+            if len(txt) <= 1800 and "Aggiungi" in txt and re.search(r"\d+[,.]\d+\s*€/\s*(kg|L|pz)", txt, re.I):
+                card = parent
+                card_text = txt
+                break
+        if not card_text:
+            continue
+
+        unit_match = re.search(r"(\d+[,.]\d+)\s*€/\s*(kg|L|pz)", card_text, re.I)
+        if not unit_match:
+            continue
+        unit_price = _money_value(unit_match.group(1))
+        unit_kind = unit_match.group(2)
+        if unit_price is None:
+            continue
+
+        before_unit = card_text[:unit_match.start()]
+        prices = re.findall(r"(?<!\d)(\d+[,.]\d{2})\s*€", before_unit)
+        if not prices:
+            continue
+        price = _money_value(prices[-1])
+        if price is None:
+            continue
+
+        stores = [store for store in SMART_SHOPPING_STORES if re.search(rf"\b{re.escape(store)}\b", card_text, re.I)]
+        store = stores[0] if stores else ""
+        compare_url = ""
+        for a in card.find_all("a", href=True):
+            href = str(a.get("href", ""))
+            if "/compare/" in href:
+                compare_url = urllib.parse.urljoin("https://comprissimo.ai", href)
+                break
+        score = _match_score(query, name)
+        # Avoid irrelevant catalog noise.
+        if score < 0.34:
+            continue
+        key = (name.lower(), store.lower(), round(price, 2), round(unit_price, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        products.append({
+            "name": name,
+            "store": store,
+            "price": price,
+            "unit_price": unit_price,
+            "unit_kind": unit_kind,
+            "compare_url": compare_url,
+            "search_url": _comprissimo_search_url(query),
+            "score": score,
+            "source": "Comprissimo",
+        })
+
+    products.sort(key=lambda x: (-x["score"], x["unit_price"], x["price"]))
+    return products[:limit]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_comprissimo_live(product_name):
+    """Fetch current public Comprissimo search data. Cached for 15 minutes."""
+    url = _comprissimo_search_url(product_name)
+    try:
+        response = requests.get(
+            url,
+            timeout=15,
+            headers={"User-Agent": "MyDietApp/66 (+smart-shopping)"},
+        )
+        response.raise_for_status()
+        return _parse_comprissimo_search(response.text, product_name, limit=8)
+    except Exception:
+        return []
+
+
+def _shopping_live_for_items(items, max_items=10):
+    """Fetch live results concurrently, but cap requests to keep the app responsive."""
+    selected = items[:max_items]
+    out = {}
+    if not selected:
+        return out
+    with ThreadPoolExecutor(max_workers=min(5, len(selected))) as pool:
+        futures = {pool.submit(fetch_comprissimo_live, str(r["name"]).strip()): r["name"] for r in selected}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                out[name] = future.result()
+            except Exception:
+                out[name] = []
+    return out
+
+
+def _shopping_cart_summary(live_results, items):
+    """Build a conservative store summary from products actually matched."""
+    store_totals = defaultdict(float)
+    store_products = defaultdict(int)
+    for r in items:
+        matches = live_results.get(r["name"], [])
+        if not matches:
+            continue
+        best_by_store = {}
+        for m in matches:
+            store = m.get("store") or ""
+            if not store:
+                continue
+            current = best_by_store.get(store)
+            if current is None or m["unit_price"] < current["unit_price"]:
+                best_by_store[store] = m
+        # We cannot know how many packages are needed without packaging data;
+        # therefore use the observed unit-price ranking only and never invent a cart total.
+        for store, m in best_by_store.items():
+            store_products[store] += 1
+    ranking = sorted(store_products.items(), key=lambda x: (-x[1], x[0]))
+    return [{"store": store, "matched": count} for store, count in ranking]
 
 FIT_BASE = "https://www.googleapis.com/fitness/v1/users/me"
 FIT_SCOPES = (
@@ -2291,87 +2467,119 @@ elif st.session_state.page=="Dispensa":
 
     with tab_smart:
         st.subheader("💰 Spesa intelligente")
-        st.caption("MyDiet ti aiuta a decidere dove conviene cercare i prodotti del tuo piano, senza inventare prezzi.")
+        st.caption("Confronta dati reali quando disponibili, senza inventare prezzi. MyDiet separa il fabbisogno del piano dall'acquisto reale.")
 
         if not to_buy:
             st.success("🎉 Nessun acquisto scoperto: il piano è già completamente coperto dalla dispensa.")
         else:
-            # Preferenze di acquisto: influenzano l'ordine dei suggerimenti, non inventano prezzi.
             pc1, pc2 = st.columns([2.2, 1])
             with pc1:
                 strategy = st.selectbox(
                     "Come vuoi risparmiare?",
                     ["⚖️ Qualità / prezzo", "💰 Prezzo più basso", "⭐ Mantieni le marche preferite"],
                     key="shopping_strategy",
-                    help="La preferenza serve a ordinare i suggerimenti. I prezzi reali vengono mostrati solo quando disponibili da una fonte verificabile."
+                    help="La strategia cambia il modo in cui MyDiet interpreta i risultati, non i dati ricevuti.",
                 )
             with pc2:
-                radius = st.number_input("📍 Raggio", min_value=1, max_value=30, value=int(st.session_state.get("shopping_radius",5) or 5), step=1, key="shopping_radius")
+                radius = st.number_input(
+                    "📍 Raggio",
+                    min_value=1,
+                    max_value=30,
+                    value=int(st.session_state.get("shopping_radius", 5) or 5),
+                    step=1,
+                    key="shopping_radius",
+                )
 
             st.markdown("### 🧺 Il tuo paniere")
             total_need = len(to_buy)
             high = [r for r in to_buy if shopping_opportunity(r["required"], r["pantry"], r["unit"]) == "high"]
             medium = [r for r in to_buy if shopping_opportunity(r["required"], r["pantry"], r["unit"]) == "medium"]
-            m1,m2,m3 = st.columns(3)
+            m1, m2, m3 = st.columns(3)
             with m1: st.metric("Prodotti da comprare", total_need)
-            with m2: st.metric("Da confrontare", len(high)+len(medium))
+            with m2: st.metric("Priorità alta", len(high))
             with m3: st.metric("Coperti", len(covered))
 
             st.info(
-                "💡 **Qui MyDiet prepara la ricerca, non inventa il prezzo.** "
-                "Per ogni alimento apri il confronto su un servizio che pubblica prezzi aggiornati e confronta anche il prezzo al kg/litro. "
-                "Il prossimo passo sara portare questi risultati direttamente dentro MyDiet."
+                "💡 **Ora MyDiet può interrogare dati pubblici aggiornati di Comprissimo.** "
+                "I risultati sono indicativi e vanno sempre verificati nel punto vendita; il prezzo al kg/litro è usato quando la fonte lo pubblica."
             )
 
-            st.markdown("### 🔎 Dove conviene comprarlo")
-            st.caption(f"Le ricerche sono ordinate per prezzo unitario quando il servizio lo permette. Il raggio di {radius} km serve come preferenza per la tua ricerca, non come dato inventato da MyDiet.")
+            st.markdown("### 🔎 Confronto prezzi reale")
+            st.caption(f"Raggio preferito: {radius} km · fonte live: Comprissimo · cache di 15 minuti")
 
-            for r in to_buy:
-                opp = shopping_opportunity(r["required"], r["pantry"], r["unit"])
-                label = {"high":"🔥 Priorità alta", "medium":"💡 Da confrontare", "low":"✓ Poco scoperto"}.get(opp,"💡 Da confrontare")
-                product_name = str(r["name"]).strip()
-                q = urllib.parse.quote_plus(product_name)
-                # Comprissimo espone un catalogo ricercabile con ordinamento anche per prezzo unitario.
-                comprissimo_url = (
-                    "https://comprissimo.ai/search?brand=&category=&has_price=True&on_sale=False"
-                    f"&page=1&per_page=24&q={q}&sort=unit_price&supermarket="
+            fetch_count = min(10, len(to_buy))
+            if st.button(f"🔄 Cerca prezzi aggiornati · {fetch_count} prodotti", type="primary", use_container_width=True):
+                with st.spinner("Sto confrontando i prodotti del tuo paniere…"):
+                    live = _shopping_live_for_items(to_buy, max_items=fetch_count)
+                st.session_state.shopping_live_results = live
+                st.session_state.shopping_live_time = datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+                st.rerun()
+
+            live_results = st.session_state.get("shopping_live_results", {})
+            live_time = st.session_state.get("shopping_live_time")
+            if live_time:
+                st.caption(f"Ultimo confronto: {live_time}")
+
+            if not live_results:
+                st.markdown(
+                    "<div class='card'><b>👆 Premi “Cerca prezzi aggiornati”</b><br>"
+                    "MyDiet cercherà i prodotti più rilevanti nel catalogo pubblico di Comprissimo e mostrerà i risultati trovati.</div>",
+                    unsafe_allow_html=True,
                 )
-                # SpesaChiara espone la ricerca sul proprio sito; non usiamo piu
-                # una ricerca Google generica, perche porta a risultati poco prevedibili.
-                spesachiara_url = "https://spesachiara.com/?q=" + urllib.parse.quote_plus(product_name)
+            else:
+                matched_products = sum(1 for r in to_buy if live_results.get(r["name"]))
+                st.success(f"✅ Trovati risultati per **{matched_products}/{min(fetch_count, len(to_buy))}** prodotti analizzati.")
 
-                with st.container(border=True):
-                    c1,c2,c3 = st.columns([3.6,1.25,2.4])
-                    with c1:
+                for r in to_buy[:fetch_count]:
+                    product_name = str(r["name"]).strip()
+                    matches = live_results.get(product_name, [])
+                    with st.container(border=True):
                         st.markdown(f"**{product_name}**")
                         st.caption(f"Da acquistare: **{r['need']:g} {r['unit']}** · in dispensa: {r['pantry']:g} {r['unit']}")
-                    with c2:
-                        st.markdown(f"**{label}**")
-                    with c3:
-                        st.link_button("💰 Prezzi su Comprissimo", comprissimo_url, use_container_width=True)
-                        st.link_button("📍 Cerca su SpesaChiara", spesachiara_url, use_container_width=True)
+                        if not matches:
+                            st.warning("Nessun abbinamento sufficientemente affidabile trovato nel catalogo live.")
+                            q = urllib.parse.quote_plus(product_name)
+                            st.link_button("🔎 Apri ricerca Comprissimo", f"https://comprissimo.ai/search?brand=&category=&has_price=True&on_sale=False&page=1&per_page=24&q={q}&sort=unit_price&supermarket=", use_container_width=True)
+                        else:
+                            best = sorted(matches, key=lambda x: (x["unit_price"], x["price"]))[:3]
+                            b = best[0]
+                            st.markdown(f"🏆 **Miglior prezzo unitario trovato: {b['unit_price']:.2f} €/{b['unit_kind']}** · {b['price']:.2f} € · **{b['store'] or 'negozio non indicato'}**")
+                            if len(best) > 1:
+                                for idx, alt in enumerate(best[1:], start=2):
+                                    st.caption(f"{idx}. {alt['unit_price']:.2f} €/{alt['unit_kind']} · {alt['price']:.2f} € · {alt['store'] or 'negozio non indicato'}")
+                            if b.get("compare_url"):
+                                st.link_button("📊 Vedi confronto completo", b["compare_url"], use_container_width=True)
+                            else:
+                                st.link_button("🔎 Verifica su Comprissimo", b["search_url"], use_container_width=True)
 
-            st.divider()
+                if len(to_buy) > fetch_count:
+                    st.caption(f"ℹ️ Per velocità sono stati analizzati i primi {fetch_count} prodotti. I restanti {len(to_buy)-fetch_count} possono essere cercati al prossimo aggiornamento.")
+
+                cart_summary = _shopping_cart_summary(live_results, to_buy[:fetch_count])
+                if cart_summary:
+                    st.markdown("### 🏪 Dove sto trovando più prodotti")
+                    for item in cart_summary[:5]:
+                        st.write(f"**{item['store']}** · {item['matched']} prodotti del paniere trovati")
+                    st.caption("Questo è un indicatore di copertura del catalogo, non un totale della spesa: senza quantità/confezioni omogenee MyDiet non inventa un costo complessivo.")
+
             st.markdown("### 🧠 Strategia MyDiet")
-
             if strategy == "💰 Prezzo più basso":
-                st.write("💰 Parti dai prodotti con più quantità ancora da acquistare e confronta prima il **prezzo al kg/litro**.")
+                st.write("💰 Priorità al prezzo unitario pubblicato dalla fonte. Quando possibile, confronta €/kg, €/L o €/pz invece del solo prezzo della confezione.")
             elif strategy == "⭐ Mantieni le marche preferite":
-                st.write("⭐ Cerca prima la marca che preferisci; se la differenza di prezzo è piccola, MyDiet considera più interessante mantenere la tua scelta.")
+                st.write("⭐ Quando il risultato contiene una marca riconoscibile, puoi privilegiarla; MyDiet non sostituisce automaticamente una marca con un'altra.")
             else:
-                st.write("⚖️ Confronta soprattutto **prezzo al kg/litro + marca + offerta**: il prezzo più basso non è automaticamente il miglior acquisto.")
+                st.write("⚖️ Il miglior acquisto non è sempre il prezzo più basso: considera prezzo unitario, marca e presenza di un'offerta.")
 
             if high:
                 names = ", ".join(r["name"] for r in high[:5])
                 st.success(f"🔥 **Priorità:** {names}. Sono i prodotti per cui una quota importante del fabbisogno è ancora scoperta.")
 
-            with st.expander("💡 Perché non vedo ancora il prezzo direttamente qui?", expanded=False):
+            with st.expander("ℹ️ Come funzionano i prezzi", expanded=False):
                 st.write(
-                    "La V65.3 mostrava soltanto collegamenti ai comparatori: era quindi normale non vedere prezzi dentro MyDiet. "
-                    "In questa versione i collegamenti sono piu diretti e la ricerca Comprissimo e costruita sul prodotto reale, "
-                    "ordinata per prezzo unitario. Per mostrare i prezzi direttamente nell'app dobbiamo integrare una fonte dati/API stabile e verificare termini e limiti di utilizzo."
+                    "I dati live mostrati qui provengono dal catalogo pubblico di Comprissimo, che dichiara prezzi aggiornati quotidianamente e confronto tra più catene. "
+                    "Il prezzo può comunque variare per punto vendita, giorno e disponibilità. SpesaChiara resta disponibile come seconda verifica, ma MyDiet non ne effettua scraping automatico."
                 )
-                st.caption("Obiettivo: prezzo attuale → €/kg → offerta → negozio → distanza → costo del paniere → risparmio.")
+                st.caption("Obiettivo successivo: collegare il paniere a negozi realmente vicini all'utente e calcolare un totale solo quando abbiamo quantità/confezioni confrontabili.")
 
     with tab_pantry:
         st.subheader("📦 Cosa hai in casa")
