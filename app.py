@@ -14,7 +14,8 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v45
+# MyDietApp v47
+# V47: meal-level registration in Piano uses the same eaten state as Home; no changes to Health, energy balance, water or pantry logic.
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
 # - recommendations adapt to the current dynamic calorie budget
@@ -480,6 +481,16 @@ def _meal_is_registered(day, meal_name):
         return False
     items=active_items(meal)
     return bool(items) and all(st.session_state.eaten.get(i["id"],False) for i in items)
+
+def set_meal_registered(day, meal_name, registered):
+    """Central meal-level state shared by Home and Piano.
+    The existing ingredient-level `eaten` map remains the single source of truth.
+    """
+    meal=st.session_state.meal_plan.get(day,{}).get(meal_name)
+    if not meal:
+        return
+    for item in active_items(meal):
+        st.session_state.eaten[item["id"]]=bool(registered)
 
 
 def _next_meal_for_today(day):
@@ -1490,6 +1501,19 @@ elif st.session_state.page=="Piano":
         with st.container(border=True):
             out_of_home_day=out_of_home_meal_configured(day, mn)
             st.markdown(f"### {mn}"); st.caption(("📍 **Fuori casa** · " if out_of_home_day else "") + f"{m.get('name','Pasto')} · **{kcal} kcal**")
+            meal_registered=_meal_is_registered(day,mn)
+            mc1,mc2=st.columns([5,2])
+            with mc1:
+                st.caption("✅ Pasto registrato come mangiato" if meal_registered else "○ Pasto non ancora registrato")
+            with mc2:
+                if meal_registered:
+                    if st.button("↩ Annulla pasto",key=f"plan_undo_meal_{day}_{mn}",use_container_width=True):
+                        set_meal_registered(day,mn,False)
+                        st.rerun()
+                else:
+                    if st.button("🍴 Ho mangiato tutto",key=f"plan_eat_meal_{day}_{mn}",use_container_width=True,type="primary"):
+                        set_meal_registered(day,mn,True)
+                        st.rerun()
             for item in list(m.get("ingredients",[])):
                 ov=st.session_state.overrides.get(item["id"],{})
                 if ov.get("removed"): continue
