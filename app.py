@@ -15,7 +15,7 @@ import copy
 
 # ============================================================
 # MyDietApp v47
-# V49 CORRETTA: Home usa il prossimo pasto reale e lo stato eaten
+# V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V48: fix Streamlit checkbox widget state so meal registration stays synchronized across Home and Piano.
 # V47: meal-level registration in Piano uses the same eaten state as Home; no changes to Health, energy balance, water or pantry logic.
 # - daily lunch/dinner recommendations linked to the active plan
@@ -486,9 +486,9 @@ def _meal_is_registered(day, meal_name):
 
 def set_meal_registered(day, meal_name, registered):
     """Central meal-level state shared by Home and Piano.
-    The existing ingredient-level `eaten` map remains the single source of truth.
-    Also synchronize the Streamlit checkbox widget state so a later rerun cannot
-    overwrite the meal-level registration with an old checkbox value.
+    `eaten` is the canonical source of truth.
+    Widget keys are cleared after a meal-level change so Streamlit cannot
+    reapply an old checkbox value on the next rerun.
     """
     meal=st.session_state.meal_plan.get(day,{}).get(meal_name)
     if not meal:
@@ -497,7 +497,10 @@ def set_meal_registered(day, meal_name, registered):
     for item in active_items(meal):
         iid=item["id"]
         st.session_state.eaten[iid]=value
-        st.session_state[f"eat_{iid}"]=value
+        # The checkbox widget may already exist in the current Streamlit run.
+        # Remove its state instead of forcing it, so the next render initializes
+        # it from the canonical `eaten` map.
+        st.session_state.pop(f"eat_{iid}",None)
 
 def _sync_eaten_from_widget(iid):
     """Copy the checkbox value into the canonical eaten state."""
@@ -1397,14 +1400,11 @@ if st.session_state.page=="Home":
 
     if next_meal:
         next_name=next_meal.get("_meal_name")
+
         if next_name in ("🍽️ Pranzo","🌙 Cena"):
-            # Mantiene la raccomandazione esistente per pranzo/cena,
-            # ma la mostra solo per il prossimo pasto non registrato.
             st.caption("Il prossimo pasto da registrare viene evidenziato automaticamente.")
             show_daily_meal_recommendation(next_name,d,b)
         else:
-            # Per colazione/spuntino mostriamo il pasto del piano senza
-            # duplicare tutta la giornata.
             meal=st.session_state.meal_plan.get(d,{}).get(next_name)
 
             if meal:
@@ -1434,7 +1434,6 @@ if st.session_state.page=="Home":
                         set_meal_registered(d,next_name,True)
                         st.rerun()
     else:
-        # Nessun pasto non registrato: giornata completata.
         st.success(
             "🎉 **Giornata alimentare completata!** "
             "Hai registrato tutti i pasti previsti per oggi."
@@ -1464,8 +1463,7 @@ if st.session_state.page=="Home":
         for idx,(mn,m) in enumerate(ms.items()):
             items=active_items(m)
             kcal=round(sum(item_kcal(i) for i in items))
-            meal_ids=[i["id"] for i in items]
-            registered=bool(meal_ids) and all(st.session_state.eaten.get(iid,False) for iid in meal_ids)
+            registered=_meal_is_registered(d,mn)
             status="✅ Registrato" if registered else "○ Non registrato"
             with st.container(border=True):
                 c1,c2,c3=st.columns([5,2,1])
@@ -1703,7 +1701,12 @@ Per ogni giorno crea 4 pasti. Nei pasti segnati come fuori casa NON inventare un
             new_start=(date.fromisoformat(previous_week)+timedelta(days=7)).isoformat() if previous_week else week_start(date.today()+timedelta(days=7))
             st.session_state.meal_plan=out
             st.session_state.plan_week_start=new_start
-            st.session_state.overrides={}; st.session_state.eaten={}; st.rerun()
+            st.session_state.overrides={}
+            st.session_state.eaten={}
+            for key in list(st.session_state.keys()):
+                if str(key).startswith("eat_"):
+                    st.session_state.pop(key,None)
+            st.rerun()
         except Exception as e: st.error(f"Errore AI: {e}")
     st.subheader("📷 Mensa Smart")
     img=st.camera_input("Scatta il menu") or st.file_uploader("Carica una foto",type=["jpg","jpeg","png"],key="mensa3")
