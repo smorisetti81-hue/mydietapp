@@ -14,7 +14,7 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v46
+# MyDietApp v45
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
 # - recommendations adapt to the current dynamic calorie budget
@@ -142,6 +142,7 @@ def _ingest_native_health_bridge():
         "sleep_minutes": metrics.get("sleep_minutes"),
         "steps_source_verified": bool(payload.get("trust", {}).get("steps", False)),
         "calories_source_verified": bool(payload.get("trust", {}).get("total_calories", False)),
+        "active_calories_source_verified": bool(payload.get("trust", {}).get("active_calories", False)),
         "native_health_snapshot": True,
         "native_health_payload": payload,
     }
@@ -223,13 +224,13 @@ def init_plan():
 
 _defaults = {
     "page":"Home", "meal_plan":init_plan(), "overrides":{}, "eaten":{}, "manual_foods":[],
-    "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None, "water_history":{}, "body_history":{},
+    "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None, "water_history":{},
     "plan_week_start":None, "plan_history":{}, "out_lunch_days":["Giovedì"], "out_dinner_days":["Giovedì"],
     "pantry":{}, "shopping_checked":{}, "smart_food_advice":None
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
-    "name":"Stefano", "weight":135.0, "body_fat":None, "height":180.0, "age":40, "sex":"male",
+    "name":"Stefano", "weight":135.0, "height":180.0, "age":40, "sex":"male",
     "activity_level":"moderata", "deficit":500, "water_goal_ml":2500, "quantity_mode":"porzioni"
 }.items(): st.session_state.setdefault("p_"+k,v)
 
@@ -703,56 +704,7 @@ def add_water_ml(delta):
 
 # V32: fixed the out_of_home variable mismatch in meal_recommendation/show_daily_meal_recommendation.
 # V45: active-calorie display shows 'Non disponibili' when no reliable active value exists; energy engine unchanged.
-# V46: display verified native active calories when available; energy engine unchanged.
-# V47: weekly body-composition checkpoints; recalculates profile energy values and keeps a dated body history.
 # ---------------- Energy model ----------------
-def current_body_composition():
-    """Return current profile composition values without changing the energy model."""
-    weight=float(st.session_state.get("p_weight",0) or 0)
-    body_fat=st.session_state.get("p_body_fat")
-    try:
-        body_fat=float(body_fat) if body_fat is not None else None
-    except Exception:
-        body_fat=None
-    lean_mass=(weight*(1-body_fat/100.0)) if body_fat is not None and 0 <= body_fat < 100 else None
-    fat_mass=(weight*body_fat/100.0) if body_fat is not None and 0 <= body_fat < 100 else None
-    return {"weight":weight,"body_fat":body_fat,"lean_mass":lean_mass,"fat_mass":fat_mass}
-
-def save_body_snapshot():
-    """Record one body-composition checkpoint per calendar day."""
-    comp=current_body_composition()
-    ep=energy_profile()
-    d=today()
-    history=st.session_state.setdefault("body_history",{})
-    history[d]={
-        "date":d,
-        "weight":round(comp["weight"],1),
-        "body_fat":round(comp["body_fat"],1) if comp["body_fat"] is not None else None,
-        "lean_mass":round(comp["lean_mass"],1) if comp["lean_mass"] is not None else None,
-        "fat_mass":round(comp["fat_mass"],1) if comp["fat_mass"] is not None else None,
-        "bmr":int(ep["bmr_est"]),
-        "maintenance":int(ep["maintenance_est"]),
-        "target":int(ep["target"]),
-        "deficit":int(ep["deficit"]),
-    }
-
-def body_history_rows():
-    history=st.session_state.get("body_history",{})
-    return [history[k] for k in sorted(history.keys(), reverse=True)]
-
-def body_change_summary():
-    rows=body_history_rows()
-    if len(rows) < 2:
-        return None
-    latest, previous=rows[0], rows[1]
-    return {
-        "days":(date.fromisoformat(latest["date"])-date.fromisoformat(previous["date"])).days,
-        "weight_delta":latest["weight"]-previous["weight"],
-        "body_fat_delta":(latest["body_fat"]-previous["body_fat"]) if latest.get("body_fat") is not None and previous.get("body_fat") is not None else None,
-        "lean_delta":(latest["lean_mass"]-previous["lean_mass"]) if latest.get("lean_mass") is not None and previous.get("lean_mass") is not None else None,
-        "bmr_delta":latest["bmr"]-previous["bmr"],
-    }
-
 def bmr_mifflin(weight, height, age, sex):
     # Mifflin-St Jeor. This is an estimate, not a medical measurement.
     value=10*weight + 6.25*height - 5*age + (5 if sex=="male" else -161)
@@ -789,6 +741,7 @@ def activity_summary():
         except Exception:
             continue
     native_active=round(float(h.get("active_calories_today") or 0))
+    native_active_verified=bool(h.get("active_calories_source_verified")) and native_active > 0
     # If Health Connect does not expose active calories, use the same transparent
     # estimate already used by the energy balance instead of displaying 0.
     estimated_active=0
@@ -797,8 +750,8 @@ def activity_summary():
         estimated_active=int(b.get("active_observed") or 0) if b.get("using_observed") else 0
     except Exception:
         estimated_active=0
-    active=max(native_active, estimated_active)
-    active_source="Health Connect" if native_active > 0 else ("stima" if estimated_active > 0 else "non disponibile")
+    active=native_active if native_active_verified else estimated_active
+    active_source="Samsung Health/Watch verificato" if native_active_verified else ("stima" if estimated_active > 0 else "non disponibile")
     return {
         "steps":int(float(h.get("steps_today") or 0)),
         "active_calories":active,
@@ -835,7 +788,10 @@ def balance():
     remaining_rest=round(bmr_for_projection*(remaining_seconds/86400.0))
     projected_burn=round(observed+remaining_rest) if observed > 0 else 0
     live_target=round(max(1200, projected_burn-e["deficit"])) if projected_burn > 0 else e["target"]
-    active_observed=max(0,round(observed-bmr_for_projection*(elapsed/86400.0))) if observed > 0 else 0
+    native_active=float(h.get("active_calories_today") or 0)
+    active_verified=bool(h.get("active_calories_source_verified")) and native_active > 0
+    estimated_active=max(0,round(observed-bmr_for_projection*(elapsed/86400.0))) if observed > 0 else 0
+    active_observed=round(native_active) if active_verified else estimated_active
 
     source="Health Connect nativo · Samsung Health/Watch verificato" if observed > 0 else "Profilo · stima Mifflin + livello attività"
     return {
@@ -843,6 +799,7 @@ def balance():
         "remaining":live_target-eaten, "observed_burn":round(observed),
         "projected_burn":projected_burn, "remaining_rest":remaining_rest,
         "active_observed":active_observed,
+        "active_verified":active_verified,
         "bmr_est":e["bmr_est"], "bmr_health":round(bmr_health) if bmr_health > 0 else None,
         "maintenance":e["maintenance_est"], "deficit":e["deficit"],
         "using_observed":observed > 0, "source":source,
@@ -1356,16 +1313,8 @@ if st.session_state.page=="Home":
     if b["using_observed"]:
         c1,c2,c3=st.columns(3)
         c1.metric("🔥 Consumo finora",f"{b['observed_burn']:,} kcal".replace(",","."))
-        native_active = float(h.get("active_calories_today") or 0)
-        if native_active > 0:
-            active_display = f"{native_active:,.0f} kcal".replace(",",".")
-            active_label = "⚡ Calorie attive"
-        elif b.get("active_observed", 0) > 0:
-            active_display = f"{b['active_observed']:,} kcal".replace(",",".")
-            active_label = "⚡ Attive stimate"
-        else:
-            active_display = "Non disponibili"
-            active_label = "⚡ Calorie attive"
+        active_display = f"{b['active_observed']:,} kcal".replace(",",".") if b.get("active_observed", 0) > 0 else "Non disponibili"
+        active_label = "⚡ Calorie attive" if b.get("active_verified") else "⚡ Attive stimate finora"
         c2.metric(active_label,active_display)
         c3.metric("🎯 Consumo stimato oggi",f"{b['projected_burn']:,} kcal".replace(",","."))
         st.caption(
@@ -1379,9 +1328,7 @@ if st.session_state.page=="Home":
             st.markdown("**🏃 Attività di oggi**")
             ac1,ac2,ac3,ac4=st.columns(4)
             ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
-            active_label = "⚡ Calorie attive" if a.get("active_source") == "Health Connect" else ("⚡ Calorie attive stimate" if a.get("active_source") == "stima" else "⚡ Calorie attive")
-            active_value = f"{a['active_calories']:,} kcal".replace(",",".") if a.get("active_calories", 0) > 0 else "Non disponibili"
-            ac2.metric(active_label, active_value)
+            ac2.metric("⚡ Calorie attive" if a["active_source"] != "stima" else "⚡ Calorie attive stimate", f"{a['active_calories']:,} kcal".replace(",","."))
             ac3.metric("📏 Distanza", f"{a['distance_km']:.2f} km")
             ac4.metric("🏋️ Allenamenti", str(a['workouts']))
             if a["details"]:
@@ -1854,9 +1801,7 @@ elif st.session_state.page=="Attività":
         st.divider(); st.subheader("🏃 Attività di oggi")
         ac1,ac2,ac3=st.columns(3)
         ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
-        active_label = "⚡ Calorie attive" if a.get("active_source") == "Health Connect" else ("⚡ Calorie attive stimate" if a.get("active_source") == "stima" else "⚡ Calorie attive")
-        active_value = f"{a['active_calories']:,} kcal".replace(",",".") if a.get("active_calories", 0) > 0 else "Non disponibili"
-        ac2.metric(active_label, active_value)
+        ac2.metric("⚡ Calorie attive" if a["active_source"] != "stima" else "⚡ Calorie attive stimate", f"{a['active_calories']:,} kcal".replace(",","."))
         ac3.metric("📏 Distanza", f"{a['distance_km']:.2f} km")
         if a["details"]:
             for w in a["details"]:
@@ -1922,20 +1867,11 @@ elif st.session_state.page=="Attività":
 
 else:
     st.title("👤 Profilo")
-    st.caption("📅 Aggiorna il corpo una volta alla settimana: il nuovo peso/composizione diventa il nuovo riferimento e BMR, mantenimento e target vengono ricalcolati automaticamente.")
     with st.form("profile"):
         c1,c2=st.columns(2)
         with c1:
             name=st.text_input("Nome",st.session_state.p_name)
             weight=st.number_input("Peso (kg)",30.,300.,float(st.session_state.p_weight),.1)
-            body_fat_default=st.session_state.get("p_body_fat")
-            body_fat=st.number_input(
-                "Massa grassa (%)",
-                0.0,70.0,
-                float(body_fat_default) if body_fat_default is not None else None,
-                .1,
-                help="Inserisci il valore della bilancia/analizzatore se lo rilevi. Se non lo hai, puoi lasciarlo vuoto: il BMR non dipende dalla percentuale di massa grassa."
-            )
             height=st.number_input("Altezza (cm)",100.,230.,float(st.session_state.p_height),.5)
         with c2:
             age=st.number_input("Età",13,100,int(st.session_state.p_age))
@@ -1954,53 +1890,18 @@ else:
                 }[x],
                 help="Le grammature restano comunque nel motore per calcolare calorie e lista della spesa. Cambia solo ciò che vedi.",
             )
-        if st.form_submit_button("Salva aggiornamento corpo/profilo",type="primary"):
-            st.session_state.p_name=name
-            st.session_state.p_weight=weight
-            st.session_state.p_body_fat=body_fat
-            st.session_state.p_height=height
-            st.session_state.p_age=age
-            st.session_state.p_sex=sex
-            st.session_state.p_activity_level=activity
-            st.session_state.p_deficit=deficit
-            st.session_state.p_water_goal_ml=water_goal
-            st.session_state.p_quantity_mode=quantity_mode_value
-            save_body_snapshot()
-            st.success("Profilo aggiornato: BMR, mantenimento e target sono stati ricalcolati. Il checkpoint corporeo di oggi è stato salvato nello storico.")
-
+        if st.form_submit_button("Salva",type="primary"):
+            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_deficit=deficit; st.session_state.p_water_goal_ml=water_goal; st.session_state.p_quantity_mode=quantity_mode_value; st.success("Profilo aggiornato")
     st.caption({
         "porzioni":"👌 Modalità quantità: **Porzioni** — niente bilancia. MyDietApp calcola comunque le quantità in background.",
         "both":"⚖️ Modalità quantità: **Porzioni + grammature**.",
-        "precise":"⚖️ Modalità quantità: **Preciso — mostra le grammature visibili."
+        "precise":"⚖️ Modalità quantità: **Preciso** — grammature visibili."
     }.get(quantity_mode(), "👌 Modalità quantità: **Porzioni**."))
-
     ep=energy_profile()
     st.subheader("🎯 Obiettivo energetico")
     st.metric("Target alimentare stimato",f"{ep['target']:,} kcal/giorno".replace(",","."))
     st.metric("💧 Obiettivo acqua",f"{water_goal_ml()/1000:.2f} L/giorno")
     c1,c2=st.columns(2); c1.metric("BMR stimato",f"{ep['bmr_est']:,} kcal".replace(",",".")); c2.metric("Mantenimento stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
-    comp=current_body_composition()
-    c1,c2,c3=st.columns(3)
-    c1.metric("⚖️ Peso attuale",f"{comp['weight']:.1f} kg")
-    c2.metric("🟠 Massa grassa",f"{comp['body_fat']:.1f} %" if comp["body_fat"] is not None else "Non disponibile")
-    c3.metric("💪 Massa magra",f"{comp['lean_mass']:.1f} kg" if comp["lean_mass"] is not None else "Non disponibile")
-    change=body_change_summary()
-    if change:
-        parts=[f"Peso: {change['weight_delta']:+.1f} kg", f"BMR: {change['bmr_delta']:+d} kcal"]
-        if change["body_fat_delta"] is not None: parts.append(f"Massa grassa: {change['body_fat_delta']:+.1f} punti")
-        if change["lean_delta"] is not None: parts.append(f"Massa magra: {change['lean_delta']:+.1f} kg")
-        st.info("📈 Dall'ultimo checkpoint: " + " · ".join(parts))
-    rows=body_history_rows()
-    if rows:
-        with st.expander("📊 Storico aggiornamenti corpo", expanded=False):
-            df=pd.DataFrame(rows)
-            cols=[c for c in ["date","weight","body_fat","fat_mass","lean_mass","bmr","maintenance","target","deficit"] if c in df.columns]
-            df=df[cols].rename(columns={
-                "date":"Data","weight":"Peso kg","body_fat":"Grasso %","fat_mass":"Grasso kg",
-                "lean_mass":"Massa magra kg","bmr":"BMR","maintenance":"Mantenimento","target":"Target","deficit":"Deficit"
-            })
-            st.dataframe(df,use_container_width=True,hide_index=True)
-            st.caption("Lo storico è registrato per data nella sessione corrente. La persistenza su account/server verrà aggiunta con il backend.")
     b=balance()
     if b["using_observed"]:
         st.info(f"🔥 Con i dati Health di oggi, il budget dinamico è circa **{b['live_target']:,} kcal**: consumo osservato {b['observed_burn']:,} + riposo residuo {b['remaining_rest']:,} → stima fine giornata {b['projected_burn']:,}, meno deficit {b['deficit']}.")
