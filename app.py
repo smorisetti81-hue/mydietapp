@@ -18,7 +18,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v66.3 SMART SHOPPING · FIX PREZZI
+# MyDietApp v68 UI BETA · primo redesign grafico
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -36,7 +36,31 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # - source-aware Google Fit diagnostics
 # - prefer Google Fit derived/reconciled streams instead of summing every source
 # ============================================================
+
+
+
+
+UI_BETA_CSS = """
+<style>
+#MainMenu, footer, header {visibility:hidden;}
+.block-container {max-width:1050px;padding-top:.7rem;padding-bottom:5rem;}
+.card {border:1px solid rgba(128,128,128,.16);border-radius:20px;padding:16px;margin:8px 0;background:rgba(128,128,128,.045);box-shadow:0 2px 12px rgba(0,0,0,.025);}
+.hero {border-radius:24px;padding:20px;background:linear-gradient(135deg,rgba(255,75,75,.14),rgba(128,128,128,.045));border:1px solid rgba(255,75,75,.18);}
+.big {font-size:2rem;font-weight:800;line-height:1.05;}
+.muted,.small {color:#888;font-size:.86rem;}
+.ok,.bad {font-weight:700;}
+@media (max-width:700px){
+.block-container{padding-left:.75rem;padding-right:.75rem;padding-top:.45rem;}
+h1{font-size:1.75rem !important;} h2{font-size:1.35rem !important;} h3{font-size:1.1rem !important;}
+.card{padding:13px;border-radius:17px;} .hero{padding:16px;border-radius:20px;} .big{font-size:1.75rem;}
+div[data-testid="stMetric"]{padding:.35rem .15rem;} div[data-testid="stMetricValue"]{font-size:1.25rem;}
+div[data-testid="stButton"] button{border-radius:14px;min-height:2.65rem;}
+div[data-testid="stExpander"] details{border-radius:16px;}
+}
+</style>
+"""
 st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", initial_sidebar_state="collapsed")
+st.markdown(UI_BETA_CSS, unsafe_allow_html=True)
 GEMINI_MODEL = "gemini-3.6-flash"
 gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
@@ -411,13 +435,157 @@ def today(): return datetime.now(ROME).date().isoformat()
 
 st.markdown("""
 <style>
+/* ==========================================================
+   MyDiet UI BETA — primo passaggio grafico
+   Obiettivo: meno effetto Streamlit, più app mobile.
+   ========================================================== */
 #MainMenu, footer, header {visibility:hidden;}
-.block-container {max-width:1050px;padding-top:1rem;padding-bottom:5rem;}
-.card {border:1px solid rgba(128,128,128,.22);border-radius:18px;padding:18px;margin:8px 0;background:rgba(128,128,128,.06);}
-.hero {border-radius:24px;padding:22px;background:linear-gradient(135deg,rgba(255,75,75,.18),rgba(128,128,128,.06));border:1px solid rgba(255,75,75,.25);}
-.muted {color:#888;font-size:.88rem}.big {font-size:2.2rem;font-weight:800}.ok {color:#22a06b;font-weight:700}.bad {color:#d64545;font-weight:700}
-.small {font-size:.82rem;color:#888;}
+
+:root {
+    --md-radius: 20px;
+    --md-radius-sm: 14px;
+    --md-border: rgba(128,128,128,.18);
+    --md-soft: rgba(128,128,128,.055);
+}
+
+.block-container {
+    max-width: 980px;
+    padding-top: .65rem;
+    padding-bottom: 6rem;
+}
+
+/* App header */
+.mydiet-header {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:16px;
+    padding: 8px 4px 18px;
+}
+.mydiet-brand {
+    display:flex;
+    align-items:center;
+    gap:11px;
+}
+.mydiet-logo {
+    width:42px;height:42px;border-radius:14px;
+    display:flex;align-items:center;justify-content:center;
+    background:linear-gradient(135deg,rgba(255,75,75,.95),rgba(255,145,100,.88));
+    color:white;font-size:22px;box-shadow:0 8px 22px rgba(255,75,75,.18);
+}
+.mydiet-name {font-size:1.15rem;font-weight:850;letter-spacing:-.02em;line-height:1.05;}
+.mydiet-sub {font-size:.76rem;color:#888;margin-top:3px;}
+.mydiet-date {font-size:.78rem;color:#888;text-align:right;}
+
+/* Navigation buttons */
+div[data-testid="stHorizontalBlock"] button {
+    border-radius:14px !important;
+    min-height:42px !important;
+    font-weight:700 !important;
+    border:1px solid var(--md-border) !important;
+    transition:all .15s ease;
+}
+div[data-testid="stHorizontalBlock"] button:hover {transform:translateY(-1px);}
+
+/* Typography */
+h1 {font-size:2rem !important;letter-spacing:-.035em !important;margin-bottom:.15rem !important;}
+h2 {font-size:1.35rem !important;letter-spacing:-.025em !important;}
+h3 {font-size:1.05rem !important;letter-spacing:-.015em !important;}
+.stCaption {line-height:1.45;}
+
+/* Generic cards */
+.card {
+    border:1px solid var(--md-border);
+    border-radius:var(--md-radius);
+    padding:18px 20px;
+    margin:9px 0;
+    background:var(--md-soft);
+    box-shadow:0 5px 20px rgba(0,0,0,.025);
+}
+.hero {
+    border-radius:24px;
+    padding:22px;
+    background:linear-gradient(135deg,rgba(255,75,75,.16),rgba(255,145,100,.06) 58%,rgba(128,128,128,.035));
+    border:1px solid rgba(255,75,75,.20);
+    box-shadow:0 10px 30px rgba(255,75,75,.06);
+}
+.muted {color:#888;font-size:.86rem;}
+.big {font-size:2.25rem;font-weight:850;letter-spacing:-.04em;line-height:1.05;}
+.ok {color:#22a06b;font-weight:750;}
+.bad {color:#d64545;font-weight:750;}
+.small {font-size:.78rem;color:#888;}
+
+/* Streamlit metric cards */
+div[data-testid="stMetric"] {
+    border:1px solid var(--md-border);
+    border-radius:16px;
+    padding:12px 14px;
+    background:var(--md-soft);
+}
+div[data-testid="stMetricLabel"] {font-size:.78rem !important;}
+div[data-testid="stMetricValue"] {font-weight:800 !important;}
+
+/* Inputs / expanders / tabs */
+div[data-testid="stExpander"] {
+    border:1px solid var(--md-border) !important;
+    border-radius:16px !important;
+    overflow:hidden;
+}
+div[data-baseweb="tab-list"] {gap:5px;}
+button[data-baseweb="tab"] {border-radius:12px !important;}
+
+/* Progress bars */
+div[data-testid="stProgressBar"] {height:9px !important;}
+
+/* Buttons feel like app actions */
+.stButton > button, .stDownloadButton > button {
+    border-radius:14px !important;
+    min-height:42px;
+    font-weight:700;
+}
+
+/* Reduce Streamlit vertical noise */
+hr {margin:1.1rem 0 !important;opacity:.35;}
+
+@media (max-width: 700px) {
+    .block-container {max-width:100%;padding: .35rem .75rem 5.5rem;}
+    .mydiet-header {padding:4px 2px 12px;}
+    .mydiet-logo {width:38px;height:38px;border-radius:12px;font-size:20px;}
+    .mydiet-name {font-size:1.02rem;}
+    .mydiet-date {display:none;}
+    h1 {font-size:1.65rem !important;}
+    h2 {font-size:1.18rem !important;}
+    .hero {padding:18px;border-radius:20px;}
+    .card {padding:15px 16px;border-radius:17px;}
+    .big {font-size:2rem;}
+    div[data-testid="stMetric"] {padding:10px 11px;}
+    div[data-testid="stHorizontalBlock"] {gap:6px !important;}
+    div[data-testid="stHorizontalBlock"] button {
+        padding-left:4px !important;padding-right:4px !important;
+        font-size:.78rem !important;
+    }
+    .stButton > button {min-height:44px;}
+}
 </style>
+""", unsafe_allow_html=True)
+
+# Minimal app-style header: intentionally beta, to validate the visual direction
+weekday_it={0:'Lunedì',1:'Martedì',2:'Mercoledì',3:'Giovedì',4:'Venerdì',5:'Sabato',6:'Domenica'}
+month_it={1:'gennaio',2:'febbraio',3:'marzo',4:'aprile',5:'maggio',6:'giugno',7:'luglio',8:'agosto',9:'settembre',10:'ottobre',11:'novembre',12:'dicembre'}
+now_ui=datetime.now(ROME)
+ui_date=f'{weekday_it[now_ui.weekday()]} {now_ui.day} {month_it[now_ui.month]}'
+
+st.markdown(f"""
+<div class="mydiet-header">
+  <div class="mydiet-brand">
+    <div class="mydiet-logo">🥗</div>
+    <div>
+      <div class="mydiet-name">MyDiet</div>
+      <div class="mydiet-sub">Il tuo piano. La tua giornata.</div>
+    </div>
+  </div>
+  <div class="mydiet-date">{ui_date}</div>
+</div>
 """, unsafe_allow_html=True)
 
 # ---------------- Native Health Connect bridge ----------------
