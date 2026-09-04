@@ -3192,10 +3192,12 @@ else:
                 index=["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"].index(st.session_state.get("p_diet_goal","🔻 Dimagrimento")),
                 help="Il target viene calcolato partendo dal tuo fabbisogno energetico stimato.",
             )
+            if st.session_state.get("p_diet_style") == "⚡ Ipercalorica":
+                st.session_state.p_diet_style = "🥗 Mediterranea"
             diet_style=st.selectbox(
                 "🥗 Come vuoi mangiare?",
-                ["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","⚡ Ipercalorica","🌱 Vegetariana","🎯 Personalizzata"],
-                index=["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","⚡ Ipercalorica","🌱 Vegetariana","🎯 Personalizzata"].index(st.session_state.get("p_diet_style","🥗 Mediterranea")),
+                ["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"],
+                index=["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"].index(st.session_state.get("p_diet_style","🥗 Mediterranea")),
                 help="Lo stile guida la composizione dei pasti. Non modifica da solo il fabbisogno calorico, salvo il target scelto sopra.",
             )
             custom_target=st.number_input(
@@ -3255,21 +3257,38 @@ else:
 
     ep=energy_profile()
     st.subheader("⚡ Il tuo profilo alimentare")
-    g1,g2,g3=st.columns(3)
-    g1.metric("Fabbisogno stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
-    g2.metric("Target MyDiet",f"{ep['target']:,} kcal/giorno".replace(",","."))
-    g3.metric("Scostamento",f"{'+' if ep['adjustment']>0 else ''}{ep['adjustment']:,} kcal".replace(",","."))
-    st.caption(f"🎯 {ep['diet_goal']} · 🥗 {ep['diet_style']}")
-    if ep['diet_style'] in {"💪 Iperproteica","🥩 Proteica"}:
-        st.info("💪 Lo stile proteico aumenta la priorità delle fonti proteiche, mantenendo il target calorico scelto.")
-    elif ep['diet_style']=="🔥 Low Carb":
-        st.info("🔥 Lo stile Low Carb riduce la quota di carboidrati rispetto a un piano standard, mantenendo il target calorico.")
-    elif ep['diet_style']=="⚡ Ipercalorica":
-        st.info("⚡ Ipercalorica: lo stile è pensato per un apporto energetico elevato. Per aumentare davvero il peso, abbinalo a un obiettivo di aumento di peso o massa muscolare.")
-    st.metric("💧 Obiettivo acqua",f"{water_goal_ml()/1000:.2f} L/giorno")
-    c1,c2=st.columns(2); c1.metric("BMR stimato",f"{ep['bmr_est']:,} kcal".replace(",",".")); c2.metric("Mantenimento stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
+    st.caption(f"🎯 {ep['diet_goal']}  ·  🥗 {ep['diet_style']}")
+
+    # Vista essenziale: l'utente deve vedere soprattutto il target su cui viene costruita la dieta.
+    st.markdown(
+        f"<div class='hero' style='padding:18px 20px;margin:8px 0 10px;'>"
+        f"<div class='small'>TARGET GIORNALIERO</div>"
+        f"<div class='big'>{ep['target']:,} kcal</div>".replace(",",".") +
+        f"<div class='muted'>Il piano alimentare viene costruito su questo valore.</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    c1,c2=st.columns(2)
+    c1.metric("💧 Obiettivo acqua",f"{water_goal_ml()/1000:.2f} L/giorno")
     b=balance()
     if b["using_observed"]:
-        st.info(f"🔥 Con i dati Health di oggi, il budget dinamico è circa **{b['live_target']:,} kcal**: consumo osservato {b['observed_burn']:,} + riposo residuo {b['remaining_rest']:,} → stima fine giornata {b['projected_burn']:,}, meno deficit {b['deficit']}.")
-    st.caption(f"Acqua di oggi: {water_today_ml()/1000:.2f} L / {water_goal_ml()/1000:.2f} L. La registrazione è separata dalle calorie e viene conservata per data nella sessione corrente.")
-    st.caption("Il target alimentare resta calcolato dal motore energetico. Il peso desiderato serve ora anche a costruire un percorso visivo orientativo verso l’obiettivo.")
+        c2.metric("🔥 Budget di oggi",f"{b['live_target']:,} kcal".replace(",","."))
+    else:
+        c2.metric("📌 Fabbisogno stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
+
+    if ep['diet_style'] in {"💪 Iperproteica","🥩 Proteica"}:
+        st.caption("💪 Priorità alle fonti proteiche, mantenendo il target calorico scelto.")
+    elif ep['diet_style']=="🔥 Low Carb":
+        st.caption("🔥 Quota di carboidrati ridotta rispetto a un piano standard, mantenendo il target calorico.")
+
+    with st.expander("ℹ️ Come viene calcolato il target"):
+        st.write(
+            f"**BMR stimato:** {ep['bmr_est']:,} kcal/giorno  ·  "
+            f"**Mantenimento stimato:** {ep['maintenance_est']:,} kcal/giorno  ·  "
+            f"**Variazione obiettivo:** {'+' if ep['adjustment']>0 else ''}{ep['adjustment']:,} kcal/giorno".replace(",",".")
+        )
+        st.caption("Il BMR è il consumo energetico stimato a riposo. Il piano non viene costruito sul BMR: il target parte dal mantenimento stimato e viene modificato in base all'obiettivo scelto.")
+
+    st.caption(f"Acqua di oggi: {water_today_ml()/1000:.2f} L / {water_goal_ml()/1000:.2f} L.")
+    st.caption("Il peso desiderato serve anche a costruire il percorso visivo verso l'obiettivo.")
