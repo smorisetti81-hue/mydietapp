@@ -272,6 +272,103 @@ def archive_current_plan(reason="Nuovo piano"):
     }
     return archive_id
 
+
+def normalize_ai_plan(raw):
+    """Normalize Gemini's weekly-plan JSON into the internal MyDiet structure."""
+    if isinstance(raw, str):
+        raw=raw.strip()
+        if raw.startswith("```"):
+            raw=raw.replace("```json","").replace("```","").strip()
+        raw=json.loads(raw)
+
+    if isinstance(raw, dict):
+        for wrapper in ("piano","plan","days","settimana","weekly_plan"):
+            candidate=raw.get(wrapper)
+            if isinstance(candidate,(dict,list)):
+                raw=candidate
+                break
+
+    day_names=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+    day_aliases={d.lower():d for d in day_names}
+    out={}
+
+    def normalize_meal(meal):
+        if not isinstance(meal,dict):
+            raise ValueError("Un pasto AI non è un oggetto JSON valido.")
+        ingredients=meal.get("ingredients",[])
+        if ingredients is None:
+            ingredients=[]
+        if not isinstance(ingredients,list):
+            raise ValueError("Gli ingredienti di un pasto devono essere una lista.")
+        normalized=[]
+        for x in ingredients:
+            if not isinstance(x,dict):
+                continue
+            normalized.append({
+                "id":sid(),
+                "name":str(x.get("name","Alimento")).strip() or "Alimento",
+                "qty":float(x.get("qty",1)),
+                "unit":str(x.get("unit","g")),
+                "kcal":round(float(x.get("kcal",0))),
+            })
+        return {
+            "name":str(meal.get("name","Pasto")).strip() or "Pasto",
+            "ingredients":normalized,
+        }
+
+    if isinstance(raw,dict):
+        for raw_day, raw_meals in raw.items():
+            canonical=day_aliases.get(str(raw_day).strip().lower())
+            if not canonical or not isinstance(raw_meals,dict):
+                continue
+            out[canonical]={}
+            for mn,m in raw_meals.items():
+                if isinstance(m,dict):
+                    out[canonical][str(mn)]=normalize_meal(m)
+
+    elif isinstance(raw,list):
+        for entry in raw:
+            if not isinstance(entry,dict):
+                continue
+            raw_day=entry.get("day") or entry.get("giorno") or entry.get("name")
+            canonical=day_aliases.get(str(raw_day).strip().lower()) if raw_day else None
+            raw_meals=entry.get("meals") or entry.get("pasti") or entry.get("plan")
+            if canonical and isinstance(raw_meals,dict):
+                out[canonical]={str(mn):normalize_meal(m) for mn,m in raw_meals.items() if isinstance(m,dict)}
+            elif canonical:
+                meal_map={}
+                labels={
+                    "breakfast":"☕ Colazione","colazione":"☕ Colazione",
+                    "snack":"🍎 Spuntino","spuntino":"🍎 Spuntino",
+                    "lunch":"🍽️ Pranzo","pranzo":"🍽️ Pranzo",
+                    "dinner":"🌙 Cena","cena":"🌙 Cena",
+                }
+                for k,v in entry.items():
+                    label=labels.get(str(k).strip().lower())
+                    if label and isinstance(v,dict):
+                        meal_map[label]=normalize_meal(v)
+                if meal_map:
+                    out[canonical]=meal_map
+
+    missing=[d for d in day_names if d not in out]
+    if missing:
+        raise ValueError("Gemini ha restituito un piano incompleto. Giorni mancanti: "+", ".join(missing))
+
+    meal_order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
+    for day in day_names:
+        normalized_day={}
+        for mn in meal_order:
+            if mn in out[day]:
+                normalized_day[mn]=out[day][mn]
+        for mn,m in out[day].items():
+            if mn not in normalized_day:
+                normalized_day[mn]=m
+        if len(normalized_day)<4:
+            raise ValueError(f"Il giorno {day} non contiene tutti i 4 pasti previsti.")
+        out[day]=normalized_day
+
+    return out
+
 def historical_food_library(limit=None):
     foods={}
     def add_from_plan(plan, source):
@@ -1563,7 +1660,7 @@ elif st.session_state.page=="Piano":
     st.title("🍽️ Il tuo piano")
     st.caption("Le quantità precise restano nel motore; qui puoi scegliere se vedere grammature, porzioni o entrambe. Il totale del pasto e la lista della spesa si aggiornano automaticamente.")
     st.subheader("📍 Pasti fuori casa")
-    st.caption("Imposta separatamente pranzo e cena: puoi avere entrambi fuori casa oppure, per esempio, solo il pranzo fuori casa e la cena a casa.")
+    st.caption("Queste impostazioni valgono per la **prossima settimana che genererai**. Pranzo e cena sono indipendenti: puoi avere entrambi fuori casa oppure solo uno dei due.")
     days_week=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
     with st.expander("⚙️ Configura giorni e pasti fuori casa", expanded=False):
         lunch_set=set(st.session_state.get("out_lunch_days", []))
@@ -1581,7 +1678,12 @@ elif st.session_state.page=="Piano":
             else: dinner_set.discard(od)
         st.session_state.out_lunch_days=sorted(lunch_set, key=days_week.index)
         st.session_state.out_dinner_days=sorted(dinner_set, key=days_week.index)
-        st.info(f"Pranzi fuori casa: {', '.join(st.session_state.out_lunch_days) if st.session_state.out_lunch_days else 'nessuno'} · Cene fuori casa: {', '.join(st.session_state.out_dinner_days) if st.session_state.out_dinner_days else 'nessuna'}")
+        st.info(
+            f"Per la prossima settimana · Pranzi fuori casa: "
+            f"{', '.join(st.session_state.out_lunch_days) if st.session_state.out_lunch_days else 'nessuno'} · "
+            f"Cene fuori casa: "
+            f"{', '.join(st.session_state.out_dinner_days) if st.session_state.out_dinner_days else 'nessuna'}"
+        )
     days=list(st.session_state.meal_plan.keys())
     current_day=current_day_name()
     day_index=days.index(current_day) if current_day in days else 0
@@ -1708,7 +1810,7 @@ elif st.session_state.page=="Piano":
                     st.session_state.meal_plan[day][mn]["ingredients"].append({"id":sid(),"name":n.strip(),"qty":q,"unit":u,"kcal":k}); st.rerun()
     st.divider()
     st.subheader("📚 Storico dei piani")
-    st.caption("Ogni nuovo piano conserva automaticamente quello precedente. Le modifiche future non alterano le versioni storiche.")
+    st.caption("Ogni generazione riuscita archivia automaticamente la settimana attiva. Lo storico resta separato dal piano corrente e le modifiche future non lo alterano.")
     ensure_plan_metadata()
     st.info(f"🟢 Piano attivo · settimana {week_label(st.session_state.plan_week_start)}")
     history_items=sorted(st.session_state.plan_history.values(), key=lambda x:x.get("created_at",""), reverse=True)
@@ -1726,33 +1828,47 @@ elif st.session_state.page=="Piano":
         st.caption("Ancora nessun piano storico. Il primo verrà conservato automaticamente quando genererai il piano successivo.")
 
     st.divider(); st.subheader("🤖 Generazione AI")
-    if st.button("Genera / rigenera piano settimanale",type="primary"):
+    ensure_plan_metadata()
+    current_start=st.session_state.plan_week_start
+    next_start=(date.fromisoformat(current_start)+timedelta(days=7)) if current_start else (date.today()+timedelta(days=7))
+    st.markdown(f"**📅 Prossima settimana da preparare: {week_label(next_start.isoformat())}**")
+    st.caption(
+        "Il piano attuale non viene modificato durante la generazione. "
+        "Quando il nuovo piano è valido, quello attuale viene archiviato nello storico "
+        "e il nuovo diventa il piano attivo."
+    )
+    if st.button("✨ Genera piano per la prossima settimana",type="primary",use_container_width=True):
         try:
             ep=energy_profile()
             lunch_days=st.session_state.get("out_lunch_days",[])
             dinner_days=st.session_state.get("out_dinner_days",[])
-            prompt=f'''Crea un piano alimentare italiano di 7 giorni. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Target alimentare stimato: {ep["target"]} kcal/giorno.
-GIORNI PRANZO FUORI CASA: {", ".join(lunch_days) if lunch_days else "nessuno"}.
-GIORNI CENA FUORI CASA: {", ".join(dinner_days) if dinner_days else "nessuno"}.
-Per ogni giorno crea 4 pasti. Nei pasti segnati come fuori casa NON inventare un piatto domestico: usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche con ingredienti reali. Restituisci SOLO JSON con giorni Lunedì-Domenica e per ogni pasto name + ingredients. Ogni ingredient deve avere name, qty, unit, kcal.'''
-            raw=gemini_interaction(prompt).replace("```json","").replace("```","").strip(); gen=json.loads(raw); out={}
-            for day,ms in gen.items():
-                out[day]={}
-                for mn,m in ms.items(): out[day][mn]={"name":m.get("name","Pasto"),"ingredients":[{"id":sid(),"name":str(x.get("name","Alimento")),"qty":float(x.get("qty",1)),"unit":str(x.get("unit","g")),"kcal":round(float(x.get("kcal",0)))} for x in m.get("ingredients",[])]}
-            # Conserva sempre il piano precedente prima di sostituirlo.
-            previous_week=st.session_state.plan_week_start
+            prompt=f'''Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Target alimentare stimato: {ep["target"]} kcal/giorno.
+GIORNI PRANZO FUORI CASA DELLA PROSSIMA SETTIMANA: {", ".join(lunch_days) if lunch_days else "nessuno"}.
+GIORNI CENA FUORI CASA DELLA PROSSIMA SETTIMANA: {", ".join(dinner_days) if dinner_days else "nessuno"}.
+Per ogni giorno crea esattamente 4 pasti con queste chiavi: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena".
+Nei pasti segnati come fuori casa NON inventare un piatto domestico: usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[].
+Negli altri pasti crea ricette domestiche con ingredienti reali.
+Restituisci SOLO JSON. La struttura preferita è un oggetto con le chiavi Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica; ogni giorno contiene i 4 pasti; ogni pasto contiene name + ingredients; ogni ingredient contiene name, qty, unit, kcal.'''
+            raw=gemini_interaction(prompt)
+            out=normalize_ai_plan(raw)
+
+            # Archivia il piano precedente SOLO dopo che Gemini ha restituito
+            # un piano completo e valido.
             archive_current_plan(reason="Sostituito da un nuovo piano AI")
-            # La nuova generazione viene considerata la settimana successiva rispetto al piano archiviato.
-            new_start=(date.fromisoformat(previous_week)+timedelta(days=7)).isoformat() if previous_week else week_start(date.today()+timedelta(days=7))
+
             st.session_state.meal_plan=out
-            st.session_state.plan_week_start=new_start
+            st.session_state.plan_week_start=next_start.isoformat()
             st.session_state.overrides={}
             st.session_state.eaten={}
+            st.session_state.registered_meals={}
+            st.session_state.smart_food_advice=None
             for key in list(st.session_state.keys()):
                 if str(key).startswith("eat_"):
                     st.session_state.pop(key,None)
+
             st.rerun()
-        except Exception as e: st.error(f"Errore AI: {e}")
+        except Exception as e:
+            st.error(f"Errore AI: {e}")
     st.subheader("📷 Mensa Smart")
     img=st.camera_input("Scatta il menu") or st.file_uploader("Carica una foto",type=["jpg","jpeg","png"],key="mensa3")
     if img:
