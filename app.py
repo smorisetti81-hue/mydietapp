@@ -14,7 +14,7 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v57
+# MyDietApp v65 SMART SHOPPING
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -235,7 +235,7 @@ _defaults = {
     "mensa_menus":{}, "next_mensa_menus":{},
     "plan_generation_status":"idle", "plan_generation_message":"", "plan_generation_time":None,
     "plan_editor_selection":"current", "_plan_editor_next":False,
-    "pantry":{}, "shopping_checked":{}, "pantry_consumed_by_meal":{}, "smart_food_advice":None, "registered_meals":{}
+    "pantry":{}, "shopping_checked":{}, "pantry_consumed_by_meal":{}, "smart_food_advice":None, "registered_meals":{}, "shopping_source":"Tutte"
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
@@ -988,6 +988,19 @@ def shopping_list():
         need=max(0.0,float(required)-stock)
         rows.append({"name":name,"unit":unit,"required":float(required),"pantry":stock,"need":need})
     return rows
+
+def shopping_opportunity(required, pantry, unit):
+    need=max(0.0,float(required)-float(pantry))
+    if need<=0:
+        return "covered"
+    # Heuristic only: until we have a verified price feed, rank products by how much
+    # of the planned requirement is still uncovered. Never invent a price.
+    ratio=need/max(float(required),1.0)
+    if ratio>=0.75:
+        return "high"
+    if ratio>=0.35:
+        return "medium"
+    return "low"
 
 def water_today_ml():
     """Return today's water intake in ml, stored by calendar date."""
@@ -2215,7 +2228,7 @@ Rispondi in modo breve e pratico con:
 # ---------------- Dispensa ----------------
 elif st.session_state.page=="Dispensa":
     st.title("🛒 Spesa & Dispensa")
-    st.caption("Tieni sotto controllo quello che devi comprare e quello che hai già in casa. Il piano settimanale aggiorna automaticamente il fabbisogno.")
+    st.caption("Piano → Dispensa → Spesa. Ora MyDiet prepara anche il confronto intelligente dei prodotti da acquistare.")
 
     rows=shopping_list()
     to_buy=[r for r in rows if r["need"]>0]
@@ -2223,14 +2236,11 @@ elif st.session_state.page=="Dispensa":
     pantry=pantry_items()
 
     c1,c2,c3=st.columns(3)
-    with c1:
-        st.metric("🛒 Da comprare",len(to_buy))
-    with c2:
-        st.metric("📦 In dispensa",len(pantry))
-    with c3:
-        st.metric("✅ Già coperti",len(covered))
+    with c1: st.metric("🛒 Da comprare",len(to_buy))
+    with c2: st.metric("📦 In dispensa",len(pantry))
+    with c3: st.metric("✅ Già coperti",len(covered))
 
-    tab_shop, tab_pantry=st.tabs(["🛒 Da comprare","📦 In casa"])
+    tab_shop, tab_smart, tab_pantry=st.tabs(["🛒 Da comprare","💰 Risparmio","📦 In casa"])
 
     with tab_shop:
         st.subheader("🛒 Lista della spesa")
@@ -2238,8 +2248,7 @@ elif st.session_state.page=="Dispensa":
             st.info("Il piano non contiene ancora alimenti da acquistare.")
         elif not to_buy:
             st.success("🎉 Hai già tutto quello che serve per il piano.")
-            if covered:
-                st.caption("I prodotti già disponibili in dispensa sono coperti automaticamente dal piano.")
+            if covered: st.caption("I prodotti già disponibili in dispensa sono coperti automaticamente dal piano.")
         else:
             st.caption("La quantità da comprare tiene già conto di quello che hai in casa.")
             for r in to_buy:
@@ -2254,9 +2263,42 @@ elif st.session_state.page=="Dispensa":
                             add_pantry_qty(r["name"],r["unit"],r["need"])
                             st.session_state.shopping_checked[key]=True
                             st.rerun()
-
             st.divider()
             st.caption("💡 Aggiungere un prodotto qui significa segnalarlo come acquistato e inserirlo direttamente nella dispensa.")
+
+    with tab_smart:
+        st.subheader("💰 Spesa intelligente")
+        if not to_buy:
+            st.success("🎉 Nessun acquisto scoperto: non serve cercare offerte.")
+        else:
+            st.markdown("### Dove conviene cercare")
+            st.info("MyDiet non inventa prezzi: per questa prima versione usa comparatori con dati aggiornati per verificare offerte, prezzo al kg/litro e supermercati. Il confronto automatico dei prezzi dentro MyDiet sarà il passo successivo.")
+
+            high=[]
+            for r in to_buy:
+                opp=shopping_opportunity(r["required"],r["pantry"],r["unit"])
+                if opp=="high": high.append(r)
+                with st.container(border=True):
+                    c1,c2,c3=st.columns([3.5,1.5,2.2])
+                    with c1:
+                        st.markdown(f"**{r['name']}**")
+                        st.caption(f"Da acquistare: **{r['need']:g} {r['unit']}**")
+                    with c2:
+                        label={"high":"🔥 Priorità alta","medium":"💡 Da confrontare","low":"✓ Poco scoperto"}[opp]
+                        st.markdown(label)
+                    with c3:
+                        q=urllib.parse.quote_plus(str(r["name"]).strip())
+                        st.link_button("🔎 SpesaChiara", f"https://www.google.com/search?q={urllib.parse.quote_plus('site:spesachiara.com '+str(r['name']).strip())}", use_container_width=True)
+                        st.link_button("🔎 Comprissimo", f"https://www.google.com/search?q={urllib.parse.quote_plus('site:comprissimo.ai '+str(r['name']).strip())}", use_container_width=True)
+
+            st.divider()
+            st.markdown("### 🧠 Strategia MyDiet")
+            if high:
+                names=", ".join(r["name"] for r in high[:5])
+                st.write(f"🔥 Parti da **{names}**: sono i prodotti per cui una parte importante del fabbisogno settimanale è ancora scoperta.")
+            else:
+                st.write("💡 Prima di fare la spesa, confronta soprattutto i prodotti con quantità ancora elevate da acquistare.")
+            st.caption("Prossimo step: prezzo attuale, prezzo/kg, offerta, distanza dal negozio e calcolo del risparmio sull'intero carrello.")
 
     with tab_pantry:
         st.subheader("📦 Cosa hai in casa")
@@ -2266,7 +2308,6 @@ elif st.session_state.page=="Dispensa":
                     c1,c2,c3,c4=st.columns([4,1.2,0.8,0.8])
                     with c1:
                         st.markdown(f"**{item['name']}**")
-                        # Show how much the current plan needs, when available.
                         matching=next((r for r in rows if _pantry_key(r["name"],r["unit"])==item["key"]),None)
                         if matching:
                             if item["qty"]>=matching["required"]:
@@ -2276,8 +2317,7 @@ elif st.session_state.page=="Dispensa":
                                 st.caption(f"🟡 Per il piano ne servono ancora {missing:g} {item['unit']}")
                         else:
                             st.caption("Non richiesto dal piano attuale")
-                    with c2:
-                        st.markdown(f"**{item['qty']:g} {item['unit']}**")
+                    with c2: st.markdown(f"**{item['qty']:g} {item['unit']}**")
                     with c3:
                         if st.button("−",key="pantry_minus_"+item["key"].replace("|","_"),use_container_width=True):
                             step=1 if item["unit"]=="pz" else 50
@@ -2294,24 +2334,21 @@ elif st.session_state.page=="Dispensa":
             suggestions=[{"name":r["name"],"unit":r["unit"]} for r in shopping_list()]
             names=sorted({x["name"] for x in suggestions})
             c1,c2,c3=st.columns([3,1,1])
-            with c1:
-                selected=st.selectbox("Alimento",["Nuovo alimento…"]+names,key="pantry_select")
-            with c2:
-                qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=50.0,key="pantry_qty")
-            with c3:
-                unit=st.selectbox("Unità",["g","ml","pz"],key="pantry_unit")
+            with c1: selected=st.selectbox("Alimento",["Nuovo alimento…"]+names,key="pantry_select")
+            with c2: qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=50.0,key="pantry_qty")
+            with c3: unit=st.selectbox("Unità",["g","ml","pz"],key="pantry_unit")
             if selected=="Nuovo alimento…":
                 custom_name=st.text_input("Nome alimento",placeholder="es. Pasta")
             else:
                 custom_name=selected
                 suggested_unit=next((x["unit"] for x in suggestions if x["name"]==selected),None)
-                if suggested_unit in ("g","ml","pz"):
-                    st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
+                if suggested_unit in ("g","ml","pz"): st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
             if st.button("Salva in dispensa",type="primary") and custom_name.strip() and qty>0:
                 add_pantry_qty(custom_name.strip(),unit,qty); st.rerun()
 
     with st.expander("ℹ️ Come funziona la dispensa",expanded=False):
         st.write("Quando registri un pasto come mangiato, MyDietApp scala dalla dispensa solo la quantità che era effettivamente presente. Se annulli il pasto, quella quantità viene ripristinata.")
+        st.write("Nella sezione **Risparmio**, MyDiet evidenzia cosa conviene confrontare. I prezzi mostrati dai comparatori esterni restano la fonte verificata finché non integriamo un feed prezzi direttamente nell'app.")
 
 # ---------------- Attività / Health ----------------
 elif st.session_state.page=="Attività":
