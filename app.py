@@ -15,6 +15,7 @@ import copy
 
 # ============================================================
 # MyDietApp v47
+# V48: fix Streamlit checkbox widget state so meal registration stays synchronized across Home and Piano.
 # V47: meal-level registration in Piano uses the same eaten state as Home; no changes to Health, energy balance, water or pantry logic.
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
@@ -485,12 +486,21 @@ def _meal_is_registered(day, meal_name):
 def set_meal_registered(day, meal_name, registered):
     """Central meal-level state shared by Home and Piano.
     The existing ingredient-level `eaten` map remains the single source of truth.
+    Also synchronize the Streamlit checkbox widget state so a later rerun cannot
+    overwrite the meal-level registration with an old checkbox value.
     """
     meal=st.session_state.meal_plan.get(day,{}).get(meal_name)
     if not meal:
         return
+    value=bool(registered)
     for item in active_items(meal):
-        st.session_state.eaten[item["id"]]=bool(registered)
+        iid=item["id"]
+        st.session_state.eaten[iid]=value
+        st.session_state[f"eat_{iid}"]=value
+
+def _sync_eaten_from_widget(iid):
+    """Copy the checkbox value into the canonical eaten state."""
+    st.session_state.eaten[iid]=bool(st.session_state.get(f"eat_{iid}",False))
 
 
 def _next_meal_for_today(day):
@@ -1420,11 +1430,11 @@ if st.session_state.page=="Home":
                 with c2:
                     if not registered:
                         if st.button("🍴 Ho mangiato",key=f"home_eat_{d}_{idx}",use_container_width=True):
-                            for iid in meal_ids: st.session_state.eaten[iid]=True
+                            set_meal_registered(d,mn,True)
                             st.rerun()
                     else:
                         if st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True):
-                            for iid in meal_ids: st.session_state.eaten[iid]=False
+                            set_meal_registered(d,mn,False)
                             st.rerun()
                 with c3:
                     st.metric("kcal",kcal)
@@ -1521,8 +1531,15 @@ elif st.session_state.page=="Piano":
                 step=qty_step(item.get("unit","g"), current_qty)
                 c1,c2,c3,c4,c5=st.columns([4.7,0.9,1.45,0.9,1.4])
                 with c1:
-                    eaten=st.checkbox(f"{item['name']} · {quantity_caption(item)} · {round(current_kcal)} kcal",value=st.session_state.eaten.get(item['id'],False),key="eat_"+item['id'])
-                    st.session_state.eaten[item['id']]=eaten
+                    widget_key="eat_"+item["id"]
+                    if widget_key not in st.session_state:
+                        st.session_state[widget_key]=bool(st.session_state.eaten.get(item["id"],False))
+                    st.checkbox(
+                        f"{item['name']} · {quantity_caption(item)} · {round(current_kcal)} kcal",
+                        key=widget_key,
+                        on_change=_sync_eaten_from_widget,
+                        args=(item["id"],),
+                    )
                 with c2:
                     if st.button("−",key="minus_"+item['id'],use_container_width=True):
                         if quantity_mode() == "precise":
@@ -1561,12 +1578,14 @@ elif st.session_state.page=="Piano":
                                 item["name"]=new_name.strip(); item["unit"]=new_unit; item["qty"]=float(new_qty); item["kcal"]=int(new_kcal)
                                 st.session_state.overrides[item["id"]]={"multiplier":1}
                                 st.session_state.eaten[item["id"]]=False
+                                st.session_state[f"eat_{item['id']}"]=False
                                 st.session_state[f"edit_open_{item['id']}"]=False
                                 st.rerun()
                         with s2:
                             if st.button("✕ Rimuovi",key="remove_"+item['id'],use_container_width=True):
                                 st.session_state.overrides[item["id"]]={"removed":True,"multiplier":mult}
                                 st.session_state.eaten[item["id"]]=False
+                                st.session_state[f"eat_{item['id']}"]=False
                                 st.rerun()
             with st.expander("➕ Aggiungi alimento"):
                 suggestions=plan_food_suggestions(day,mn,limit=8)
