@@ -239,8 +239,10 @@ _defaults = {
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
     "name":"Stefano", "weight":135.0, "height":180.0, "age":40, "sex":"male",
-    "activity_level":"moderata", "deficit":500, "water_goal_ml":2500, "quantity_mode":"porzioni"
+    "activity_level":"moderata", "deficit":500, "goal_weight":135.0, "water_goal_ml":2500, "quantity_mode":"porzioni"
 }.items(): st.session_state.setdefault("p_"+k,v)
+# Compatibilità: se il profilo arriva da una versione precedente, il peso desiderato parte dal peso attuale.
+st.session_state.setdefault("p_goal_weight", float(st.session_state.get("p_weight", 135.0)))
 
 
 def meals():
@@ -941,6 +943,46 @@ def energy_profile():
     maintenance=round(bmr*ACTIVITY_FACTORS[p["activity_level"]])
     target=max(1200, maintenance-int(p["deficit"]))
     return {"bmr_est":bmr,"maintenance_est":maintenance,"target":target,"deficit":int(p["deficit"]),"factor":ACTIVITY_FACTORS[p["activity_level"]]}
+
+def weight_projection():
+    """Build an illustrative weight-loss trajectory from current to desired weight.
+
+    The projection uses the current internal calorie deficit as a simple planning
+    estimate (7700 kcal ≈ 1 kg). It is not a prediction of actual weight change.
+    Actual weight readings can be added later and should be compared with this
+    reference trajectory rather than treated as a guarantee.
+    """
+    try:
+        current=float(st.session_state.get("p_weight",0) or 0)
+        goal=float(st.session_state.get("p_goal_weight",current) or current)
+        deficit=max(0,int(st.session_state.get("p_deficit",500) or 500))
+    except Exception:
+        return None
+    if current <= 0 or goal <= 0 or goal >= current or deficit <= 0:
+        return None
+    kg_per_week=(deficit*7)/7700.0
+    if kg_per_week <= 0:
+        return None
+    total_kg=current-goal
+    weeks=max(1,int((total_kg/kg_per_week)+0.999999))
+    rows=[]
+    start=datetime.now(ROME).date()
+    for w in range(weeks+1):
+        d=start+timedelta(days=7*w)
+        projected=max(goal,current-(kg_per_week*w))
+        if w==weeks:
+            projected=goal
+        rows.append({"Data":d.strftime("%d/%m/%Y"),"Peso stimato":round(projected,1)})
+    return {
+        "current":current,
+        "goal":goal,
+        "deficit":deficit,
+        "kg_per_week":kg_per_week,
+        "weeks":weeks,
+        "target_date":start+timedelta(days=7*weeks),
+        "rows":rows,
+    }
+
 
 def activity_summary():
     """Summarize activity already contained in the observed Health total.
@@ -2239,13 +2281,13 @@ else:
         c1,c2=st.columns(2)
         with c1:
             name=st.text_input("Nome",st.session_state.p_name)
-            weight=st.number_input("Peso (kg)",30.,300.,float(st.session_state.p_weight),.1)
+            weight=st.number_input("Peso attuale (kg)",30.,300.,float(st.session_state.p_weight),.1)
+            goal_weight=st.number_input("Peso desiderato (kg)",30.,300.,float(st.session_state.get("p_goal_weight",st.session_state.p_weight)),.1)
             height=st.number_input("Altezza (cm)",100.,230.,float(st.session_state.p_height),.5)
         with c2:
             age=st.number_input("Età",13,100,int(st.session_state.p_age))
             sex=st.selectbox("Sesso",["male","female"],index=0 if st.session_state.p_sex=="male" else 1)
             activity=st.selectbox("Attività abituale",list(ACTIVITY_FACTORS.keys()),index=list(ACTIVITY_FACTORS.keys()).index(st.session_state.p_activity_level))
-            deficit=st.select_slider("Deficit desiderato",options=[300,500,700],value=int(st.session_state.p_deficit),format_func=lambda x:f"{x} kcal/giorno")
             water_goal=st.select_slider("Obiettivo acqua",options=list(range(1500,4001,250)),value=int(st.session_state.p_water_goal_ml),format_func=lambda x:f"{x/1000:.2f} L/giorno")
             quantity_mode_value=st.radio(
                 "Come vuoi vedere le quantità?",
@@ -2259,14 +2301,36 @@ else:
                 help="Le grammature restano comunque nel motore per calcolare calorie e lista della spesa. Cambia solo ciò che vedi.",
             )
         if st.form_submit_button("Salva",type="primary"):
-            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_deficit=deficit; st.session_state.p_water_goal_ml=water_goal; st.session_state.p_quantity_mode=quantity_mode_value; st.success("Profilo aggiornato")
+            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_goal_weight=goal_weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_water_goal_ml=water_goal; st.session_state.p_quantity_mode=quantity_mode_value; st.success("Profilo aggiornato")
     st.caption({
         "porzioni":"👌 Modalità quantità: **Porzioni** — niente bilancia. MyDietApp calcola comunque le quantità in background.",
         "both":"⚖️ Modalità quantità: **Porzioni + grammature**.",
         "precise":"⚖️ Modalità quantità: **Preciso** — grammature visibili."
     }.get(quantity_mode(), "👌 Modalità quantità: **Porzioni**."))
+
+    # ---------------- Percorso peso ----------------
+    st.divider()
+    st.subheader("🎯 Il tuo obiettivo di peso")
+    projection=weight_projection()
+    if projection:
+        target_date=projection["target_date"].strftime("%d/%m/%Y")
+        st.caption(f"Da **{projection['current']:.1f} kg** a **{projection['goal']:.1f} kg** · stima indicativa con il deficit attuale di {projection['deficit']} kcal/giorno.")
+        c1,c2,c3=st.columns(3)
+        c1.metric("Peso attuale",f"{projection['current']:.1f} kg")
+        c2.metric("Peso desiderato",f"{projection['goal']:.1f} kg")
+        c3.metric("Stima obiettivo",target_date)
+        st.line_chart(pd.DataFrame(projection["rows"]).set_index("Data"),use_container_width=True)
+        st.caption(f"Ritmo teorico usato per il grafico: circa {projection['kg_per_week']:.2f} kg/settimana. È una **proiezione orientativa**, non una previsione garantita: il peso reale può scendere più velocemente o più lentamente.")
+    else:
+        current=float(st.session_state.get("p_weight",0) or 0)
+        goal=float(st.session_state.get("p_goal_weight",current) or current)
+        if goal >= current:
+            st.info("Imposta un **peso desiderato inferiore al peso attuale** per visualizzare il percorso di discesa.")
+        else:
+            st.info("Completa i dati del profilo per visualizzare il percorso di peso.")
+
     ep=energy_profile()
-    st.subheader("🎯 Obiettivo energetico")
+    st.subheader("⚡ Obiettivo energetico")
     st.metric("Target alimentare stimato",f"{ep['target']:,} kcal/giorno".replace(",","."))
     st.metric("💧 Obiettivo acqua",f"{water_goal_ml()/1000:.2f} L/giorno")
     c1,c2=st.columns(2); c1.metric("BMR stimato",f"{ep['bmr_est']:,} kcal".replace(",",".")); c2.metric("Mantenimento stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
@@ -2274,4 +2338,4 @@ else:
     if b["using_observed"]:
         st.info(f"🔥 Con i dati Health di oggi, il budget dinamico è circa **{b['live_target']:,} kcal**: consumo osservato {b['observed_burn']:,} + riposo residuo {b['remaining_rest']:,} → stima fine giornata {b['projected_burn']:,}, meno deficit {b['deficit']}.")
     st.caption(f"Acqua di oggi: {water_today_ml()/1000:.2f} L / {water_goal_ml()/1000:.2f} L. La registrazione è separata dalle calorie e viene conservata per data nella sessione corrente.")
-    st.caption("Il target di profilo è una stima basata su Mifflin-St Jeor + livello di attività + deficit scelto. Il budget dinamico usa il consumo totale osservato da Health quando disponibile; l’attività viene mostrata separatamente senza doppio conteggio. Non è una prescrizione medica.")
+    st.caption("Il target alimentare resta calcolato dal motore energetico. Il peso desiderato serve ora anche a costruire un percorso visivo orientativo verso l’obiettivo.")
