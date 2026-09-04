@@ -274,9 +274,9 @@ def fetch_comprissimo_live(product_name):
         return []
 
 
-def _shopping_live_for_items(items, max_items=10):
-    """Fetch live results concurrently, but cap requests to keep the app responsive."""
-    selected = items[:max_items]
+def _shopping_live_for_items(items):
+    """Fetch live results for the whole basket, with a small worker pool so the UI stays responsive."""
+    selected = list(items or [])
     out = {}
     if not selected:
         return out
@@ -958,16 +958,50 @@ def _consume_meal_from_pantry(day, meal_name):
 
     for item in active_items(meal):
         name=str(item.get("name","Alimento")).strip()
-        unit=str(item.get("unit","g")).strip()
-        required=max(0.0,float(item.get("qty",0) or 0))
-        if required<=0:
+        unit=str(item.get("unit","g")).strip().lower()
+        remaining=max(0.0,float(item.get("qty",0) or 0))
+        if remaining<=0:
             continue
-        key=_pantry_key(name,unit)
-        stock=max(0.0,float(st.session_state.get("pantry",{}).get(key,{}).get("qty",0) or 0))
-        used=min(stock,required)
-        if used>0:
-            set_pantry_qty(name,unit,stock-used)
-            consumed.append({"name":name,"unit":unit,"qty":used})
+
+        # First consume an exact-unit pantry entry. Then use a known household
+        # conversion (for example banana: pz -> g) if the plan uses another unit.
+        exact_key=_pantry_key(name,unit)
+        exact_stock=max(0.0,float(st.session_state.get("pantry",{}).get(exact_key,{}).get("qty",0) or 0))
+        exact_used=min(exact_stock,remaining)
+        if exact_used>0:
+            set_pantry_qty(name,unit,exact_stock-exact_used)
+            consumed.append({"name":name,"unit":unit,"qty":exact_used})
+            remaining-=exact_used
+
+        if remaining<=0:
+            continue
+
+        for source_key, source_item in list(st.session_state.get("pantry",{}).items()):
+            if not isinstance(source_item,dict):
+                continue
+            if str(source_item.get("name","")).strip().lower()!=name.lower():
+                continue
+            source_unit=str(source_item.get("unit","g")).strip().lower()
+            if source_unit==unit:
+                continue
+            source_stock=max(0.0,float(source_item.get("qty",0) or 0))
+            converted_stock=_convert_qty(name,source_stock,source_unit,unit)
+            if converted_stock is None or converted_stock<=0:
+                continue
+            converted_used=min(converted_stock,remaining)
+            # Convert the consumed plan quantity back to the pantry unit so we
+            # never create fractional or impossible inventory changes.
+            source_used=_convert_qty(name,converted_used,unit,source_unit)
+            if source_used is None:
+                continue
+            source_used=min(source_stock,source_used)
+            if source_used<=0:
+                continue
+            set_pantry_qty(name,source_unit,source_stock-source_used)
+            consumed.append({"name":name,"unit":source_unit,"qty":source_used})
+            remaining-=converted_used
+            if remaining<=0:
+                break
 
     st.session_state.setdefault("pantry_consumed_by_meal",{})[meal_key]=consumed
 
@@ -1226,13 +1260,75 @@ def add_pantry_qty(name, unit, delta):
     current=float(st.session_state.get("pantry",{}).get(key,{}).get("qty",0) or 0)
     set_pantry_qty(name,unit,current+float(delta))
 
+# Approximate household conversions used only when the pantry and the plan use
+# different units. They are intentionally limited to foods where a typical item
+# weight is reasonably predictable. Exact-unit inventory always has priority.
+PANTRY_UNIT_CONVERSIONS = {
+    "banana": {"pz": 120.0},
+    "banane": {"pz": 120.0},
+    "mela": {"pz": 180.0},
+    "mele": {"pz": 180.0},
+    "pera": {"pz": 170.0},
+    "pere": {"pz": 170.0},
+    "arancia": {"pz": 200.0},
+    "arance": {"pz": 200.0},
+    "kiwi": {"pz": 75.0},
+    "pesca": {"pz": 150.0},
+    "pesche": {"pz": 150.0},
+    "albicocca": {"pz": 40.0},
+    "albicocche": {"pz": 40.0},
+    "mandarino": {"pz": 80.0},
+    "mandarini": {"pz": 80.0},
+}
+
+def _normalized_food_name(name):
+    return " ".join(str(name).strip().lower().split())
+
+def _convert_qty(name, qty, from_unit, to_unit):
+    """Convert only known household equivalents; return None when unknown."""
+    f=str(from_unit).strip().lower(); t=str(to_unit).strip().lower()
+    q=float(qty or 0)
+    if f==t:
+        return q
+    conv=PANTRY_UNIT_CONVERSIONS.get(_normalized_food_name(name), {})
+    # Known pz -> grams.
+    if f=="pz" and t=="g" and "pz" in conv:
+        return q*float(conv["pz"])
+    # Known pz -> ml is intentionally unsupported.
+    if f=="g" and t=="pz" and "pz" in conv and conv["pz"]>0:
+        return q/float(conv["pz"])
+    return None
+
+def _pantry_stock_in_unit(name, target_unit):
+    """Return pantry stock expressed in the plan unit, plus a human-readable breakdown."""
+    target=str(target_unit).strip().lower()
+    total=0.0
+    parts=[]
+    exact=st.session_state.get("pantry",{}).get(_pantry_key(name,target),{})
+    if exact:
+        q=float(exact.get("qty",0) or 0)
+        total+=q
+        if q>0: parts.append(f"{q:g} {target}")
+    for key,item in st.session_state.get("pantry",{}).items():
+        if not isinstance(item,dict) or str(item.get("name","")).strip().lower()!=str(name).strip().lower():
+            continue
+        unit=str(item.get("unit","g")).strip().lower()
+        if unit==target:
+            continue
+        q=float(item.get("qty",0) or 0)
+        converted=_convert_qty(name,q,unit,target)
+        if converted is not None and converted>0:
+            total+=converted
+            parts.append(f"{q:g} {unit} ≈ {converted:g} {target}")
+    return total, parts
+
 def shopping_list():
-    """Return plan needs minus what is currently in the pantry."""
+    """Return plan needs minus pantry stock, including known cross-unit equivalents."""
     rows=[]
     for required,unit,name in grocery():
-        stock=float(st.session_state.get("pantry",{}).get(_pantry_key(name,unit),{}).get("qty",0) or 0)
+        stock,stock_parts=_pantry_stock_in_unit(name,unit)
         need=max(0.0,float(required)-stock)
-        rows.append({"name":name,"unit":unit,"required":float(required),"pantry":stock,"need":need})
+        rows.append({"name":name,"unit":unit,"required":float(required),"pantry":stock,"pantry_parts":stock_parts,"need":need})
     return rows
 
 def shopping_opportunity(required, pantry, unit):
@@ -2503,7 +2599,11 @@ elif st.session_state.page=="Dispensa":
                     c1,c2=st.columns([4,1.35])
                     with c1:
                         st.markdown(f"**{r['name']}**")
-                        st.caption(f"Servono {r['required']:g} {r['unit']} · hai {r['pantry']:g} {r['unit']} · **mancano circa {r['need']:g} {r['unit']}**")
+                        pantry_detail = " · ".join(r.get("pantry_parts", []))
+                        if pantry_detail:
+                            st.caption(f"Servono {r['required']:g} {r['unit']} · hai **{r['pantry']:g} {r['unit']}** ({pantry_detail}) · **mancano circa {r['need']:g} {r['unit']}**")
+                        else:
+                            st.caption(f"Servono {r['required']:g} {r['unit']} · hai {r['pantry']:g} {r['unit']} · **mancano circa {r['need']:g} {r['unit']}**")
                     with c2:
                         buy_open_key=f"shopping_buy_open_{key.replace('|','_')}"
                         if not st.session_state.get(buy_open_key,False):
@@ -2577,10 +2677,10 @@ elif st.session_state.page=="Dispensa":
             st.markdown("### 🔎 Confronto prezzi reale")
             st.caption(f"Raggio preferito: {radius} km · fonte live: Comprissimo · cache di 15 minuti")
 
-            fetch_count = min(10, len(to_buy))
-            if st.button(f"🔄 Cerca prezzi aggiornati · {fetch_count} prodotti", type="primary", use_container_width=True):
-                with st.spinner("Sto confrontando i prodotti del tuo paniere…"):
-                    live = _shopping_live_for_items(to_buy, max_items=fetch_count)
+            fetch_count = len(to_buy)
+            if st.button(f"🔄 Confronta tutta la spesa · {fetch_count} prodotti", type="primary", use_container_width=True):
+                with st.spinner(f"Sto confrontando tutti i {fetch_count} prodotti del tuo paniere…"):
+                    live = _shopping_live_for_items(to_buy)
                 st.session_state.shopping_live_results = live
                 st.session_state.shopping_live_time = datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
                 st.rerun()
@@ -2598,9 +2698,9 @@ elif st.session_state.page=="Dispensa":
                 )
             else:
                 matched_products = sum(1 for r in to_buy if live_results.get(r["name"]))
-                st.success(f"✅ Trovati risultati per **{matched_products}/{min(fetch_count, len(to_buy))}** prodotti analizzati.")
+                st.success(f"✅ Trovati risultati per **{matched_products}/{len(to_buy)}** prodotti analizzati.")
 
-                for r in to_buy[:fetch_count]:
+                for r in to_buy:
                     product_name = str(r["name"]).strip()
                     matches = live_results.get(product_name, [])
                     with st.container(border=True):
@@ -2622,10 +2722,7 @@ elif st.session_state.page=="Dispensa":
                             else:
                                 st.link_button("🔎 Verifica su Comprissimo", b["search_url"], use_container_width=True)
 
-                if len(to_buy) > fetch_count:
-                    st.caption(f"ℹ️ Per velocità sono stati analizzati i primi {fetch_count} prodotti. I restanti {len(to_buy)-fetch_count} possono essere cercati al prossimo aggiornamento.")
-
-                cart_summary = _shopping_cart_summary(live_results, to_buy[:fetch_count])
+                cart_summary = _shopping_cart_summary(live_results, to_buy)
                 if cart_summary:
                     st.markdown("### 🏪 Dove sto trovando più prodotti")
                     for item in cart_summary[:5]:
@@ -2659,13 +2756,14 @@ elif st.session_state.page=="Dispensa":
                     c1,c2,c3,c4=st.columns([4,1.2,0.8,0.8])
                     with c1:
                         st.markdown(f"**{item['name']}**")
-                        matching=next((r for r in rows if _pantry_key(r["name"],r["unit"])==item["key"]),None)
+                        matching=next((r for r in rows if str(r["name"]).strip().lower()==str(item["name"]).strip().lower()),None)
                         if matching:
-                            if item["qty"]>=matching["required"]:
+                            stock_equiv=matching.get("pantry",0)
+                            if stock_equiv>=matching["required"]:
                                 st.caption("🟢 Sufficiente per il piano")
                             else:
-                                missing=matching["required"]-item["qty"]
-                                st.caption(f"🟡 Per il piano ne servono ancora {missing:g} {item['unit']}")
+                                missing=matching["required"]-stock_equiv
+                                st.caption(f"🟡 Per il piano ne servono ancora {missing:g} {matching['unit']}")
                         else:
                             st.caption("Non richiesto dal piano attuale")
                     with c2: st.markdown(f"**{item['qty']:g} {item['unit']}**")
@@ -2699,7 +2797,7 @@ elif st.session_state.page=="Dispensa":
 
     with st.expander("ℹ️ Come funziona la dispensa",expanded=False):
         st.write("Quando registri un pasto come mangiato, MyDietApp scala dalla dispensa solo la quantità che era effettivamente presente. Se annulli il pasto, quella quantità viene ripristinata.")
-        st.write("Nella sezione **Risparmio**, MyDiet evidenzia cosa conviene confrontare. I prezzi mostrati dai comparatori esterni restano la fonte verificata finché non integriamo un feed prezzi direttamente nell'app.")
+        st.write("Nella sezione **Risparmio**, MyDiet confronta il paniere intero quando premi il pulsante. Per alcuni alimenti freschi può anche convertire unità domestiche note, ad esempio **5 banane ≈ 600 g**, così la dispensa incide correttamente sulla lista della spesa.")
 
 # ---------------- Attività / Health ----------------
 elif st.session_state.page=="Attività":
