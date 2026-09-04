@@ -2259,12 +2259,12 @@ elif st.session_state.page=="Dispensa":
                         st.markdown(f"**{r['name']}**")
                         st.caption(f"Servono {r['required']:g} {r['unit']} · hai {r['pantry']:g} {r['unit']} · **mancano {r['need']:g} {r['unit']}**")
                     with c2:
-                        if st.button("➕ Aggiungi",key="buy_"+key.replace("|","_"),use_container_width=True):
+                        if st.button(f"✓ Ho comprato {r['need']:g} {r['unit']}",key="buy_"+key.replace("|","_"),use_container_width=True):
                             add_pantry_qty(r["name"],r["unit"],r["need"])
                             st.session_state.shopping_checked[key]=True
                             st.rerun()
             st.divider()
-            st.caption("💡 Aggiungere un prodotto qui significa segnalarlo come acquistato e inserirlo direttamente nella dispensa.")
+            st.caption("💡 Quando premi **Ho comprato**, la quantità mancante viene aggiunta automaticamente alla dispensa e il prodotto non sarà più tra quelli da comprare.")
 
     with tab_smart:
         st.subheader("💰 Spesa intelligente")
