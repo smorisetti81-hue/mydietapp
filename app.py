@@ -533,32 +533,21 @@ def _sync_eaten_from_widget(iid):
             break
 
 def _next_meal_for_today(day):
-    """Choose the most relevant next meal using clock time + registration state."""
+    """Return the first planned meal that has not actually been registered.
+
+    The clock must never imply that a meal was eaten. Registration is the
+    authoritative state, so even in the evening the app will not jump to
+    dinner when breakfast/lunch have not been registered yet.
+    """
     ms=st.session_state.meal_plan.get(day,{})
     order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
     if not ms:
         return None
-    now=datetime.now(ROME)
-    now_hour=now.hour + now.minute/60
-    windows={
-        "☕ Colazione":(5,10.5),
-        "🍎 Spuntino":(10.5,12.5),
-        "🍽️ Pranzo":(12,16.5),
-        "🌙 Cena":(18,23.99),
-    }
-    candidates=[]
-    for idx,name in enumerate(order):
-        if name not in ms or _meal_is_registered(day,name):
-            continue
-        start_h,end_h=windows[name]
-        if now_hour <= end_h:
-            distance=0 if start_h <= now_hour <= end_h else max(0,start_h-now_hour)
-            candidates.append((distance,idx,name))
-    if candidates:
-        return ms[candidates[0][2]] | {"_meal_name":candidates[0][2]}
+
     for name in order:
         if name in ms and not _meal_is_registered(day,name):
             return ms[name] | {"_meal_name":name}
+
     return None
 
 
@@ -1422,12 +1411,18 @@ if st.session_state.page=="Home":
 
     d=current_day_name()
     next_meal=_next_meal_for_today(d)
+    meal_order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
+    registered_count=sum(1 for mn in meal_order if mn in st.session_state.meal_plan.get(d,{}) and _meal_is_registered(d,mn))
 
     if next_meal:
         next_name=next_meal.get("_meal_name")
 
+        if registered_count == 0:
+            st.caption("Non hai ancora registrato un pasto oggi: partiamo dal primo pasto previsto, senza dedurre nulla dall'orario.")
+        else:
+            st.caption("Il prossimo pasto da registrare viene determinato dai pasti che hai effettivamente registrato.")
+
         if next_name in ("🍽️ Pranzo","🌙 Cena"):
-            st.caption("Il prossimo pasto da registrare viene evidenziato automaticamente.")
             show_daily_meal_recommendation(next_name,d,b)
         else:
             meal=st.session_state.meal_plan.get(d,{}).get(next_name)
@@ -1459,10 +1454,13 @@ if st.session_state.page=="Home":
                         set_meal_registered(d,next_name,True)
                         st.rerun()
     else:
-        st.success(
-            "🎉 **Giornata alimentare completata!** "
-            "Hai registrato tutti i pasti previsti per oggi."
-        )
+        if registered_count == 0:
+            st.info("🌅 **Inizia dalla colazione.** Quando registrerai un pasto, MyDiet passerà automaticamente al successivo. Nessun pasto viene considerato mangiato solo in base all'orario.")
+        else:
+            st.success(
+                "🎉 **Giornata alimentare completata!** "
+                "Hai registrato tutti i pasti previsti per oggi."
+            )
 
     with st.container(border=True):
         st.markdown("### 🤖 Consiglio intelligente")
