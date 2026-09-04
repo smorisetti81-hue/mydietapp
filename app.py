@@ -15,6 +15,7 @@ import copy
 
 # ============================================================
 # MyDietApp v47
+# V49: Home sincronizzata con lo stato di registrazione dei pasti
 # V48: fix Streamlit checkbox widget state so meal registration stays synchronized across Home and Piano.
 # V47: meal-level registration in Piano uses the same eaten state as Home; no changes to Health, energy balance, water or pantry logic.
 # - daily lunch/dinner recommendations linked to the active plan
@@ -1390,10 +1391,95 @@ if st.session_state.page=="Home":
     # ---------------- What should I eat today? ----------------
     st.divider()
     st.subheader("🍴 Cosa mangio oggi?")
-    st.caption("Suggerimenti collegati al piano di oggi e al budget calorico dinamico.")
+
     d=current_day_name()
-    show_daily_meal_recommendation("🍽️ Pranzo", d, b)
-    show_daily_meal_recommendation("🌙 Cena", d, b)
+    ms=st.session_state.meal_plan.get(d,{})
+
+    meal_order=[
+        "☕ Colazione",
+        "🍎 Spuntino",
+        "🍽️ Pranzo",
+        "🌙 Cena"
+    ]
+
+    # Stato reale dei pasti: la fonte di verità è eaten
+    meal_states=[]
+
+    for meal_name in meal_order:
+        meal=ms.get(meal_name)
+
+        if not meal:
+            continue
+
+        registered=_meal_is_registered(d,meal_name)
+
+        meal_states.append({
+            "name":meal_name,
+            "meal":meal,
+            "registered":registered
+        })
+
+    # Trova il prossimo pasto non ancora registrato
+    next_meal=None
+
+    for item in meal_states:
+        if not item["registered"]:
+            next_meal=item
+            break
+
+    # ---------------- Stato giornata ----------------
+    if not meal_states:
+        st.info(
+            f"Non hai ancora un piano alimentare per {d}. "
+            "Vai in **Piano** e genera il piano settimanale."
+        )
+
+    elif next_meal is None:
+        st.success(
+            "🎉 **Giornata alimentare completata!** "
+            "Hai registrato tutti i pasti previsti per oggi."
+        )
+
+    else:
+        meal_name=next_meal["name"]
+        meal=next_meal["meal"]
+
+        st.caption(
+            "Il prossimo pasto da registrare viene evidenziato automaticamente."
+        )
+
+        # Pranzo e cena continuano a usare il sistema di raccomandazione
+        # già esistente, ma SOLO se non sono ancora registrati.
+        if meal_name in ("🍽️ Pranzo","🌙 Cena"):
+            show_daily_meal_recommendation(meal_name,d,b)
+
+        # Colazione e spuntino vengono mostrati direttamente dal piano
+        else:
+            items=active_items(meal)
+            kcal=round(sum(item_kcal(i) for i in items))
+
+            with st.container(border=True):
+                st.markdown(f"### {meal_name}")
+                st.markdown(f"**{meal.get('name','Pasto')}**")
+                st.caption(f"{kcal} kcal · prossimo pasto da registrare")
+
+                if items:
+                    with st.expander("Dettagli"):
+                        for item in items:
+                            st.write(
+                                f"• {item['name']} — "
+                                f"{quantity_caption(item)} · "
+                                f"{round(item_kcal(item))} kcal"
+                            )
+
+                if st.button(
+                    "🍴 Ho mangiato",
+                    key=f"home_next_eat_{d}_{meal_name}",
+                    use_container_width=True,
+                    type="primary"
+                ):
+                    set_meal_registered(d,meal_name,True)
+                    st.rerun()
 
     with st.container(border=True):
         st.markdown("### 🤖 Consiglio intelligente")
