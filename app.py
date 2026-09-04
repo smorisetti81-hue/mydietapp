@@ -2254,17 +2254,40 @@ elif st.session_state.page=="Dispensa":
             for r in to_buy:
                 key=_pantry_key(r["name"],r["unit"])
                 with st.container(border=True):
-                    c1,c2=st.columns([4,1.2])
+                    c1,c2=st.columns([4,1.35])
                     with c1:
                         st.markdown(f"**{r['name']}**")
-                        st.caption(f"Servono {r['required']:g} {r['unit']} · hai {r['pantry']:g} {r['unit']} · **mancano {r['need']:g} {r['unit']}**")
+                        st.caption(f"Servono {r['required']:g} {r['unit']} · hai {r['pantry']:g} {r['unit']} · **mancano circa {r['need']:g} {r['unit']}**")
                     with c2:
-                        if st.button(f"✓ Ho comprato {r['need']:g} {r['unit']}",key="buy_"+key.replace("|","_"),use_container_width=True):
-                            add_pantry_qty(r["name"],r["unit"],r["need"])
-                            st.session_state.shopping_checked[key]=True
-                            st.rerun()
+                        buy_open_key=f"shopping_buy_open_{key.replace('|','_')}"
+                        if not st.session_state.get(buy_open_key,False):
+                            if st.button("✓ Ho comprato",key="buy_"+key.replace("|","_"),use_container_width=True):
+                                st.session_state[buy_open_key]=True
+                                st.rerun()
+                        else:
+                            st.markdown("**Quanto hai comprato?**")
+                            default_qty=max(0.1,float(r["need"]))
+                            qty=st.number_input(
+                                f"Quantità ({r['unit']})",
+                                min_value=0.1,
+                                value=default_qty,
+                                step=0.1 if float(r["need"]) < 10 else 50.0,
+                                key="shopping_qty_"+key.replace("|","_"),
+                                label_visibility="collapsed"
+                            )
+                            b1,b2=st.columns(2)
+                            with b1:
+                                if st.button("Conferma",key="confirm_buy_"+key.replace("|","_"),use_container_width=True,type="primary"):
+                                    add_pantry_qty(r["name"],r["unit"],float(qty))
+                                    st.session_state.shopping_checked[key]=True
+                                    st.session_state[buy_open_key]=False
+                                    st.rerun()
+                            with b2:
+                                if st.button("Annulla",key="cancel_buy_"+key.replace("|","_"),use_container_width=True):
+                                    st.session_state[buy_open_key]=False
+                                    st.rerun()
             st.divider()
-            st.caption("💡 Quando premi **Ho comprato**, la quantità mancante viene aggiunta automaticamente alla dispensa e il prodotto non sarà più tra quelli da comprare.")
+            st.caption("💡 La quantità indicata è solo il fabbisogno stimato: quando fai la spesa puoi inserire **meno, uguale o più** di quella quantità. MyDiet aggiungerà alla dispensa esattamente quanto hai acquistato.")
 
     with tab_smart:
         st.subheader("💰 Spesa intelligente")
