@@ -22,7 +22,7 @@ import copy
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
 # - recommendations adapt to the current dynamic calorie budget
-# - Mensa Smart receives the planned meal and available calorie context
+# - Pasto fuori receives the planned meal and available calorie context
 # Health-first release:
 # - real Google Fit data diagnostics
 # - robust aggregation for cumulative vs point data
@@ -836,7 +836,7 @@ REGOLE NON NEGOZIABILI:
 - Se il prossimo pasto e gia registrato, dillo chiaramente invece di suggerire di mangiarlo di nuovo.
 - Confronta "planned_kcal" con "meal_budget_kcal". Se rientra, consiglia semplicemente di seguire il piano.
 - Se supera il budget del pasto, proponi una modifica semplice usando gli alimenti gia presenti nel piano quando possibile.
-- Se "out_of_home" e true, non inventare un piatto: suggerisci di usare Mensa Smart per scegliere dal menu reale.
+- Se "out_of_home" e true, non inventare un piatto: suggerisci di usare **Pasto fuori** per scegliere dal menu reale.
 - L'utente odia pesare gli alimenti: usa SOLO concetti come porzione normale, mezza porzione, porzione abbondante. MAI grammi.
 - Se l'utente ha gia registrato un alimento manualmente (es. pizza), consideralo nel consiglio.
 - Non inventare proteine o altri valori nutrizionali non presenti.
@@ -861,7 +861,7 @@ def show_daily_meal_recommendation(meal_name, day, balance_data):
         st.markdown(f"### {icon} {title}")
         if rec["out_of_home"]:
             st.markdown("**📍 Oggi mangi fuori casa**")
-            st.info("Se hai un menu, analizzalo in **Mensa Smart**: confronteremo le proposte con il tuo piano e con il budget calorico disponibile.")
+            st.info("Se hai un menu, analizzalo in **Pasto fuori**: confronteremo le proposte con il tuo piano e con il budget calorico disponibile.")
             source_label="Budget dinamico" if balance_data.get("using_observed") else "Target stimato"
             if rec["planned_kcal"]:
                 st.caption(f"Pasto previsto dal piano: circa {rec['planned_kcal']} kcal · {source_label} giornaliero rimasto: {rec['remaining']} kcal")
@@ -1861,71 +1861,112 @@ elif st.session_state.page=="Piano":
         st.stop()
 
     # ------------------------------------------------------------------
-    # PREPARAZIONE / GENERAZIONE: mostrata vicino alla scelta della
-    # prossima settimana, non in fondo alla pagina.
+    # Preparazione della prossima settimana: configurazione fuori casa + AI
+    # nello stesso punto, così è immediatamente chiaro cosa si sta preparando.
     # ------------------------------------------------------------------
-    if selected_view==next_label and has_next:
-        st.session_state.plan_view_mode="next"
-        enter_next_plan_editor()
-        st.info(f"✨ **Stai preparando {week_label(st.session_state.next_week_start)}.** Il piano attuale resta completamente invariato.")
-    else:
-        st.session_state.plan_view_mode="current"
-        restore_current_plan_context()
+    current_start=st.session_state.plan_week_start
+    next_start=(date.fromisoformat(current_start)+timedelta(days=7)) if current_start else (date.today()+timedelta(days=7))
+    with st.container(border=True):
+        st.subheader("✨ Prepara la prossima settimana")
+        st.caption(f"{week_label(next_start.isoformat())} · configura qui i pasti fuori casa e genera il piano. Il piano attuale resta invariato.")
 
-    if st.session_state.plan_view_mode=="current":
-        st.subheader(f"📌 Questa settimana")
-        st.caption(f"{week_label(st.session_state.plan_week_start)} · piano attivo")
-    else:
-        st.subheader("✨ Prossima settimana")
-        st.caption(f"{week_label(st.session_state.next_week_start)} · bozza modificabile")
-
-    # ------------------------------------------------------------------
-    # Azioni secondarie compatte.
-    # ------------------------------------------------------------------
-    action_cols=st.columns(2)
-    with action_cols[0]:
-        with st.expander("⚙️ Personalizza settimana", expanded=False):
-            editing_next=st.session_state.plan_view_mode=="next"
-            lunch_state_key="next_out_lunch_days" if editing_next else "out_lunch_days"
-            dinner_state_key="next_out_dinner_days" if editing_next else "out_dinner_days"
-            lunch_set=set(st.session_state.get(lunch_state_key,[]))
-            dinner_set=set(st.session_state.get(dinner_state_key,[]))
-            st.caption("Segna i pasti che farai fuori casa. Le impostazioni vengono salvate nel piano che stai guardando.")
+        prep_cols=st.columns([2.2,1.4])
+        with prep_cols[0]:
+            st.markdown("**📍 Pasti fuori casa**")
+            st.caption("Pranzo e cena possono essere fuori casa indipendentemente. La scelta vale per la prossima settimana che stai preparando.")
+            next_lunch_set=set(st.session_state.get("next_out_lunch_days",[]))
+            next_dinner_set=set(st.session_state.get("next_out_dinner_days",[]))
+            # Se non esiste ancora una bozza, parti dalle impostazioni correnti come comodo punto di partenza.
+            if not has_next and not next_lunch_set and not next_dinner_set:
+                next_lunch_set=set(st.session_state.get("out_lunch_days",[]))
+                next_dinner_set=set(st.session_state.get("out_dinner_days",[]))
             for od in days_week:
-                oc1,oc2,oc3=st.columns([2.1,2.4,2.4])
+                oc1,oc2,oc3=st.columns([1.1,2.0,2.0])
                 with oc1: st.markdown(f"**{od[:3]}**")
                 with oc2:
-                    lunch_on=st.checkbox("📍 Pranzo",value=od in lunch_set,key=f"plan_cfg_lunch_{st.session_state.plan_view_mode}_{od}")
+                    lunch_on=st.checkbox("📍 Pranzo",value=od in next_lunch_set,key=f"prep_next_lunch_{od}")
                 with oc3:
-                    dinner_on=st.checkbox("📍 Cena",value=od in dinner_set,key=f"plan_cfg_dinner_{st.session_state.plan_view_mode}_{od}")
-                if lunch_on: lunch_set.add(od)
-                else: lunch_set.discard(od)
-                if dinner_on: dinner_set.add(od)
-                else: dinner_set.discard(od)
-            st.session_state[lunch_state_key]=sorted(lunch_set,key=days_week.index)
-            st.session_state[dinner_state_key]=sorted(dinner_set,key=days_week.index)
-            lunch_txt=", ".join(st.session_state[lunch_state_key]) if st.session_state[lunch_state_key] else "nessuno"
-            dinner_txt=", ".join(st.session_state[dinner_state_key]) if st.session_state[dinner_state_key] else "nessuna"
+                    dinner_on=st.checkbox("📍 Cena",value=od in next_dinner_set,key=f"prep_next_dinner_{od}")
+                if lunch_on: next_lunch_set.add(od)
+                else: next_lunch_set.discard(od)
+                if dinner_on: next_dinner_set.add(od)
+                else: next_dinner_set.discard(od)
+            st.session_state.next_out_lunch_days=sorted(next_lunch_set,key=days_week.index)
+            st.session_state.next_out_dinner_days=sorted(next_dinner_set,key=days_week.index)
+            lunch_txt=", ".join(st.session_state.next_out_lunch_days) if st.session_state.next_out_lunch_days else "nessuno"
+            dinner_txt=", ".join(st.session_state.next_out_dinner_days) if st.session_state.next_out_dinner_days else "nessuna"
             st.success(f"Pranzi fuori: {lunch_txt} · Cene fuori: {dinner_txt}")
 
-    with action_cols[1]:
-        current_start=st.session_state.plan_week_start
-        next_start=(date.fromisoformat(current_start)+timedelta(days=7)) if current_start else (date.today()+timedelta(days=7))
-        with st.expander("✨ Prepara prossima settimana", expanded=False):
-            st.markdown(f"**{week_label(next_start.isoformat())}**")
+        with prep_cols[1]:
+            st.markdown("**🤖 Piano AI**")
             if has_next:
-                st.success("Hai già una bozza pronta. Puoi aprirla dalla scheda **Prossima settimana** e modificarla.")
-                if st.button("👀 Apri la prossima settimana",key="open_next_from_action",use_container_width=True,type="primary"):
+                st.success("Bozza già pronta")
+                st.caption("Puoi aprirla, modificarla e rigenerarla senza toccare il piano attuale.")
+                if st.button("👀 Apri prossima settimana",key="open_next_from_prep",use_container_width=True,type="primary"):
                     st.session_state.plan_view_mode="next"
                     st.rerun()
-                if st.button("🔄 Rigenera la bozza",key="regen_next_from_action",use_container_width=True):
+                if st.button("🔄 Rigenera piano",key="regen_next_from_prep",use_container_width=True):
+                    # Le impostazioni appena selezionate sono già nella bozza: la generazione le userà.
                     st.session_state.force_next_generation=True
                     st.rerun()
             else:
-                st.caption("Genera un piano separato da quello attuale: potrai controllarlo e modificarlo prima che diventi attivo.")
-                if st.button("✨ Genera piano",key="generate_next_from_action",use_container_width=True,type="primary"):
+                st.caption("Genera una bozza separata: prima la controlli e la modifichi, poi diventerà il piano attivo.")
+                if st.button("✨ Genera piano",key="generate_next_from_prep",use_container_width=True,type="primary"):
                     st.session_state.force_next_generation=True
                     st.rerun()
+
+    # Feedback della generazione sempre in alto, vicino alla preparazione.
+    if st.session_state.plan_generation_status=="running":
+        st.info("🤖 **Sto generando il piano…** Verifico i 7 giorni prima di salvare la bozza.")
+    elif st.session_state.plan_generation_status=="success":
+        st.success(st.session_state.plan_generation_message or "✓ Piano generato con successo.")
+        if st.session_state.plan_generation_time:
+            st.caption(f"Ultima generazione: {st.session_state.plan_generation_time}")
+    elif st.session_state.plan_generation_status=="error":
+        st.error(st.session_state.plan_generation_message or "La generazione non è riuscita.")
+
+    # ------------------------------------------------------------------
+    # Generazione AI: eseguita solo quando richiesta dal pannello azioni.
+    # ------------------------------------------------------------------
+    if st.session_state.pop("force_next_generation",False):
+        current_start=st.session_state.plan_week_start
+        next_start=(date.fromisoformat(current_start)+timedelta(days=7)) if current_start else (date.today()+timedelta(days=7))
+        st.session_state.plan_generation_status="running"
+        st.session_state.plan_generation_message="Sto generando il piano e verificando la struttura ricevuta dall'AI…"
+        st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+        try:
+            ep=energy_profile()
+            lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days", st.session_state.get("out_lunch_days",[])))
+            dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days", st.session_state.get("out_dinner_days",[])))
+            prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Target alimentare stimato: {ep['target']} kcal/giorno.
+GIORNI PRANZO FUORI CASA DELLA PROSSIMA SETTIMANA: {', '.join(lunch_days) if lunch_days else 'nessuno'}.
+GIORNI CENA FUORI CASA DELLA PROSSIMA SETTIMANA: {', '.join(dinner_days) if dinner_days else 'nessuno'}.
+Per ogni giorno crea esattamente 4 pasti con queste chiavi: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena".
+Nei pasti segnati come fuori casa NON inventare un piatto domestico: usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[].
+Negli altri pasti crea ricette domestiche con ingredienti reali.
+Restituisci SOLO JSON. La struttura preferita è un oggetto con le chiavi Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica; ogni giorno contiene i 4 pasti; ogni pasto contiene name + ingredients; ogni ingredient contiene name, qty, unit, kcal."""
+            with st.spinner("🤖 Sto generando il piano… verifico i 7 giorni prima di salvarlo."):
+                raw=gemini_interaction(prompt)
+                out=normalize_ai_plan(raw)
+            st.session_state.next_meal_plan=out
+            st.session_state.next_overrides={}
+            st.session_state.next_week_start=next_start.isoformat()
+            st.session_state.next_out_lunch_days=copy.deepcopy(lunch_days)
+            st.session_state.next_out_dinner_days=copy.deepcopy(dinner_days)
+            st.session_state.next_mensa_menus={}
+            st.session_state.plan_view_mode="next"
+            st.session_state.plan_generation_status="success"
+            st.session_state.plan_generation_message=f"✓ Piano {week_label(next_start.isoformat())} generato con successo. È una bozza separata: puoi modificarla senza alterare il piano attuale."
+            st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+            st.session_state.eaten={}
+            st.session_state.registered_meals={}
+            st.rerun()
+        except Exception as e:
+            st.session_state.plan_generation_status="error"
+            st.session_state.plan_generation_message=f"✕ Generazione non riuscita: {e}"
+            st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+            st.error(f"Errore AI: {e}")
+
 
     # ------------------------------------------------------------------
     # Giorno + riepilogo del giorno.
@@ -2044,7 +2085,7 @@ elif st.session_state.page=="Piano":
             else:
                 menu=current_mensa_menu(day,mn)
                 st.info("📍 Fuori casa — scegli dal menu reale.")
-                with st.expander(f"🍴 Mensa Smart · {day} · {mn}", expanded=bool(menu)):
+                with st.expander(f"🍴 Pasto fuori · {day} · {mn}", expanded=bool(menu)):
                     st.caption("Questo menu è associato esclusivamente a questo giorno e a questo pasto. Un altro menu per la cena o per un altro giorno resterà separato.")
                     if menu:
                         st.success(f"✅ Menu associato · analizzato {menu.get('analyzed_at','—')}")
@@ -2107,56 +2148,7 @@ Rispondi in modo breve e pratico con:
     if editing_next:
         save_next_editor_context()
 
-    # ------------------------------------------------------------------
-    # Generazione AI: eseguita solo quando richiesta dal pannello azioni.
-    # ------------------------------------------------------------------
-    if st.session_state.pop("force_next_generation",False):
-        current_start=st.session_state.plan_week_start
-        next_start=(date.fromisoformat(current_start)+timedelta(days=7)) if current_start else (date.today()+timedelta(days=7))
-        st.session_state.plan_generation_status="running"
-        st.session_state.plan_generation_message="Sto generando il piano e verificando la struttura ricevuta dall'AI…"
-        st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
-        restore_current_plan_context()
-        try:
-            ep=energy_profile()
-            lunch_days=st.session_state.get("out_lunch_days",[])
-            dinner_days=st.session_state.get("out_dinner_days",[])
-            prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Target alimentare stimato: {ep['target']} kcal/giorno.
-GIORNI PRANZO FUORI CASA DELLA PROSSIMA SETTIMANA: {', '.join(lunch_days) if lunch_days else 'nessuno'}.
-GIORNI CENA FUORI CASA DELLA PROSSIMA SETTIMANA: {', '.join(dinner_days) if dinner_days else 'nessuno'}.
-Per ogni giorno crea esattamente 4 pasti con queste chiavi: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena".
-Nei pasti segnati come fuori casa NON inventare un piatto domestico: usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[].
-Negli altri pasti crea ricette domestiche con ingredienti reali.
-Restituisci SOLO JSON. La struttura preferita è un oggetto con le chiavi Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica; ogni giorno contiene i 4 pasti; ogni pasto contiene name + ingredients; ogni ingredient contiene name, qty, unit, kcal."""
-            with st.spinner("🤖 Sto generando il piano… verifico i 7 giorni prima di salvarlo."):
-                raw=gemini_interaction(prompt)
-                out=normalize_ai_plan(raw)
-            st.session_state.next_meal_plan=out
-            st.session_state.next_overrides={}
-            st.session_state.next_week_start=next_start.isoformat()
-            st.session_state.next_out_lunch_days=copy.deepcopy(lunch_days)
-            st.session_state.next_out_dinner_days=copy.deepcopy(dinner_days)
-            st.session_state.next_mensa_menus={}
-            st.session_state.plan_view_mode="next"
-            st.session_state.plan_generation_status="success"
-            st.session_state.plan_generation_message=f"✓ Piano {week_label(next_start.isoformat())} generato con successo. È una bozza separata: puoi modificarla senza alterare il piano attuale."
-            st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
-            st.session_state.eaten={}
-            st.session_state.registered_meals={}
-            st.rerun()
-        except Exception as e:
-            st.session_state.plan_generation_status="error"
-            st.session_state.plan_generation_message=f"✕ Generazione non riuscita: {e}"
-            st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
-            st.error(f"Errore AI: {e}")
 
-    # Feedback della generazione, vicino all'azione che l'ha prodotta.
-    if st.session_state.plan_generation_status=="success":
-        st.success(st.session_state.plan_generation_message or "✓ Piano generato con successo.")
-        if st.session_state.plan_generation_time:
-            st.caption(f"Ultima generazione: {st.session_state.plan_generation_time}")
-    elif st.session_state.plan_generation_status=="error":
-        st.error(st.session_state.plan_generation_message or "La generazione non è riuscita.")
 
 # ---------------- Dispensa ----------------
 elif st.session_state.page=="Dispensa":
