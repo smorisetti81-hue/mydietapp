@@ -2318,13 +2318,13 @@ elif st.session_state.page=="Dispensa":
             with m3: st.metric("Coperti", len(covered))
 
             st.info(
-                "💡 **Come funziona:** MyDiet parte dalla tua lista reale, cioè da ciò che manca dopo aver sottratto la dispensa. "
-                "Per i prezzi utilizza comparatori esterni verificabili; finché non abbiamo un'integrazione diretta, "
-                "non mostriamo numeri stimati come se fossero prezzi reali."
+                "💡 **Qui MyDiet prepara la ricerca, non inventa il prezzo.** "
+                "Per ogni alimento apri il confronto su un servizio che pubblica prezzi aggiornati e confronta anche il prezzo al kg/litro. "
+                "Il prossimo passo sara portare questi risultati direttamente dentro MyDiet."
             )
 
-            st.markdown("### 🔎 Confronta i prodotti")
-            st.caption(f"Apri il confronto per vedere prezzi, €/kg o €/L, offerte e supermercati entro circa {radius} km.")
+            st.markdown("### 🔎 Dove conviene comprarlo")
+            st.caption(f"Le ricerche sono ordinate per prezzo unitario quando il servizio lo permette. Il raggio di {radius} km serve come preferenza per la tua ricerca, non come dato inventato da MyDiet.")
 
             for r in to_buy:
                 opp = shopping_opportunity(r["required"], r["pantry"], r["unit"])
@@ -2336,10 +2336,9 @@ elif st.session_state.page=="Dispensa":
                     "https://comprissimo.ai/search?brand=&category=&has_price=True&on_sale=False"
                     f"&page=1&per_page=24&q={q}&sort=unit_price&supermarket="
                 )
-                # SpesaChiara non documenta pubblicamente un endpoint di ricerca stabile: usiamo una ricerca mirata.
-                spesachiara_url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(
-                    f'site:spesachiara.com "{product_name}" prezzo supermercato'
-                )
+                # SpesaChiara espone la ricerca sul proprio sito; non usiamo piu
+                # una ricerca Google generica, perche porta a risultati poco prevedibili.
+                spesachiara_url = "https://spesachiara.com/?q=" + urllib.parse.quote_plus(product_name)
 
                 with st.container(border=True):
                     c1,c2,c3 = st.columns([3.6,1.25,2.4])
@@ -2349,8 +2348,8 @@ elif st.session_state.page=="Dispensa":
                     with c2:
                         st.markdown(f"**{label}**")
                     with c3:
-                        st.link_button("🔎 Comprissimo", comprissimo_url, use_container_width=True)
-                        st.link_button("🔎 SpesaChiara", spesachiara_url, use_container_width=True)
+                        st.link_button("💰 Prezzi su Comprissimo", comprissimo_url, use_container_width=True)
+                        st.link_button("📍 Cerca su SpesaChiara", spesachiara_url, use_container_width=True)
 
             st.divider()
             st.markdown("### 🧠 Strategia MyDiet")
@@ -2368,11 +2367,11 @@ elif st.session_state.page=="Dispensa":
 
             with st.expander("💡 Perché non vedo ancora il prezzo direttamente qui?", expanded=False):
                 st.write(
-                    "Per farlo bene dobbiamo avere una fonte prezzi stabile e verificabile, idealmente per singolo punto vendita. "
-                    "I comparatori oggi disponibili raccolgono dati da fonti diverse e possono avere prezzi variabili per negozio, "
-                    "giorno e disponibilità. MyDiet preferisce non trasformare una stima in un dato certo."
+                    "La V65.3 mostrava soltanto collegamenti ai comparatori: era quindi normale non vedere prezzi dentro MyDiet. "
+                    "In questa versione i collegamenti sono piu diretti e la ricerca Comprissimo e costruita sul prodotto reale, "
+                    "ordinata per prezzo unitario. Per mostrare i prezzi direttamente nell'app dobbiamo integrare una fonte dati/API stabile e verificare termini e limiti di utilizzo."
                 )
-                st.caption("Obiettivo della prossima integrazione: prezzo attuale → €/kg → offerta → negozio → distanza → risparmio sul paniere.")
+                st.caption("Obiettivo: prezzo attuale → €/kg → offerta → negozio → distanza → costo del paniere → risparmio.")
 
     with tab_pantry:
         st.subheader("📦 Cosa hai in casa")
