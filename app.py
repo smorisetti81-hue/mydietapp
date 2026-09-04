@@ -1876,9 +1876,8 @@ elif st.session_state.page=="Piano":
     # ------------------------------------------------------------------
     current_start=st.session_state.plan_week_start
     next_start=(date.fromisoformat(current_start)+timedelta(days=7)) if current_start else (date.today()+timedelta(days=7))
-    with st.container(border=True):
-        st.subheader("✨ Prepara la prossima settimana")
-        st.caption(f"{week_label(next_start.isoformat())} · configura qui i pasti fuori casa e genera il piano. Il piano attuale resta invariato.")
+    with st.expander(f"✨ Prepara la prossima settimana · {week_label(next_start.isoformat())}", expanded=False):
+        st.caption("Configura qui i pasti fuori casa e genera il piano. Il piano attuale resta invariato.")
 
         prep_cols=st.columns([2.2,1.4])
         with prep_cols[0]:
