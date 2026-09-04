@@ -14,9 +14,9 @@ import uuid
 import copy
 
 # ============================================================
-# MyDietApp v47
+# MyDietApp v54
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
-# V48: fix Streamlit checkbox widget state so meal registration stays synchronized across Home and Piano.
+# V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
 # V47: meal-level registration in Piano uses the same eaten state as Home; no changes to Health, energy balance, water or pantry logic.
 # - daily lunch/dinner recommendations linked to the active plan
 # - generic fuori-casa configuration for lunch/dinner, independent from the canteen
@@ -680,6 +680,17 @@ def show_daily_meal_recommendation(meal_name, day, balance_data):
                 st.success("✅ Questo pasto risulta già registrato come mangiato.")
         st.markdown(f"**{status_labels.get(rec['status'], '💡 Suggerimento')}**")
         st.write("💡 " + rec["advice"])
+
+        # Primary registration action for the next meal.
+        # Home and Piano share the same canonical meal state.
+        if st.button(
+            "🍴 Ho mangiato",
+            key=f"home_recommendation_eat_{day}_{meal_name}",
+            use_container_width=True,
+            type="primary"
+        ):
+            set_meal_registered(day, meal_name, True)
+            st.rerun()
 
 def grocery():
     """Aggregate quantities required by the active weekly plan."""
@@ -1494,14 +1505,14 @@ if st.session_state.page=="Home":
                     st.markdown(f"**{mn}**")
                     st.caption(f"{m.get('name','Pasto')} · {kcal} kcal · {status}")
                 with c2:
-                    if not registered:
-                        if st.button("🍴 Ho mangiato",key=f"home_eat_{d}_{idx}",use_container_width=True):
-                            set_meal_registered(d,mn,True)
-                            st.rerun()
-                    else:
+                    # Registration is handled in "Cosa mangio oggi?".
+                    # Keep only an undo action here once a meal has been registered.
+                    if registered:
                         if st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True):
                             set_meal_registered(d,mn,False)
                             st.rerun()
+                    else:
+                        st.caption("Da registrare")
                 with c3:
                     st.metric("kcal",kcal)
                 with st.expander("Dettagli"):
