@@ -235,7 +235,7 @@ _defaults = {
     "mensa_menus":{}, "next_mensa_menus":{},
     "plan_generation_status":"idle", "plan_generation_message":"", "plan_generation_time":None,
     "plan_editor_selection":"current", "_plan_editor_next":False,
-    "pantry":{}, "shopping_checked":{}, "smart_food_advice":None, "registered_meals":{}
+    "pantry":{}, "shopping_checked":{}, "pantry_consumed_by_meal":{}, "smart_food_advice":None, "registered_meals":{}
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
@@ -697,20 +697,66 @@ def _meal_is_registered(day, meal_name):
     st.session_state.registered_meals[key]=registered
     return registered
 
+def _consume_meal_from_pantry(day, meal_name):
+    """Consume from pantry only what was actually available when the meal was registered.
+    The exact consumed quantities are snapshotted so Undo can restore the same stock.
+    """
+    meal_key=_meal_key(day,meal_name)
+    if meal_key in st.session_state.get("pantry_consumed_by_meal",{}):
+        return
+
+    consumed=[]
+    meal=st.session_state.meal_plan.get(day,{}).get(meal_name)
+    if not meal:
+        return
+
+    for item in active_items(meal):
+        name=str(item.get("name","Alimento")).strip()
+        unit=str(item.get("unit","g")).strip()
+        required=max(0.0,float(item.get("qty",0) or 0))
+        if required<=0:
+            continue
+        key=_pantry_key(name,unit)
+        stock=max(0.0,float(st.session_state.get("pantry",{}).get(key,{}).get("qty",0) or 0))
+        used=min(stock,required)
+        if used>0:
+            set_pantry_qty(name,unit,stock-used)
+            consumed.append({"name":name,"unit":unit,"qty":used})
+
+    st.session_state.setdefault("pantry_consumed_by_meal",{})[meal_key]=consumed
+
+def _restore_meal_to_pantry(day, meal_name):
+    """Restore exactly the pantry quantities consumed when this meal was registered."""
+    meal_key=_meal_key(day,meal_name)
+    consumed=st.session_state.get("pantry_consumed_by_meal",{}).pop(meal_key,None)
+    if consumed is None:
+        return
+    for item in consumed:
+        add_pantry_qty(item["name"],item["unit"],float(item["qty"]))
+
 def set_meal_registered(day, meal_name, registered):
-    """Register or undo an entire meal from either Home or Piano."""
+    """Register or undo an entire meal from either Home and Piano."""
     meal=st.session_state.meal_plan.get(day,{}).get(meal_name)
     if not meal:
         return
 
     value=bool(registered)
-    st.session_state.registered_meals[_meal_key(day,meal_name)]=value
+    meal_key=_meal_key(day,meal_name)
+    current=bool(st.session_state.registered_meals.get(meal_key,False))
+
+    # Avoid consuming/restoring pantry twice if the same state is requested again.
+    if not st.session_state.get("_plan_editor_next", False):
+        if value and not current:
+            _consume_meal_from_pantry(day,meal_name)
+        elif not value and current:
+            _restore_meal_to_pantry(day,meal_name)
+
+    st.session_state.registered_meals[meal_key]=value
 
     # Keep ingredient state synchronized with the meal state.
     for item in active_items(meal):
         iid=item["id"]
         st.session_state.eaten[iid]=value
-        # Rebuild checkbox state from canonical eaten on the next rerun.
         st.session_state.pop(f"eat_{iid}",None)
 
 def _sync_eaten_from_widget(iid):
@@ -725,7 +771,14 @@ def _sync_eaten_from_widget(iid):
                 st.session_state.eaten.get(item["id"],False)
                 for item in items
             )
-            st.session_state.registered_meals[_meal_key(day,meal_name)]=registered
+            meal_key=_meal_key(day,meal_name)
+            previous=bool(st.session_state.registered_meals.get(meal_key,False))
+            if not st.session_state.get("_plan_editor_next", False):
+                if registered and not previous:
+                    _consume_meal_from_pantry(day,meal_name)
+                elif not registered and previous:
+                    _restore_meal_to_pantry(day,meal_name)
+            st.session_state.registered_meals[meal_key]=registered
             break
 
 def _next_meal_for_today(day):
@@ -2161,80 +2214,104 @@ Rispondi in modo breve e pratico con:
 
 # ---------------- Dispensa ----------------
 elif st.session_state.page=="Dispensa":
-    st.title("🛒 Dispensa & Spesa")
-    st.caption("La lista della spesa nasce dal piano settimanale e viene ridotta automaticamente da ciò che hai già in casa.")
+    st.title("🛒 Spesa & Dispensa")
+    st.caption("Tieni sotto controllo quello che devi comprare e quello che hai già in casa. Il piano settimanale aggiorna automaticamente il fabbisogno.")
 
-    tab_shop, tab_pantry = st.tabs(["🛒 Lista della spesa", "📦 La mia dispensa"])
+    rows=shopping_list()
+    to_buy=[r for r in rows if r["need"]>0]
+    covered=[r for r in rows if r["need"]<=0]
+    pantry=pantry_items()
+
+    c1,c2,c3=st.columns(3)
+    with c1:
+        st.metric("🛒 Da comprare",len(to_buy))
+    with c2:
+        st.metric("📦 In dispensa",len(pantry))
+    with c3:
+        st.metric("✅ Già coperti",len(covered))
+
+    tab_shop, tab_pantry=st.tabs(["🛒 Da comprare","📦 In casa"])
 
     with tab_shop:
-        rows=shopping_list()
+        st.subheader("🛒 Lista della spesa")
         if not rows:
             st.info("Il piano non contiene ancora alimenti da acquistare.")
+        elif not to_buy:
+            st.success("🎉 Hai già tutto quello che serve per il piano.")
+            if covered:
+                st.caption("I prodotti già disponibili in dispensa sono coperti automaticamente dal piano.")
         else:
-            total=len(rows)
-            to_buy=sum(1 for r in rows if r["need"]>0)
-            st.subheader(f"🛒 Da acquistare · {to_buy}/{total}")
-            st.caption("La quantità richiesta è quella del piano. La colonna 'Hai' viene sottratta automaticamente.")
-            for r in rows:
+            st.caption("La quantità da comprare tiene già conto di quello che hai in casa.")
+            for r in to_buy:
                 key=_pantry_key(r["name"],r["unit"])
-                checked_key="shop_"+key.replace("|","_")
-                if r["need"]<=0:
-                    st.success(f"✓ {r['name']} · {r['required']:g} {r['unit']} · hai già {r['pantry']:g} {r['unit']}")
-                else:
-                    c1,c2,c3,c4=st.columns([3,1.2,1.2,1.3])
+                with st.container(border=True):
+                    c1,c2=st.columns([4,1.2])
                     with c1:
-                        st.checkbox(f"{r['name']}",key=checked_key,value=bool(st.session_state.shopping_checked.get(key,False)))
-                    with c2: st.write(f"Piano **{r['required']:g} {r['unit']}**")
-                    with c3: st.write(f"Hai **{r['pantry']:g} {r['unit']}**")
-                    with c4:
-                        if st.button("➕ In dispensa",key="buy_"+key.replace("|","_"),use_container_width=True):
+                        st.markdown(f"**{r['name']}**")
+                        st.caption(f"Servono {r['required']:g} {r['unit']} · hai {r['pantry']:g} {r['unit']} · **mancano {r['need']:g} {r['unit']}**")
+                    with c2:
+                        if st.button("➕ Aggiungi",key="buy_"+key.replace("|","_"),use_container_width=True):
                             add_pantry_qty(r["name"],r["unit"],r["need"])
                             st.session_state.shopping_checked[key]=True
                             st.rerun()
 
             st.divider()
-            st.caption("💡 Quando aggiungi un prodotto alla dispensa, la quantità da acquistare si aggiorna subito.")
+            st.caption("💡 Aggiungere un prodotto qui significa segnalarlo come acquistato e inserirlo direttamente nella dispensa.")
 
     with tab_pantry:
-        st.subheader("📦 Cosa hai già in casa")
-        pantry=pantry_items()
+        st.subheader("📦 Cosa hai in casa")
         if pantry:
             for item in pantry:
-                c1,c2,c3,c4=st.columns([3,1,1,1])
-                with c1: st.write(f"**{item['name']}**")
-                with c2:
-                    st.write(f"{item['qty']:g} {item['unit']}")
-                with c3:
-                    if st.button("−",key="pantry_minus_"+item["key"].replace("|","_"),use_container_width=True):
-                        step=1 if item["unit"]=="pz" else 50
-                        add_pantry_qty(item["name"],item["unit"],-step); st.rerun()
-                with c4:
-                    if st.button("+",key="pantry_plus_"+item["key"].replace("|","_"),use_container_width=True):
-                        step=1 if item["unit"]=="pz" else 50
-                        add_pantry_qty(item["name"],item["unit"],step); st.rerun()
+                with st.container(border=True):
+                    c1,c2,c3,c4=st.columns([4,1.2,0.8,0.8])
+                    with c1:
+                        st.markdown(f"**{item['name']}**")
+                        # Show how much the current plan needs, when available.
+                        matching=next((r for r in rows if _pantry_key(r["name"],r["unit"])==item["key"]),None)
+                        if matching:
+                            if item["qty"]>=matching["required"]:
+                                st.caption("🟢 Sufficiente per il piano")
+                            else:
+                                missing=matching["required"]-item["qty"]
+                                st.caption(f"🟡 Per il piano ne servono ancora {missing:g} {item['unit']}")
+                        else:
+                            st.caption("Non richiesto dal piano attuale")
+                    with c2:
+                        st.markdown(f"**{item['qty']:g} {item['unit']}**")
+                    with c3:
+                        if st.button("−",key="pantry_minus_"+item["key"].replace("|","_"),use_container_width=True):
+                            step=1 if item["unit"]=="pz" else 50
+                            add_pantry_qty(item["name"],item["unit"],-step); st.rerun()
+                    with c4:
+                        if st.button("+",key="pantry_plus_"+item["key"].replace("|","_"),use_container_width=True):
+                            step=1 if item["unit"]=="pz" else 50
+                            add_pantry_qty(item["name"],item["unit"],step); st.rerun()
         else:
             st.info("La dispensa è vuota. Puoi aggiungere qui quello che hai già in casa.")
 
         st.divider()
-        st.markdown("**➕ Aggiungi alimento alla dispensa**")
-        suggestions=[{"name":r["name"],"unit":r["unit"]} for r in shopping_list()]
-        names=sorted({x["name"] for x in suggestions})
-        c1,c2,c3=st.columns([3,1,1])
-        with c1:
-            selected=st.selectbox("Alimento",["Nuovo alimento…"]+names,key="pantry_select")
-        with c2:
-            qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=50.0,key="pantry_qty")
-        with c3:
-            unit=st.selectbox("Unità",["g","ml","pz"],key="pantry_unit")
-        if selected=="Nuovo alimento…":
-            custom_name=st.text_input("Nome alimento",placeholder="es. Pasta")
-        else:
-            custom_name=selected
-            suggested_unit=next((x["unit"] for x in suggestions if x["name"]==selected),None)
-            if suggested_unit in ("g","ml","pz"):
-                st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
-        if st.button("Salva in dispensa",type="primary") and custom_name.strip() and qty>0:
-            add_pantry_qty(custom_name.strip(),unit,qty); st.rerun()
+        with st.expander("➕ Aggiungi alimento alla dispensa",expanded=False):
+            suggestions=[{"name":r["name"],"unit":r["unit"]} for r in shopping_list()]
+            names=sorted({x["name"] for x in suggestions})
+            c1,c2,c3=st.columns([3,1,1])
+            with c1:
+                selected=st.selectbox("Alimento",["Nuovo alimento…"]+names,key="pantry_select")
+            with c2:
+                qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=50.0,key="pantry_qty")
+            with c3:
+                unit=st.selectbox("Unità",["g","ml","pz"],key="pantry_unit")
+            if selected=="Nuovo alimento…":
+                custom_name=st.text_input("Nome alimento",placeholder="es. Pasta")
+            else:
+                custom_name=selected
+                suggested_unit=next((x["unit"] for x in suggestions if x["name"]==selected),None)
+                if suggested_unit in ("g","ml","pz"):
+                    st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
+            if st.button("Salva in dispensa",type="primary") and custom_name.strip() and qty>0:
+                add_pantry_qty(custom_name.strip(),unit,qty); st.rerun()
+
+    with st.expander("ℹ️ Come funziona la dispensa",expanded=False):
+        st.write("Quando registri un pasto come mangiato, MyDietApp scala dalla dispensa solo la quantità che era effettivamente presente. Se annulli il pasto, quella quantità viene ripristinata.")
 
 # ---------------- Attività / Health ----------------
 elif st.session_state.page=="Attività":
