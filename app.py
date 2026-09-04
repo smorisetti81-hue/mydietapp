@@ -1573,7 +1573,10 @@ elif st.session_state.page=="Piano":
         st.session_state.out_lunch_days=sorted(lunch_set, key=days_week.index)
         st.session_state.out_dinner_days=sorted(dinner_set, key=days_week.index)
         st.info(f"Pranzi fuori casa: {', '.join(st.session_state.out_lunch_days) if st.session_state.out_lunch_days else 'nessuno'} · Cene fuori casa: {', '.join(st.session_state.out_dinner_days) if st.session_state.out_dinner_days else 'nessuna'}")
-    days=list(st.session_state.meal_plan.keys()); day=st.selectbox("Giorno",days)
+    days=list(st.session_state.meal_plan.keys())
+    current_day=current_day_name()
+    day_index=days.index(current_day) if current_day in days else 0
+    day=st.selectbox("Giorno",days,index=day_index)
     for mn,m in st.session_state.meal_plan[day].items():
         kcal=round(sum(item_kcal(i) for i in m.get("ingredients",[]) if not st.session_state.overrides.get(i["id"],{}).get("removed")))
         with st.container(border=True):
