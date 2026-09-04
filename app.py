@@ -2806,58 +2806,154 @@ elif st.session_state.page=="Dispensa":
                 )
             else:
                 matched_products = sum(1 for r in to_buy if live_results.get(r["name"]))
-                st.success(f"✅ Trovati risultati per **{matched_products}/{len(to_buy)}** prodotti analizzati.")
-
-                for r in to_buy:
-                    product_name = str(r["name"]).strip()
-                    matches = live_results.get(product_name, [])
-                    with st.container(border=True):
-                        st.markdown(f"**{product_name}**")
-                        st.caption(f"Da acquistare: **{r['need']:g} {r['unit']}** · in dispensa: {r['pantry']:g} {r['unit']}")
-                        if not matches:
-                            st.warning("Nessun abbinamento sufficientemente affidabile trovato nel catalogo live.")
-                            q = urllib.parse.quote_plus(product_name)
-                            st.link_button("🔎 Apri ricerca Comprissimo", f"https://comprissimo.ai/search?brand=&category=&has_price=True&on_sale=False&page=1&per_page=24&q={q}&sort=unit_price&supermarket=", use_container_width=True)
-                        else:
-                            best = sorted(matches, key=lambda x: (x["unit_price"], x["price"]))[:3]
-                            b = best[0]
-                            st.markdown(f"🏆 **Miglior prezzo unitario trovato: {b['unit_price']:.2f} €/{b['unit_kind']}** · {b['price']:.2f} € · **{b['store'] or 'negozio non indicato'}**")
-                            if len(best) > 1:
-                                for idx, alt in enumerate(best[1:], start=2):
-                                    st.caption(f"{idx}. {alt['unit_price']:.2f} €/{alt['unit_kind']} · {alt['price']:.2f} € · {alt['store'] or 'negozio non indicato'}")
-                            if b.get("compare_url"):
-                                st.link_button("📊 Vedi confronto completo", b["compare_url"], use_container_width=True)
-                            else:
-                                st.link_button("🔎 Verifica su Comprissimo", b["search_url"], use_container_width=True)
 
                 # Dopo il confronto live, costruisci automaticamente una lista per catena.
-                # Il totale è stimato solo quando prezzo e prezzo/unità permettono di ricavare
-                # una confezione coerente; altrimenti il prodotto viene lasciato fuori dal totale.
-                store_carts=_shopping_all_store_carts(live_results,to_buy)
+                # La lista è volutamente mostrata PRIMA del dettaglio dei singoli prodotti,
+                # così l'utente vede subito cosa comprare e quanto spenderà.
+                store_carts = _shopping_all_store_carts(live_results, to_buy)
                 if store_carts:
-                    st.session_state.shopping_cart_summary=store_carts
-                    st.session_state.shopping_cart_time=live_time
+                    st.session_state.shopping_cart_summary = store_carts
+                    st.session_state.shopping_cart_time = live_time
+                    st.success(
+                        f"✅ Trovati risultati per **{matched_products}/{len(to_buy)}** prodotti. "
+                        "La lista della spesa è pronta."
+                    )
+
                     st.markdown("### 🛒 La tua lista della spesa")
-                    st.caption("Le confezioni necessarie vengono stimate dal rapporto prezzo / prezzo unitario. I totali sono indicativi e vanno verificati prima dell'acquisto.")
-                    ranked_carts=sorted(store_carts.values(),key=lambda c:(-c['matched'],c['total']))
-                    if ranked_carts:
-                        best_cart=ranked_carts[0]
-                        st.success(f"🏆 **Migliore lista completa trovata: {best_cart['store']} · {best_cart['total']:.2f} €** · {best_cart['matched']}/{len(to_buy)} prodotti coperti")
-                    store_names=[c['store'] for c in ranked_carts]
-                    tabs=st.tabs(store_names[:8])
-                    for tab,store in zip(tabs,store_names[:8]):
-                        cart=store_carts[store]
+                    st.caption(
+                        "Qui trovi subito la spesa stimata per ogni catena. "
+                        "Le confezioni vengono stimate dal rapporto prezzo/prezzo unitario."
+                    )
+
+                    ranked_carts = sorted(
+                        store_carts.values(),
+                        key=lambda c: (-c['matched'], c['total'])
+                    )
+                    best_cart = ranked_carts[0] if ranked_carts else None
+                    if best_cart:
+                        st.success(
+                            f"🏆 **Lista più conveniente tra quelle sufficientemente complete: "
+                            f"{best_cart['store']} · {best_cart['total']:.2f} €** · "
+                            f"{best_cart['matched']}/{len(to_buy)} prodotti"
+                        )
+
+                    # Riepilogo compatto: il costo si legge senza dover aprire ogni lista.
+                    summary_cols = st.columns(min(4, len(ranked_carts)))
+                    for col, cart in zip(summary_cols, ranked_carts[:4]):
+                        with col:
+                            st.metric(
+                                cart['store'],
+                                f"{cart['total']:.2f} €",
+                                f"{cart['matched']}/{len(to_buy)} prodotti"
+                            )
+
+                    store_names = [c['store'] for c in ranked_carts]
+                    tabs = st.tabs(store_names[:8])
+                    for tab, store in zip(tabs, store_names[:8]):
+                        cart = store_carts[store]
                         with tab:
-                            st.markdown(f"### {store} · **{cart['total']:.2f} €**")
-                            st.caption(f"Prodotti valorizzati: {cart['matched']}/{len(to_buy)}")
+                            st.markdown(
+                                f"### {store} · **{cart['total']:.2f} €**"
+                            )
+                            st.caption(
+                                f"{cart['matched']} prodotti valorizzati su {len(to_buy)} · "
+                                "stima basata sui prezzi disponibili"
+                            )
+
+                            # Lista compatta a righe, invece di un blocco verticale per prodotto.
                             for line in cart['rows']:
-                                st.markdown(f"**{line['name']}**")
-                                st.caption(f"{line['packages']} × confezione da circa {line['package_qty']:.3g} {line['unit_kind']} · {line['price']:.2f} € cad. · **{line['line_total']:.2f} €**")
-                            missing_store=[r['name'] for r in to_buy if not any(x['name']==r['name'] for x in cart['rows'])]
+                                st.markdown(
+                                    f"**{line['name']}** · "
+                                    f"{line['packages']}× da circa {line['package_qty']:.3g} "
+                                    f"{line['unit_kind']} · "
+                                    f"{line['line_total']:.2f} €"
+                                )
+
+                            missing_store = [
+                                r['name'] for r in to_buy
+                                if not any(x['name'] == r['name'] for x in cart['rows'])
+                            ]
                             if missing_store:
-                                st.warning("Non valorizzati: " + ", ".join(missing_store[:8]) + ("…" if len(missing_store)>8 else ""))
+                                with st.expander(
+                                    f"⚠️ {len(missing_store)} prodotti non valorizzati",
+                                    expanded=False
+                                ):
+                                    st.write(" · ".join(missing_store))
+
+                    # Il dettaglio completo resta disponibile, ma non occupa più tutta la pagina.
+                    with st.expander(
+                        f"🔎 Dettaglio confronto prezzi · {matched_products}/{len(to_buy)} prodotti",
+                        expanded=False
+                    ):
+                        for r in to_buy:
+                            product_name = str(r["name"]).strip()
+                            matches = live_results.get(product_name, [])
+                            with st.container(border=True):
+                                st.markdown(f"**{product_name}**")
+                                st.caption(
+                                    f"Da acquistare: **{r['need']:g} {r['unit']}** · "
+                                    f"in dispensa: {r['pantry']:g} {r['unit']}"
+                                )
+                                if not matches:
+                                    st.warning(
+                                        "Nessun abbinamento sufficientemente affidabile trovato nel catalogo live."
+                                    )
+                                    q = urllib.parse.quote_plus(product_name)
+                                    st.link_button(
+                                        "🔎 Apri ricerca Comprissimo",
+                                        f"https://comprissimo.ai/search?brand=&category=&has_price=True&on_sale=False&page=1&per_page=24&q={q}&sort=unit_price&supermarket=",
+                                        use_container_width=True,
+                                    )
+                                else:
+                                    best = sorted(
+                                        matches,
+                                        key=lambda x: (x["unit_price"], x["price"])
+                                    )[:3]
+                                    b = best[0]
+                                    st.markdown(
+                                        f"🏆 **Miglior prezzo unitario: "
+                                        f"{b['unit_price']:.2f} €/{b['unit_kind']}** · "
+                                        f"{b['price']:.2f} € · **{b['store'] or 'negozio non indicato'}**"
+                                    )
+                                    if len(best) > 1:
+                                        for idx, alt in enumerate(best[1:], start=2):
+                                            st.caption(
+                                                f"{idx}. {alt['unit_price']:.2f} €/{alt['unit_kind']} · "
+                                                f"{alt['price']:.2f} € · {alt['store'] or 'negozio non indicato'}"
+                                            )
+                                    if b.get("compare_url"):
+                                        st.link_button(
+                                            "📊 Vedi confronto completo",
+                                            b["compare_url"],
+                                            use_container_width=True,
+                                        )
+                                    else:
+                                        st.link_button(
+                                            "🔎 Verifica su Comprissimo",
+                                            b["search_url"],
+                                            use_container_width=True,
+                                        )
                 else:
-                    st.warning("Ho trovato prodotti live, ma non abbastanza dati affidabili per costruire un totale per catena.")
+                    st.success(
+                        f"✅ Trovati risultati per **{matched_products}/{len(to_buy)}** prodotti analizzati."
+                    )
+                    with st.expander(
+                        "🔎 Dettaglio confronto prezzi",
+                        expanded=False
+                    ):
+                        for r in to_buy:
+                            product_name = str(r["name"]).strip()
+                            matches = live_results.get(product_name, [])
+                            st.markdown(f"**{product_name}** · da acquistare {r['need']:g} {r['unit']}")
+                            if not matches:
+                                st.warning("Nessun abbinamento sufficientemente affidabile trovato.")
+                            else:
+                                best = sorted(matches, key=lambda x: (x["unit_price"], x["price"]))[:3]
+                                for idx, item in enumerate(best, start=1):
+                                    st.caption(
+                                        f"{idx}. {item['unit_price']:.2f} €/{item['unit_kind']} · "
+                                        f"{item['price']:.2f} € · {item['store'] or 'negozio non indicato'}"
+                                    )
 
             st.markdown("### 🧠 Strategia MyDiet")
             if strategy == "💰 Prezzo più basso":
