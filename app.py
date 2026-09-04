@@ -229,7 +229,7 @@ _defaults = {
     "page":"Home", "meal_plan":init_plan(), "overrides":{}, "eaten":{}, "manual_foods":[],
     "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None, "water_history":{},
     "plan_week_start":None, "plan_history":{}, "out_lunch_days":["Giovedì"], "out_dinner_days":["Giovedì"],
-    "pantry":{}, "shopping_checked":{}, "smart_food_advice":None
+    "pantry":{}, "shopping_checked":{}, "smart_food_advice":None, "registered_meals":{}
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
@@ -477,35 +477,60 @@ def eaten_items_today():
     return out
 
 
+def _meal_key(day, meal_name):
+    return f"{day}::{meal_name}"
+
 def _meal_is_registered(day, meal_name):
+    """Single canonical meal-level state shared by Home and Piano."""
     meal=st.session_state.meal_plan.get(day,{}).get(meal_name)
     if not meal:
         return False
+
+    key=_meal_key(day,meal_name)
+
+    # Explicit meal registration is authoritative.
+    if key in st.session_state.registered_meals:
+        return bool(st.session_state.registered_meals[key])
+
+    # Compatibility with state created before this version.
     items=active_items(meal)
-    return bool(items) and all(st.session_state.eaten.get(i["id"],False) for i in items)
+    registered=bool(items) and all(
+        st.session_state.eaten.get(i["id"],False)
+        for i in items
+    )
+    st.session_state.registered_meals[key]=registered
+    return registered
 
 def set_meal_registered(day, meal_name, registered):
-    """Central meal-level state shared by Home and Piano.
-    `eaten` is the canonical source of truth.
-    Widget keys are cleared after a meal-level change so Streamlit cannot
-    reapply an old checkbox value on the next rerun.
-    """
+    """Register or undo an entire meal from either Home or Piano."""
     meal=st.session_state.meal_plan.get(day,{}).get(meal_name)
     if not meal:
         return
+
     value=bool(registered)
+    st.session_state.registered_meals[_meal_key(day,meal_name)]=value
+
+    # Keep ingredient state synchronized with the meal state.
     for item in active_items(meal):
         iid=item["id"]
         st.session_state.eaten[iid]=value
-        # The checkbox widget may already exist in the current Streamlit run.
-        # Remove its state instead of forcing it, so the next render initializes
-        # it from the canonical `eaten` map.
+        # Rebuild checkbox state from canonical eaten on the next rerun.
         st.session_state.pop(f"eat_{iid}",None)
 
 def _sync_eaten_from_widget(iid):
-    """Copy the checkbox value into the canonical eaten state."""
-    st.session_state.eaten[iid]=bool(st.session_state.get(f"eat_{iid}",False))
+    """Copy an ingredient checkbox into eaten and update its meal state."""
+    value=bool(st.session_state.get(f"eat_{iid}",False))
+    st.session_state.eaten[iid]=value
 
+    for day, meal_name, meal in meals():
+        items=active_items(meal)
+        if any(item["id"]==iid for item in items):
+            registered=bool(items) and all(
+                st.session_state.eaten.get(item["id"],False)
+                for item in items
+            )
+            st.session_state.registered_meals[_meal_key(day,meal_name)]=registered
+            break
 
 def _next_meal_for_today(day):
     """Choose the most relevant next meal using clock time + registration state."""
@@ -1622,6 +1647,10 @@ elif st.session_state.page=="Piano":
                                 st.session_state.overrides[item["id"]]={"multiplier":1}
                                 st.session_state.eaten[item["id"]]=False
                                 st.session_state[f"eat_{item['id']}"]=False
+                                for _day,_mn,_meal in meals():
+                                    if any(x["id"]==item["id"] for x in active_items(_meal)):
+                                        st.session_state.registered_meals[_meal_key(_day,_mn)]=False
+                                        break
                                 st.session_state[f"edit_open_{item['id']}"]=False
                                 st.rerun()
                         with s2:
@@ -1629,6 +1658,10 @@ elif st.session_state.page=="Piano":
                                 st.session_state.overrides[item["id"]]={"removed":True,"multiplier":mult}
                                 st.session_state.eaten[item["id"]]=False
                                 st.session_state[f"eat_{item['id']}"]=False
+                                for _day,_mn,_meal in meals():
+                                    if any(x["id"]==item["id"] for x in active_items(_meal)):
+                                        st.session_state.registered_meals[_meal_key(_day,_mn)]=False
+                                        break
                                 st.rerun()
             with st.expander("➕ Aggiungi alimento"):
                 suggestions=plan_food_suggestions(day,mn,limit=8)
