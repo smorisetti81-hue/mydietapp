@@ -13,11 +13,12 @@ from collections import defaultdict
 import uuid
 import copy
 import re
+import math
 from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v66 SMART SHOPPING LIVE
+# MyDietApp v66.3 SMART SHOPPING · FIX PREZZI
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -83,8 +84,33 @@ SMART_SHOPPING_STORES = [
 
 
 def _money_value(value):
+    """Parse Italian/European money safely without turning 3.59 into 359.
+
+    Comprissimo can expose decimals with either a comma or a dot. A dot is
+    therefore a decimal separator when it is followed by exactly two digits;
+    it is a thousands separator only when the format clearly contains a
+    grouped number (e.g. 1.299,00).
+    """
     try:
-        return float(str(value).replace("€", "").replace(".", "").replace(",", ".").strip())
+        raw=str(value or "").replace("€", "").replace("\u00a0", " ").strip()
+        raw=re.sub(r"[^0-9,.-]", "", raw)
+        if not raw:
+            return None
+        if "," in raw and "." in raw:
+            # European grouped form: 1.299,00 -> 1299.00
+            if raw.rfind(",") > raw.rfind("."):
+                raw=raw.replace(".", "").replace(",", ".")
+            else:
+                # Less common US form: 1,299.00 -> 1299.00
+                raw=raw.replace(",", "")
+        elif "," in raw:
+            raw=raw.replace(",", ".")
+        elif raw.count(".") > 1:
+            # Multiple dots are grouping separators except the final decimal
+            parts=raw.split(".")
+            raw="".join(parts[:-1])+"."+parts[-1]
+        # A single dot followed by 1-2 digits is a decimal separator.
+        return float(raw)
     except Exception:
         return None
 
@@ -223,8 +249,18 @@ def _parse_comprissimo_search(html, query, limit=8):
         if not prices:
             continue
         price = _money_value(prices[-1])
-        if price is None:
+        if price is None or price <= 0:
             continue
+
+        # Sanity-check the pair price/unit-price. The public catalog can contain
+        # unrelated numeric fragments inside a card; reject clearly impossible
+        # combinations such as 2.09 € for 0.10 €/kg (an implied 20.9 kg pack)
+        # unless the product name explicitly indicates a large pack.
+        if unit_kind.lower() in {"kg", "l"} and unit_price > 0:
+            implied_qty = price / unit_price
+            has_large_pack = bool(re.search(r"(?:[1-9]\d{1,3}(?:[,.]\d+)?|\d+(?:[,.]\d+)?)\s*(?:kg|l|litri|litro)", name, re.I))
+            if implied_qty > 10 and not has_large_pack:
+                continue
 
         stores = [store for store in SMART_SHOPPING_STORES if re.search(rf"\b{re.escape(store)}\b", card_text, re.I)]
         store = stores[0] if stores else ""
@@ -313,6 +349,55 @@ def _shopping_cart_summary(live_results, items):
             store_products[store] += 1
     ranking = sorted(store_products.items(), key=lambda x: (-x[1], x[0]))
     return [{"store": store, "matched": count} for store, count in ranking]
+
+def _shopping_need_in_source_unit(required_qty, required_unit, source_unit):
+    """Convert a planned requirement to the unit used by a live price."""
+    ru=str(required_unit or "g").lower()
+    su=str(source_unit or "").lower()
+    if ru==su: return float(required_qty)
+    if ru=="g" and su=="kg": return float(required_qty)/1000.0
+    if ru=="kg" and su=="g": return float(required_qty)*1000.0
+    if ru=="ml" and su=="l": return float(required_qty)/1000.0
+    if ru=="l" and su=="ml": return float(required_qty)*1000.0
+    return None
+
+def _shopping_store_cart(live_results, items, store):
+    """Estimate the actual package cost for one chain, conservatively."""
+    rows=[]
+    total=0.0
+    for r in items:
+        matches=[m for m in live_results.get(r["name"],[]) if (m.get("store") or "").lower()==store.lower()]
+        if not matches:
+            continue
+        matches=sorted(matches,key=lambda m:(m.get("unit_price",999999),m.get("price",999999)))
+        m=matches[0]
+        unit_price=float(m.get("unit_price") or 0)
+        price=float(m.get("price") or 0)
+        if unit_price<=0 or price<=0:
+            continue
+        need=_shopping_need_in_source_unit(float(r.get("need",0) or 0),r.get("unit","g"),m.get("unit_kind",""))
+        if need is None:
+            continue
+        package_qty=price/unit_price
+        if package_qty<=0:
+            continue
+        packages=max(1,int(math.ceil((need/package_qty)-1e-9)))
+        line_total=packages*price
+        rows.append({
+            "name":r["name"],"need":float(r.get("need",0) or 0),"need_unit":r.get("unit","g"),
+            "store":store,"price":price,"unit_price":unit_price,"unit_kind":m.get("unit_kind",""),
+            "package_qty":package_qty,"packages":packages,"line_total":line_total,"match":m
+        })
+        total+=line_total
+    return {"store":store,"rows":rows,"total":round(total,2),"matched":len(rows),"total_items":len(items)}
+
+def _shopping_all_store_carts(live_results, items):
+    carts={}
+    for store in SMART_SHOPPING_STORES:
+        cart=_shopping_store_cart(live_results,items,store)
+        if cart["matched"]>0:
+            carts[store]=cart
+    return carts
 
 FIT_BASE = "https://www.googleapis.com/fitness/v1/users/me"
 FIT_SCOPES = (
@@ -481,12 +566,14 @@ _defaults = {
     "mensa_menus":{}, "next_mensa_menus":{},
     "plan_generation_status":"idle", "plan_generation_message":"", "plan_generation_time":None,
     "plan_editor_selection":"current", "_plan_editor_next":False,
-    "pantry":{}, "shopping_checked":{}, "pantry_consumed_by_meal":{}, "smart_food_advice":None, "registered_meals":{}, "shopping_source":"Tutte", "shopping_strategy":"⚖️ Qualità / prezzo", "shopping_radius":5
+    "pantry":{}, "shopping_checked":{}, "pantry_consumed_by_meal":{}, "smart_food_advice":None, "registered_meals":{}, "shopping_source":"Tutte", "shopping_strategy":"⚖️ Qualità / prezzo", "shopping_radius":5,
+    "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
     "name":"Stefano", "weight":135.0, "height":180.0, "age":40, "sex":"male",
-    "activity_level":"moderata", "deficit":500, "goal_weight":135.0, "water_goal_ml":2500, "quantity_mode":"porzioni"
+    "activity_level":"moderata", "deficit":500, "goal_weight":135.0, "water_goal_ml":2500, "quantity_mode":"porzioni",
+    "diet_goal":"🔻 Dimagrimento", "diet_style":"🥗 Mediterranea", "custom_calorie_target":0
 }.items(): st.session_state.setdefault("p_"+k,v)
 # Compatibilità: se il profilo arriva da una versione precedente, il peso desiderato parte dal peso attuale.
 st.session_state.setdefault("p_goal_weight", float(st.session_state.get("p_weight", 135.0)))
@@ -1367,11 +1454,31 @@ def bmr_mifflin(weight, height, age, sex):
 ACTIVITY_FACTORS={"sedentaria":1.20,"leggera":1.375,"moderata":1.55,"alta":1.725}
 
 def energy_profile():
-    p={k:st.session_state["p_"+k] for k in ["weight","height","age","sex","activity_level","deficit"]}
+    p={k:st.session_state["p_"+k] for k in ["weight","height","age","sex","activity_level"]}
     bmr=bmr_mifflin(float(p["weight"]),float(p["height"]),int(p["age"]),p["sex"])
     maintenance=round(bmr*ACTIVITY_FACTORS[p["activity_level"]])
-    target=max(1200, maintenance-int(p["deficit"]))
-    return {"bmr_est":bmr,"maintenance_est":maintenance,"target":target,"deficit":int(p["deficit"]),"factor":ACTIVITY_FACTORS[p["activity_level"]]}
+    goal=st.session_state.get("p_diet_goal","🔻 Dimagrimento")
+    adjustments={
+        "🔻 Dimagrimento":-500,
+        "⚖️ Mantenimento":0,
+        "🔺 Aumento di peso":300,
+        "💪 Massa muscolare":200,
+    }
+    if goal=="🎯 Calorie personalizzate":
+        custom=int(float(st.session_state.get("p_custom_calorie_target",0) or 0))
+        target=max(1200, custom if custom>0 else maintenance)
+        adjustment=target-maintenance
+    else:
+        adjustment=adjustments.get(goal,-500)
+        target=max(1200, maintenance+adjustment)
+    deficit=max(0, -adjustment)
+    surplus=max(0, adjustment)
+    return {
+        "bmr_est":bmr,"maintenance_est":maintenance,"target":target,
+        "deficit":deficit,"surplus":surplus,"adjustment":adjustment,
+        "factor":ACTIVITY_FACTORS[p["activity_level"]],
+        "diet_goal":goal,"diet_style":st.session_state.get("p_diet_style","🥗 Mediterranea"),
+    }
 
 def weight_projection():
     """Build a clean weekly reference trajectory from today's weight to the goal.
@@ -1482,7 +1589,7 @@ def balance():
     remaining_seconds=max(0.0,(midnight-now).total_seconds())
     remaining_rest=round(bmr_for_projection*(remaining_seconds/86400.0))
     projected_burn=round(observed+remaining_rest) if observed > 0 else 0
-    live_target=round(max(1200, projected_burn-e["deficit"])) if projected_burn > 0 else e["target"]
+    live_target=round(max(1200, projected_burn+e["adjustment"])) if projected_burn > 0 else e["target"]
     native_active=float(h.get("active_calories_today") or 0)
     active_verified=bool(h.get("active_calories_source_verified")) and native_active > 0
     estimated_active=max(0,round(observed-bmr_for_projection*(elapsed/86400.0))) if observed > 0 else 0
@@ -1496,7 +1603,7 @@ def balance():
         "active_observed":active_observed,
         "active_verified":active_verified,
         "bmr_est":e["bmr_est"], "bmr_health":round(bmr_health) if bmr_health > 0 else None,
-        "maintenance":e["maintenance_est"], "deficit":e["deficit"],
+        "maintenance":e["maintenance_est"], "deficit":e["deficit"], "surplus":e.get("surplus",0),
         "using_observed":observed > 0, "source":source,
         "snapshot_date":snapshot_date, "snapshot_is_today":snapshot_date==today_iso,
         "native_verified":native_verified
@@ -2004,7 +2111,7 @@ if st.session_state.page=="Home":
     target_label="budget dinamico" if b["using_observed"] else "target stimato"
     st.markdown(f"""<div class="card"><div class="muted">CALORIE ASSUNTE / {target_label.upper()}</div>
     <div class="big">{b["eaten"]:,} / {b["live_target"]:,} kcal</div>
-    <div class="muted">Consumo previsto: {b["projected_burn"]:,} kcal · deficit: {b["deficit"]:,} kcal · BMR: {b["bmr_health"] or b["bmr_est"]} kcal/giorno</div>
+    <div class="muted">Consumo previsto: {b["projected_burn"]:,} kcal · {'surplus' if b.get('surplus',0)>0 else 'deficit'}: {b.get('surplus',0) if b.get('surplus',0)>0 else b['deficit']:,} kcal · BMR: {b["bmr_health"] or b["bmr_est"]} kcal/giorno</div>
     <div class="{cls}">{msg}</div></div>""".replace(",","."),unsafe_allow_html=True)
     st.progress(min(max(b["eaten"]/max(b["live_target"],1),0),1))
     if b["using_observed"]:
@@ -2355,7 +2462,8 @@ elif st.session_state.page=="Piano":
             ep=energy_profile()
             lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days", st.session_state.get("out_lunch_days",[])))
             dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days", st.session_state.get("out_dinner_days",[])))
-            prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Target alimentare stimato: {ep['target']} kcal/giorno.
+            prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Fabbisogno di mantenimento stimato: {ep['maintenance_est']} kcal/giorno. Target alimentare: {ep['target']} kcal/giorno. Obiettivo: {ep['diet_goal']}. Stile alimentare: {ep['diet_style']}.
+Il piano deve rispettare il target calorico giornaliero come riferimento e lo stile scelto. Per stile iperproteico/proteico privilegia proteine magre, legumi, uova, pesce e latticini compatibili; per Low Carb riduci i carboidrati senza eliminarli arbitrariamente; per Mediterranea privilegia alimenti tipici mediterranei; per Vegetariana escludi carne e pesce; per Ipercalorica privilegia pasti energeticamente densi. Non trasformare lo stile in una prescrizione clinica e non inventare integratori.
 GIORNI PRANZO FUORI CASA DELLA PROSSIMA SETTIMANA: {', '.join(lunch_days) if lunch_days else 'nessuno'}.
 GIORNI CENA FUORI CASA DELLA PROSSIMA SETTIMANA: {', '.join(dinner_days) if dinner_days else 'nessuno'}.
 Per ogni giorno crea esattamente 4 pasti con queste chiavi: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena".
@@ -2692,8 +2800,8 @@ elif st.session_state.page=="Dispensa":
 
             if not live_results:
                 st.markdown(
-                    "<div class='card'><b>👆 Premi “Cerca prezzi aggiornati”</b><br>"
-                    "MyDiet cercherà i prodotti più rilevanti nel catalogo pubblico di Comprissimo e mostrerà i risultati trovati.</div>",
+                    "<div class='card'><b>👆 Premi “Confronta tutta la spesa”</b><br>"
+                    "MyDiet cercherà i prodotti più rilevanti nel catalogo pubblico di Comprissimo e costruirà, quando i dati lo permettono, una lista per ogni catena con totale stimato.</div>",
                     unsafe_allow_html=True,
                 )
             else:
@@ -2722,12 +2830,34 @@ elif st.session_state.page=="Dispensa":
                             else:
                                 st.link_button("🔎 Verifica su Comprissimo", b["search_url"], use_container_width=True)
 
-                cart_summary = _shopping_cart_summary(live_results, to_buy)
-                if cart_summary:
-                    st.markdown("### 🏪 Dove sto trovando più prodotti")
-                    for item in cart_summary[:5]:
-                        st.write(f"**{item['store']}** · {item['matched']} prodotti del paniere trovati")
-                    st.caption("Questo è un indicatore di copertura del catalogo, non un totale della spesa: senza quantità/confezioni omogenee MyDiet non inventa un costo complessivo.")
+                # Dopo il confronto live, costruisci automaticamente una lista per catena.
+                # Il totale è stimato solo quando prezzo e prezzo/unità permettono di ricavare
+                # una confezione coerente; altrimenti il prodotto viene lasciato fuori dal totale.
+                store_carts=_shopping_all_store_carts(live_results,to_buy)
+                if store_carts:
+                    st.session_state.shopping_cart_summary=store_carts
+                    st.session_state.shopping_cart_time=live_time
+                    st.markdown("### 🛒 La tua lista della spesa")
+                    st.caption("Le confezioni necessarie vengono stimate dal rapporto prezzo / prezzo unitario. I totali sono indicativi e vanno verificati prima dell'acquisto.")
+                    ranked_carts=sorted(store_carts.values(),key=lambda c:(-c['matched'],c['total']))
+                    if ranked_carts:
+                        best_cart=ranked_carts[0]
+                        st.success(f"🏆 **Migliore lista completa trovata: {best_cart['store']} · {best_cart['total']:.2f} €** · {best_cart['matched']}/{len(to_buy)} prodotti coperti")
+                    store_names=[c['store'] for c in ranked_carts]
+                    tabs=st.tabs(store_names[:8])
+                    for tab,store in zip(tabs,store_names[:8]):
+                        cart=store_carts[store]
+                        with tab:
+                            st.markdown(f"### {store} · **{cart['total']:.2f} €**")
+                            st.caption(f"Prodotti valorizzati: {cart['matched']}/{len(to_buy)}")
+                            for line in cart['rows']:
+                                st.markdown(f"**{line['name']}**")
+                                st.caption(f"{line['packages']} × confezione da circa {line['package_qty']:.3g} {line['unit_kind']} · {line['price']:.2f} € cad. · **{line['line_total']:.2f} €**")
+                            missing_store=[r['name'] for r in to_buy if not any(x['name']==r['name'] for x in cart['rows'])]
+                            if missing_store:
+                                st.warning("Non valorizzati: " + ", ".join(missing_store[:8]) + ("…" if len(missing_store)>8 else ""))
+                else:
+                    st.warning("Ho trovato prodotti live, ma non abbastanza dati affidabili per costruire un totale per catena.")
 
             st.markdown("### 🧠 Strategia MyDiet")
             if strategy == "💰 Prezzo più basso":
@@ -2960,6 +3090,23 @@ else:
             age=st.number_input("Età",13,100,int(st.session_state.p_age))
             sex=st.selectbox("Sesso",["male","female"],index=0 if st.session_state.p_sex=="male" else 1)
             activity=st.selectbox("Attività abituale",list(ACTIVITY_FACTORS.keys()),index=list(ACTIVITY_FACTORS.keys()).index(st.session_state.p_activity_level))
+            diet_goal=st.selectbox(
+                "🎯 Cosa vuoi ottenere?",
+                ["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"],
+                index=["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"].index(st.session_state.get("p_diet_goal","🔻 Dimagrimento")),
+                help="Il target viene calcolato partendo dal tuo fabbisogno energetico stimato.",
+            )
+            diet_style=st.selectbox(
+                "🥗 Come vuoi mangiare?",
+                ["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","⚡ Ipercalorica","🌱 Vegetariana","🎯 Personalizzata"],
+                index=["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","⚡ Ipercalorica","🌱 Vegetariana","🎯 Personalizzata"].index(st.session_state.get("p_diet_style","🥗 Mediterranea")),
+                help="Lo stile guida la composizione dei pasti. Non modifica da solo il fabbisogno calorico, salvo il target scelto sopra.",
+            )
+            custom_target=st.number_input(
+                "Target kcal personalizzato", min_value=1200, max_value=6000,
+                value=int(st.session_state.get("p_custom_calorie_target",0) or max(1200,energy_profile()["maintenance_est"])),
+                step=50, disabled=(diet_goal!="🎯 Calorie personalizzate"),
+            )
             water_goal=st.select_slider("Obiettivo acqua",options=list(range(1500,4001,250)),value=int(st.session_state.p_water_goal_ml),format_func=lambda x:f"{x/1000:.2f} L/giorno")
             quantity_mode_value=st.radio(
                 "Come vuoi vedere le quantità?",
@@ -2973,7 +3120,14 @@ else:
                 help="Le grammature restano comunque nel motore per calcolare calorie e lista della spesa. Cambia solo ciò che vedi.",
             )
         if st.form_submit_button("Salva",type="primary"):
-            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_goal_weight=goal_weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_water_goal_ml=water_goal; st.session_state.p_quantity_mode=quantity_mode_value; st.success("Profilo aggiornato")
+            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_goal_weight=goal_weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_water_goal_ml=water_goal; st.session_state.p_quantity_mode=quantity_mode_value
+            st.session_state.p_diet_goal=diet_goal; st.session_state.p_diet_style=diet_style; st.session_state.p_custom_calorie_target=int(custom_target)
+            # Keep the legacy deficit field aligned for the weight projection and older state.
+            maintenance_for_save=round(bmr_mifflin(weight,height,age,sex)*ACTIVITY_FACTORS[activity])
+            if diet_goal=="🔻 Dimagrimento": st.session_state.p_deficit=500
+            elif diet_goal=="🎯 Calorie personalizzate": st.session_state.p_deficit=max(0,maintenance_for_save-int(custom_target))
+            else: st.session_state.p_deficit=0
+            st.success("Profilo aggiornato")
     st.caption({
         "porzioni":"👌 Modalità quantità: **Porzioni** — niente bilancia. MyDietApp calcola comunque le quantità in background.",
         "both":"⚖️ Modalità quantità: **Porzioni + grammature**.",
@@ -3004,8 +3158,18 @@ else:
             st.info("Completa i dati del profilo per visualizzare il percorso di peso.")
 
     ep=energy_profile()
-    st.subheader("⚡ Obiettivo energetico")
-    st.metric("Target alimentare stimato",f"{ep['target']:,} kcal/giorno".replace(",","."))
+    st.subheader("⚡ Il tuo profilo alimentare")
+    g1,g2,g3=st.columns(3)
+    g1.metric("Fabbisogno stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
+    g2.metric("Target MyDiet",f"{ep['target']:,} kcal/giorno".replace(",","."))
+    g3.metric("Scostamento",f"{'+' if ep['adjustment']>0 else ''}{ep['adjustment']:,} kcal".replace(",","."))
+    st.caption(f"🎯 {ep['diet_goal']} · 🥗 {ep['diet_style']}")
+    if ep['diet_style'] in {"💪 Iperproteica","🥩 Proteica"}:
+        st.info("💪 Lo stile proteico aumenta la priorità delle fonti proteiche, mantenendo il target calorico scelto.")
+    elif ep['diet_style']=="🔥 Low Carb":
+        st.info("🔥 Lo stile Low Carb riduce la quota di carboidrati rispetto a un piano standard, mantenendo il target calorico.")
+    elif ep['diet_style']=="⚡ Ipercalorica":
+        st.info("⚡ Ipercalorica: lo stile è pensato per un apporto energetico elevato. Per aumentare davvero il peso, abbinalo a un obiettivo di aumento di peso o massa muscolare.")
     st.metric("💧 Obiettivo acqua",f"{water_goal_ml()/1000:.2f} L/giorno")
     c1,c2=st.columns(2); c1.metric("BMR stimato",f"{ep['bmr_est']:,} kcal".replace(",",".")); c2.metric("Mantenimento stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
     b=balance()
