@@ -13,7 +13,7 @@ from collections import defaultdict
 import uuid
 import copy
 import re
-from bs4 import BeautifulSoup
+from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
@@ -113,34 +113,104 @@ def _match_score(query, product):
     return len(q & p) / max(1, len(q))
 
 
-def _parse_comprissimo_search(html, query, limit=8):
-    """Parse the public Comprissimo catalog page without inventing prices.
+class _HTMLNode:
+    __slots__ = ("tag", "attrs", "parent", "children", "text_parts")
+    def __init__(self, tag="root", attrs=None, parent=None):
+        self.tag = tag
+        self.attrs = dict(attrs or [])
+        self.parent = parent
+        self.children = []
+        self.text_parts = []
 
-    The parser is deliberately conservative: a row is returned only when a
-    product name, a euro price and a unit price are all visible in the page.
+    def text(self):
+        parts = list(self.text_parts)
+        for child in self.children:
+            parts.append(child.text())
+        return _clean_spaces(" ".join(parts))
+
+    def find_links(self):
+        found = []
+        stack = list(self.children)
+        while stack:
+            node = stack.pop()
+            if node.tag == "a" and node.attrs.get("href"):
+                found.append(node)
+            stack.extend(reversed(node.children))
+        return found
+
+
+class _ComprissimoHTMLParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = _HTMLNode()
+        self.current = self.root
+        self.h3_nodes = []
+
+    def handle_starttag(self, tag, attrs):
+        node = _HTMLNode(tag.lower(), attrs, self.current)
+        self.current.children.append(node)
+        if node.tag == "h3":
+            self.h3_nodes.append(node)
+        # Keep void elements from changing the current parent.
+        if node.tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+            self.current = node
+
+    def handle_startendtag(self, tag, attrs):
+        node = _HTMLNode(tag.lower(), attrs, self.current)
+        self.current.children.append(node)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        node = self.current
+        while node is not self.root and node.tag != tag:
+            node = node.parent
+        if node is not self.root:
+            self.current = node.parent
+
+    def handle_data(self, data):
+        if data and data.strip():
+            self.current.text_parts.append(data)
+
+
+def _parse_comprissimo_search(html, query, limit=8):
+    """Parse the public Comprissimo catalog without external HTML dependencies.
+
+    A result is accepted only when product name, euro price and unit price are
+    all visible in the same small ancestor block. This keeps the parser
+    conservative and avoids inventing prices.
     """
-    soup = BeautifulSoup(html, "html.parser")
+    parser = _ComprissimoHTMLParser()
+    try:
+        parser.feed(html or "")
+        parser.close()
+    except Exception:
+        return []
+
     products = []
     seen = set()
-    for h3 in soup.find_all("h3"):
-        name = _clean_spaces(h3.get_text(" ", strip=True))
+    for h3 in parser.h3_nodes:
+        name = _clean_spaces(h3.text())
         if not name or name.lower() in {"catalogo prodotti", "confronto prezzi"}:
             continue
+
         card = h3
         card_text = ""
-        # Walk up only a few levels: this avoids swallowing the whole page.
-        for parent in h3.parents:
-            if parent.name not in {"div", "article", "li", "section"}:
+        # Walk up only a few structural levels to avoid using the whole page.
+        for _ in range(6):
+            parent = card.parent
+            if parent is None:
+                break
+            card = parent
+            if card.tag not in {"div", "article", "li", "section"}:
                 continue
-            txt = _clean_spaces(parent.get_text(" ", strip=True))
-            if len(txt) <= 1800 and "Aggiungi" in txt and re.search(r"\d+[,.]\d+\s*€/\s*(kg|L|pz)", txt, re.I):
-                card = parent
+            txt = card.text()
+            if len(txt) <= 1800 and "Aggiungi" in txt and re.search(r"\d+[,.]\d+\s*€?/\s*(kg|L|pz)", txt, re.I):
                 card_text = txt
                 break
         if not card_text:
             continue
 
-        unit_match = re.search(r"(\d+[,.]\d+)\s*€/\s*(kg|L|pz)", card_text, re.I)
+        unit_match = re.search(r"(\d+[,.]\d+)\s*€?/\s*(kg|L|pz)", card_text, re.I)
         if not unit_match:
             continue
         unit_price = _money_value(unit_match.group(1))
@@ -159,13 +229,13 @@ def _parse_comprissimo_search(html, query, limit=8):
         stores = [store for store in SMART_SHOPPING_STORES if re.search(rf"\b{re.escape(store)}\b", card_text, re.I)]
         store = stores[0] if stores else ""
         compare_url = ""
-        for a in card.find_all("a", href=True):
-            href = str(a.get("href", ""))
+        for a in card.find_links():
+            href = str(a.attrs.get("href", ""))
             if "/compare/" in href:
                 compare_url = urllib.parse.urljoin("https://comprissimo.ai", href)
                 break
+
         score = _match_score(query, name)
-        # Avoid irrelevant catalog noise.
         if score < 0.34:
             continue
         key = (name.lower(), store.lower(), round(price, 2), round(unit_price, 2))
