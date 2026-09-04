@@ -232,6 +232,7 @@ _defaults = {
     "plan_week_start":None, "plan_history":{}, "out_lunch_days":["Giovedì"], "out_dinner_days":["Giovedì"],
     "next_meal_plan":None, "next_overrides":{}, "next_week_start":None,
     "next_out_lunch_days":[], "next_out_dinner_days":[],
+    "mensa_menus":{}, "next_mensa_menus":{},
     "plan_generation_status":"idle", "plan_generation_message":"", "plan_generation_time":None,
     "plan_editor_selection":"current", "_plan_editor_next":False,
     "pantry":{}, "shopping_checked":{}, "smart_food_advice":None, "registered_meals":{}
@@ -262,6 +263,20 @@ def ensure_plan_metadata():
     if not st.session_state.get("plan_week_start"):
         st.session_state.plan_week_start=week_start()
 
+def mensa_key(day, meal_name):
+    return f"{day}::{meal_name}"
+
+def current_mensa_menu(day, meal_name):
+    return st.session_state.get("mensa_menus", {}).get(mensa_key(day, meal_name))
+
+def set_mensa_menu(day, meal_name, result_text, analyzed_at=None):
+    st.session_state.setdefault("mensa_menus", {})[mensa_key(day, meal_name)] = {
+        "day": day,
+        "meal": meal_name,
+        "result": result_text,
+        "analyzed_at": analyzed_at or datetime.now(ROME).strftime("%d/%m/%Y %H:%M"),
+    }
+
 def save_next_editor_context():
     if not st.session_state.get("_plan_editor_next"):
         return
@@ -269,6 +284,7 @@ def save_next_editor_context():
     st.session_state.next_overrides=st.session_state.overrides
     st.session_state.next_out_lunch_days=copy.deepcopy(st.session_state.get("out_lunch_days", []))
     st.session_state.next_out_dinner_days=copy.deepcopy(st.session_state.get("out_dinner_days", []))
+    st.session_state.next_mensa_menus=copy.deepcopy(st.session_state.get("mensa_menus", {}))
 
 def restore_current_plan_context():
     if not st.session_state.get("_plan_editor_next"):
@@ -282,6 +298,7 @@ def restore_current_plan_context():
         st.session_state.overrides=current_overrides
     st.session_state.out_lunch_days=copy.deepcopy(st.session_state.get("_editor_current_out_lunch_days", []))
     st.session_state.out_dinner_days=copy.deepcopy(st.session_state.get("_editor_current_out_dinner_days", []))
+    st.session_state.mensa_menus=copy.deepcopy(st.session_state.get("_editor_current_mensa_menus", {}))
     st.session_state.eaten=st.session_state.get("_editor_current_eaten", {})
     st.session_state.registered_meals=st.session_state.get("_editor_current_registered_meals", {})
     st.session_state._plan_editor_next=False
@@ -295,12 +312,14 @@ def enter_next_plan_editor():
     st.session_state._editor_current_overrides=st.session_state.overrides
     st.session_state._editor_current_out_lunch_days=copy.deepcopy(st.session_state.get("out_lunch_days", []))
     st.session_state._editor_current_out_dinner_days=copy.deepcopy(st.session_state.get("out_dinner_days", []))
+    st.session_state._editor_current_mensa_menus=copy.deepcopy(st.session_state.get("mensa_menus", {}))
     st.session_state._editor_current_eaten=st.session_state.eaten
     st.session_state._editor_current_registered_meals=st.session_state.registered_meals
     st.session_state.meal_plan=st.session_state.next_meal_plan
     st.session_state.overrides=st.session_state.next_overrides
     st.session_state.out_lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days", []))
     st.session_state.out_dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days", []))
+    st.session_state.mensa_menus=copy.deepcopy(st.session_state.get("next_mensa_menus", {}))
     st.session_state.eaten={}
     st.session_state.registered_meals={}
     st.session_state._plan_editor_next=True
@@ -319,11 +338,13 @@ def maybe_activate_next_plan():
     st.session_state.overrides=st.session_state.next_overrides or {}
     st.session_state.out_lunch_days=copy.deepcopy(st.session_state.next_out_lunch_days)
     st.session_state.out_dinner_days=copy.deepcopy(st.session_state.next_out_dinner_days)
+    st.session_state.mensa_menus=copy.deepcopy(st.session_state.next_mensa_menus)
     st.session_state.next_meal_plan=None
     st.session_state.next_overrides={}
     st.session_state.next_week_start=None
     st.session_state.next_out_lunch_days=[]
     st.session_state.next_out_dinner_days=[]
+    st.session_state.next_mensa_menus={}
     st.session_state.eaten={}
     st.session_state.registered_meals={}
     for key in list(st.session_state.keys()):
@@ -2021,7 +2042,45 @@ elif st.session_state.page=="Piano":
                                     st.rerun()
 
             else:
-                st.info("📍 Fuori casa — usa Mensa Smart per scegliere dal menu reale.")
+                menu=current_mensa_menu(day,mn)
+                st.info("📍 Fuori casa — scegli dal menu reale.")
+                with st.expander(f"🍴 Mensa Smart · {day} · {mn}", expanded=bool(menu)):
+                    st.caption("Questo menu è associato esclusivamente a questo giorno e a questo pasto. Un altro menu per la cena o per un altro giorno resterà separato.")
+                    if menu:
+                        st.success(f"✅ Menu associato · analizzato {menu.get('analyzed_at','—')}")
+                        st.info(menu.get("result", "Menu analizzato."))
+                        if st.button("📷 Sostituisci menu", key=f"mensa_replace_{day}_{mn}_{st.session_state.plan_view_mode}", use_container_width=True):
+                            st.session_state[f"mensa_replace_open_{day}_{mn}_{st.session_state.plan_view_mode}"]=True
+                            st.rerun()
+                    if (not menu) or st.session_state.get(f"mensa_replace_open_{day}_{mn}_{st.session_state.plan_view_mode}",False):
+                        img=st.camera_input("Scatta il menu", key=f"mensa_camera_{st.session_state.plan_view_mode}_{day}_{mn}") or st.file_uploader("Carica una foto",type=["jpg","jpeg","png"],key=f"mensa_upload_{st.session_state.plan_view_mode}_{day}_{mn}")
+                        if img:
+                            st.image(img,width=420)
+                            if st.button("✨ Analizza e associa a questo pasto",type="secondary",key=f"analyze_mensa_{st.session_state.plan_view_mode}_{day}_{mn}"):
+                                try:
+                                    b=balance()
+                                    rec=meal_recommendation(day,mn,b)
+                                    planned=rec["name"] if rec else "nessun piatto domestico previsto"
+                                    planned_kcal=rec["planned_kcal"] if rec else 0
+                                    if editing_next:
+                                        budget_label=f"target alimentare stimato: {energy_profile()['target']} kcal/giorno"
+                                    else:
+                                        budget_label=f"calorie ancora disponibili oggi: {b['remaining']} kcal"
+                                    prompt=f"""Analizza questo menu fuori casa per il pasto {mn} del giorno {day}.
+Piano previsto: {planned}; calorie previste dal piano: {planned_kcal} kcal; {budget_label}.
+Confronta solo le alternative realmente presenti nella foto. Non inventare piatti.
+Rispondi in modo breve e pratico con:
+🟢 COSA ORDINARE: piatti esatti dalla foto
+💡 PERCHÉ: una frase collegata al piano e al budget
+⚠️ COSA LIMITARE: eventuali elementi più calorici
+"""
+                                    r=gemini_interaction(prompt,image=img)
+                                    set_mensa_menu(day,mn,r)
+                                    st.session_state[f"mensa_replace_open_{day}_{mn}_{st.session_state.plan_view_mode}"]=False
+                                    st.success(f"✅ Menu associato a {day} · {mn}.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Errore analisi menu: {e}")
 
             with st.expander("➕ Aggiungi alimento",expanded=False):
                 suggestions=plan_food_suggestions(day,mn,limit=8)
@@ -2077,6 +2136,7 @@ Restituisci SOLO JSON. La struttura preferita è un oggetto con le chiavi Luned�
             st.session_state.next_week_start=next_start.isoformat()
             st.session_state.next_out_lunch_days=copy.deepcopy(lunch_days)
             st.session_state.next_out_dinner_days=copy.deepcopy(dinner_days)
+            st.session_state.next_mensa_menus={}
             st.session_state.plan_view_mode="next"
             st.session_state.plan_generation_status="success"
             st.session_state.plan_generation_message=f"✓ Piano {week_label(next_start.isoformat())} generato con successo. È una bozza separata: puoi modificarla senza alterare il piano attuale."
@@ -2098,35 +2158,6 @@ Restituisci SOLO JSON. La struttura preferita è un oggetto con le chiavi Luned�
     elif st.session_state.plan_generation_status=="error":
         st.error(st.session_state.plan_generation_message or "La generazione non è riuscita.")
 
-    # ------------------------------------------------------------------
-    # Mensa Smart: contestuale, compatta e separata dal piano principale.
-    # ------------------------------------------------------------------
-    today_lunch_out=out_of_home_meal_configured(current_day_name(),"🍽️ Pranzo")
-    with st.expander("🍴 Mensa Smart", expanded=False):
-        st.caption("Scatta o carica il menu e confrontiamo le proposte reali con il tuo pranzo e con il budget disponibile.")
-        img=st.camera_input("Scatta il menu",key="mensa_camera_v60") or st.file_uploader("Carica una foto",type=["jpg","jpeg","png"],key="mensa_upload_v60")
-        if today_lunch_out:
-            st.info("📍 Oggi il pranzo è configurato come **fuori casa**.")
-        if img:
-            im=Image.open(img); st.image(im,width=420)
-            if st.button("✨ Analizza menu",type="secondary",key="analyze_mensa_v60"):
-                try:
-                    b=balance()
-                    rec=meal_recommendation(current_day_name(),"🍽️ Pranzo",b)
-                    planned=rec["name"] if rec else "nessun pranzo disponibile nel piano"
-                    planned_kcal=rec["planned_kcal"] if rec else 0
-                    prompt=f"""Analizza questo menu fuori casa e consiglia la scelta migliore per oggi.
-Profilo operativo: piano del giorno con pranzo previsto: {planned}; calorie previste dal piano: {planned_kcal} kcal; calorie ancora disponibili oggi: {b['remaining']} kcal.
-Confronta le alternative del menu con il piano, senza inventare piatti non presenti nella foto.
-Rispondi in modo breve e pratico con:
-🟢 COSA ORDINARE: piatti esatti dalla foto
-💡 PERCHÉ: una frase collegata a piano e budget
-⚠️ COSA LIMITARE: eventuali elementi più calorici
-Se il budget residuo non consente di seguire esattamente il piano, proponi la combinazione più vicina e spiegalo."""
-                    r=gemini_interaction(prompt,image=img)
-                    st.info(r)
-                except Exception as e:
-                    st.error(str(e))
 # ---------------- Dispensa ----------------
 elif st.session_state.page=="Dispensa":
     st.title("🛒 Dispensa & Spesa")
