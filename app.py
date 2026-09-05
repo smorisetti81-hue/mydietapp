@@ -18,7 +18,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v68 UI BETA · primo redesign grafico
+# MyDietApp v69 · onboarding + profilo + monitoraggio
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -735,13 +735,16 @@ _defaults = {
     "plan_generation_status":"idle", "plan_generation_message":"", "plan_generation_time":None,
     "plan_editor_selection":"current", "_plan_editor_next":False,
     "pantry":{}, "shopping_checked":{}, "pantry_consumed_by_meal":{}, "smart_food_advice":None, "registered_meals":{}, "shopping_source":"Tutte", "shopping_strategy":"⚖️ Qualità / prezzo", "shopping_radius":5,
-    "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None
+    "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None, "profile_setup_complete":False
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
     "name":"Stefano", "weight":135.0, "height":180.0, "age":40, "sex":"male",
     "activity_level":"moderata", "deficit":500, "goal_weight":135.0, "water_goal_ml":2500, "quantity_mode":"porzioni",
-    "diet_goal":"🔻 Dimagrimento", "diet_style":"🥗 Mediterranea", "custom_calorie_target":0
+    "diet_goal":"🔻 Dimagrimento", "diet_style":"🥗 Mediterranea", "custom_calorie_target":0,
+    "activity_tracking_mode":"🚫 Solo dieta — non monitorare attività",
+    "training_frequency":"5–6 giorni/settimana",
+    "allergies":"", "excluded_foods":""
 }.items(): st.session_state.setdefault("p_"+k,v)
 # Compatibilità: se il profilo arriva da una versione precedente, il peso desiderato parte dal peso attuale.
 st.session_state.setdefault("p_goal_weight", float(st.session_state.get("p_weight", 135.0)))
@@ -2257,12 +2260,129 @@ def sync_google_fit_health(days=14):
 
     return data,hist,diag
 
-# ---------------- Navigation ----------------
+# ---------------- Onboarding / Navigation ----------------
+
+def _profile_complete():
+    return bool(st.session_state.get("profile_setup_complete", False))
+
+def _save_profile_values(values):
+    for key, value in values.items():
+        st.session_state["p_"+key] = value
+    # Keep legacy deficit aligned for the weight projection and older state.
+    maintenance_for_save = round(
+        bmr_mifflin(float(values["weight"]), float(values["height"]), int(values["age"]), values["sex"])
+        * ACTIVITY_FACTORS[values["activity_level"]]
+    )
+    goal = values["diet_goal"]
+    if goal == "🔻 Dimagrimento":
+        st.session_state.p_deficit = 500
+    elif goal == "🎯 Calorie personalizzate":
+        st.session_state.p_deficit = max(0, maintenance_for_save - int(values["custom_calorie_target"]))
+    else:
+        st.session_state.p_deficit = 0
+    st.session_state.profile_setup_complete = True
+
+
+if not _profile_complete():
+    st.markdown("""
+    <div class="hero" style="margin-top:10px;padding:24px 20px;">
+      <div class="small">BENVENUTO IN MYDIET</div>
+      <div style="font-size:1.85rem;font-weight:850;margin:4px 0 6px;">Costruiamo il tuo profilo.</div>
+      <div class="muted">Prima di creare un piano, MyDiet deve conoscere il tuo obiettivo e quanto vuoi monitorare la tua giornata.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.form("first_profile_setup"):
+        st.subheader("👤 Tu")
+        c1,c2 = st.columns(2)
+        with c1:
+            name = st.text_input("Nome", st.session_state.p_name)
+            weight = st.number_input("Peso attuale (kg)", 30., 300., float(st.session_state.p_weight), .1)
+            goal_weight = st.number_input("Peso desiderato (kg)", 30., 300., float(st.session_state.p_goal_weight), .1)
+            height = st.number_input("Altezza (cm)", 100., 230., float(st.session_state.p_height), .5)
+        with c2:
+            age = st.number_input("Età", 13, 100, int(st.session_state.p_age))
+            sex = st.selectbox("Sesso", ["male","female"], index=0 if st.session_state.p_sex == "male" else 1, format_func=lambda x: "Uomo" if x == "male" else "Donna")
+            activity_options = list(ACTIVITY_FACTORS.keys())
+            activity = st.selectbox("Attività abituale", activity_options, index=activity_options.index(st.session_state.p_activity_level), format_func=lambda x: {
+                "sedentaria":"🛋️ Sedentaria", "leggera":"🚶 Leggera", "moderata":"🏃 Moderata", "alta":"🏋️ Alta"
+            }[x])
+            training_frequency = st.selectbox(
+                "Frequenza palestra / allenamento prevista",
+                ["Nessuna","1–2 giorni/settimana","3–4 giorni/settimana","5–6 giorni/settimana","Ogni giorno"],
+                index=["Nessuna","1–2 giorni/settimana","3–4 giorni/settimana","5–6 giorni/settimana","Ogni giorno"].index(st.session_state.get("p_training_frequency","5–6 giorni/settimana"))
+            )
+
+        st.divider()
+        st.subheader("🎯 Il tuo obiettivo")
+        diet_goal = st.radio(
+            "Cosa vuoi ottenere?",
+            ["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"],
+            index=["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"].index(st.session_state.p_diet_goal),
+            horizontal=True
+        )
+        custom_target = st.number_input(
+            "Target kcal personalizzato", 1200, 6000,
+            int(st.session_state.get("p_custom_calorie_target",0) or max(1200, energy_profile()["maintenance_est"])),
+            50, disabled=(diet_goal != "🎯 Calorie personalizzate")
+        )
+
+        st.subheader("🥗 Come vuoi mangiare?")
+        diet_style = st.radio(
+            "Stile alimentare",
+            ["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"],
+            index=["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"].index(st.session_state.p_diet_style),
+            horizontal=True
+        )
+        c1,c2 = st.columns(2)
+        with c1:
+            allergies = st.text_input("Allergie / intolleranze", value=st.session_state.get("p_allergies",""), placeholder="Es. lattosio, frutta secca")
+        with c2:
+            excluded_foods = st.text_input("Alimenti che non vuoi", value=st.session_state.get("p_excluded_foods",""), placeholder="Es. tonno, broccoli")
+
+        st.divider()
+        st.subheader("❤️ Quanto vuoi monitorare?")
+        tracking_options = [
+            "⌚ Smartwatch / dati automatici",
+            "✍️ Inserisco i valori manualmente",
+            "🚫 Solo dieta — non monitorare attività"
+        ]
+        tracking_mode = st.radio(
+            "Scegli il livello di monitoraggio", tracking_options,
+            index=tracking_options.index(st.session_state.get("p_activity_tracking_mode", tracking_options[0])),
+            help="Puoi usare MyDiet anche senza smartwatch. L'attività reale non cambierà automaticamente il tuo piano alimentare."
+        )
+
+        water_goal = st.select_slider("💧 Obiettivo acqua", options=list(range(1500,4001,250)), value=int(st.session_state.p_water_goal_ml), format_func=lambda x:f"{x/1000:.2f} L/giorno")
+        quantity_mode = st.radio(
+            "Come vuoi vedere le quantità?", ["porzioni","both","precise"],
+            index=["porzioni","both","precise"].index(st.session_state.get("p_quantity_mode","porzioni")),
+            format_func=lambda x: {"porzioni":"👌 Porzioni","both":"⚖️ Porzioni + grammature","precise":"⚖️ Grammature precise"}[x],
+            horizontal=True
+        )
+
+        submitted = st.form_submit_button("🚀 Crea il mio profilo", type="primary", use_container_width=True)
+
+    if submitted:
+        _save_profile_values({
+            "name":name, "weight":weight, "goal_weight":goal_weight, "height":height, "age":age, "sex":sex,
+            "activity_level":activity, "training_frequency":training_frequency, "diet_goal":diet_goal,
+            "diet_style":diet_style, "custom_calorie_target":int(custom_target),
+            "activity_tracking_mode":tracking_mode, "allergies":allergies.strip(), "excluded_foods":excluded_foods.strip(),
+            "water_goal_ml":water_goal, "quantity_mode":quantity_mode
+        })
+        st.success("Profilo creato. Ora possiamo costruire il tuo primo piano.")
+        st.session_state.page = "Home"
+        st.rerun()
+
+    st.stop()
+
+# Navigation is compact in V69. It intentionally stays visually secondary to the content.
 pages={"Home":"🏠","Piano":"🍽️","Dispensa":"🛒","Attività":"🏃","Profilo":"👤"}
 cols=st.columns(5)
 for col,(name,icon) in zip(cols,pages.items()):
     with col:
-        if st.button(f"{icon} {name}",key="nav_"+name,use_container_width=True,type="primary" if st.session_state.page==name else "secondary"):
+        if st.button(f"{icon} {name}", key="nav_"+name, use_container_width=True, type="primary" if st.session_state.page==name else "secondary"):
             if st.session_state.page=="Piano" and name!="Piano":
                 restore_current_plan_context()
             st.session_state.page=name; st.rerun()
@@ -2630,7 +2750,7 @@ elif st.session_state.page=="Piano":
             ep=energy_profile()
             lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days", st.session_state.get("out_lunch_days",[])))
             dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days", st.session_state.get("out_dinner_days",[])))
-            prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Fabbisogno di mantenimento stimato: {ep['maintenance_est']} kcal/giorno. Target alimentare: {ep['target']} kcal/giorno. Obiettivo: {ep['diet_goal']}. Stile alimentare: {ep['diet_style']}.
+            prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Fabbisogno di mantenimento stimato: {ep['maintenance_est']} kcal/giorno. Target alimentare: {ep['target']} kcal/giorno. Obiettivo: {ep['diet_goal']}. Stile alimentare: {ep['diet_style']}. Frequenza allenamento prevista: {st.session_state.get('p_training_frequency','non specificata')}. Allergie/intolleranze: {st.session_state.get('p_allergies','nessuna') or 'nessuna'}. Alimenti esclusi: {st.session_state.get('p_excluded_foods','nessuno') or 'nessuno'}.
 Il piano deve rispettare il target calorico giornaliero come riferimento e lo stile scelto. Per stile iperproteico/proteico privilegia proteine magre, legumi, uova, pesce e latticini compatibili; per Low Carb riduci i carboidrati senza eliminarli arbitrariamente; per Mediterranea privilegia alimenti tipici mediterranei; per Vegetariana escludi carne e pesce; per Ipercalorica privilegia pasti energeticamente densi. Non trasformare lo stile in una prescrizione clinica e non inventare integratori.
 GIORNI PRANZO FUORI CASA DELLA PROSSIMA SETTIMANA: {', '.join(lunch_days) if lunch_days else 'nessuno'}.
 GIORNI CENA FUORI CASA DELLA PROSSIMA SETTIMANA: {', '.join(dinner_days) if dinner_days else 'nessuno'}.
@@ -3343,120 +3463,88 @@ elif st.session_state.page=="Attività":
 
 else:
     st.title("👤 Profilo")
-    with st.form("profile"):
+    st.caption("Il profilo guida il target e il piano. Il monitoraggio dell'attività è opzionale.")
+
+    ep = energy_profile()
+    st.markdown(
+        f"<div class='hero' style='padding:18px 20px;margin:8px 0 12px;'>"
+        f"<div class='small'>TARGET DEL TUO PIANO</div>"
+        f"<div class='big'>{ep['target']:,} kcal</div>".replace(",",".") +
+        f"<div class='muted'>{ep['diet_goal']} · {ep['diet_style']}</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    with st.form("profile_edit"):
+        st.subheader("👤 Dati personali")
         c1,c2=st.columns(2)
         with c1:
             name=st.text_input("Nome",st.session_state.p_name)
             weight=st.number_input("Peso attuale (kg)",30.,300.,float(st.session_state.p_weight),.1)
-            goal_weight=st.number_input("Peso desiderato (kg)",30.,300.,float(st.session_state.get("p_goal_weight",st.session_state.p_weight)),.1)
+            goal_weight=st.number_input("Peso desiderato (kg)",30.,300.,float(st.session_state.p_goal_weight),.1)
             height=st.number_input("Altezza (cm)",100.,230.,float(st.session_state.p_height),.5)
         with c2:
             age=st.number_input("Età",13,100,int(st.session_state.p_age))
-            sex=st.selectbox("Sesso",["male","female"],index=0 if st.session_state.p_sex=="male" else 1)
-            activity=st.selectbox("Attività abituale",list(ACTIVITY_FACTORS.keys()),index=list(ACTIVITY_FACTORS.keys()).index(st.session_state.p_activity_level))
-            diet_goal=st.selectbox(
-                "🎯 Cosa vuoi ottenere?",
-                ["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"],
-                index=["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"].index(st.session_state.get("p_diet_goal","🔻 Dimagrimento")),
-                help="Il target viene calcolato partendo dal tuo fabbisogno energetico stimato.",
-            )
-            if st.session_state.get("p_diet_style") == "⚡ Ipercalorica":
-                st.session_state.p_diet_style = "🥗 Mediterranea"
-            diet_style=st.selectbox(
-                "🥗 Come vuoi mangiare?",
-                ["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"],
-                index=["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"].index(st.session_state.get("p_diet_style","🥗 Mediterranea")),
-                help="Lo stile guida la composizione dei pasti. Non modifica da solo il fabbisogno calorico, salvo il target scelto sopra.",
-            )
-            custom_target=st.number_input(
-                "Target kcal personalizzato", min_value=1200, max_value=6000,
-                value=int(st.session_state.get("p_custom_calorie_target",0) or max(1200,energy_profile()["maintenance_est"])),
-                step=50, disabled=(diet_goal!="🎯 Calorie personalizzate"),
-            )
-            water_goal=st.select_slider("Obiettivo acqua",options=list(range(1500,4001,250)),value=int(st.session_state.p_water_goal_ml),format_func=lambda x:f"{x/1000:.2f} L/giorno")
-            quantity_mode_value=st.radio(
-                "Come vuoi vedere le quantità?",
-                ["porzioni","both","precise"],
-                index=["porzioni","both","precise"].index(st.session_state.get("p_quantity_mode","porzioni")),
-                format_func=lambda x: {
-                    "porzioni":"👌 Porzioni — niente bilancia",
-                    "both":"⚖️ Porzioni + grammature",
-                    "precise":"⚖️ Preciso — mostra le grammature"
-                }[x],
-                help="Le grammature restano comunque nel motore per calcolare calorie e lista della spesa. Cambia solo ciò che vedi.",
-            )
-        if st.form_submit_button("Salva",type="primary"):
-            st.session_state.p_name=name; st.session_state.p_weight=weight; st.session_state.p_goal_weight=goal_weight; st.session_state.p_height=height; st.session_state.p_age=age; st.session_state.p_sex=sex; st.session_state.p_activity_level=activity; st.session_state.p_water_goal_ml=water_goal; st.session_state.p_quantity_mode=quantity_mode_value
-            st.session_state.p_diet_goal=diet_goal; st.session_state.p_diet_style=diet_style; st.session_state.p_custom_calorie_target=int(custom_target)
-            # Keep the legacy deficit field aligned for the weight projection and older state.
-            maintenance_for_save=round(bmr_mifflin(weight,height,age,sex)*ACTIVITY_FACTORS[activity])
-            if diet_goal=="🔻 Dimagrimento": st.session_state.p_deficit=500
-            elif diet_goal=="🎯 Calorie personalizzate": st.session_state.p_deficit=max(0,maintenance_for_save-int(custom_target))
-            else: st.session_state.p_deficit=0
-            st.success("Profilo aggiornato")
-    st.caption({
-        "porzioni":"👌 Modalità quantità: **Porzioni** — niente bilancia. MyDietApp calcola comunque le quantità in background.",
-        "both":"⚖️ Modalità quantità: **Porzioni + grammature**.",
-        "precise":"⚖️ Modalità quantità: **Preciso** — grammature visibili."
-    }.get(quantity_mode(), "👌 Modalità quantità: **Porzioni**."))
+            sex=st.selectbox("Sesso",["male","female"],index=0 if st.session_state.p_sex=="male" else 1,format_func=lambda x:"Uomo" if x=="male" else "Donna")
+            activity_options=list(ACTIVITY_FACTORS.keys())
+            activity=st.selectbox("Attività abituale",activity_options,index=activity_options.index(st.session_state.p_activity_level),format_func=lambda x:{"sedentaria":"🛋️ Sedentaria","leggera":"🚶 Leggera","moderata":"🏃 Moderata","alta":"🏋️ Alta"}[x])
+            freq_options=["Nessuna","1–2 giorni/settimana","3–4 giorni/settimana","5–6 giorni/settimana","Ogni giorno"]
+            training_frequency=st.selectbox("Allenamento previsto",freq_options,index=freq_options.index(st.session_state.get("p_training_frequency","5–6 giorni/settimana")))
 
-    # ---------------- Percorso peso ----------------
+        st.subheader("🎯 Obiettivo")
+        goal_options=["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"]
+        diet_goal=st.selectbox("Cosa vuoi ottenere?",goal_options,index=goal_options.index(st.session_state.p_diet_goal))
+        custom_target=st.number_input("Target kcal personalizzato",1200,6000,int(st.session_state.get("p_custom_calorie_target",0) or max(1200,ep["maintenance_est"])),50,disabled=(diet_goal!="🎯 Calorie personalizzate"))
+
+        st.subheader("🥗 Stile alimentare")
+        style_options=["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"]
+        diet_style=st.selectbox("Come vuoi mangiare?",style_options,index=style_options.index(st.session_state.p_diet_style))
+        c1,c2=st.columns(2)
+        with c1: allergies=st.text_input("Allergie / intolleranze",value=st.session_state.get("p_allergies",""))
+        with c2: excluded_foods=st.text_input("Alimenti esclusi",value=st.session_state.get("p_excluded_foods",""))
+
+        st.subheader("❤️ Monitoraggio")
+        tracking_options=["⌚ Smartwatch / dati automatici","✍️ Inserisco i valori manualmente","🚫 Solo dieta — non monitorare attività"]
+        tracking_mode=st.radio("Come vuoi gestire l'attività?",tracking_options,index=tracking_options.index(st.session_state.get("p_activity_tracking_mode",tracking_options[0])),horizontal=True)
+        water_goal=st.select_slider("💧 Obiettivo acqua",options=list(range(1500,4001,250)),value=int(st.session_state.p_water_goal_ml),format_func=lambda x:f"{x/1000:.2f} L/giorno")
+        quantity_mode=st.radio("Visualizzazione quantità",["porzioni","both","precise"],index=["porzioni","both","precise"].index(st.session_state.get("p_quantity_mode","porzioni")),format_func=lambda x:{"porzioni":"👌 Porzioni","both":"⚖️ Porzioni + grammature","precise":"⚖️ Grammature precise"}[x],horizontal=True)
+
+        if st.form_submit_button("Salva modifiche",type="primary",use_container_width=True):
+            _save_profile_values({
+                "name":name,"weight":weight,"goal_weight":goal_weight,"height":height,"age":age,"sex":sex,
+                "activity_level":activity,"training_frequency":training_frequency,"diet_goal":diet_goal,"diet_style":diet_style,
+                "custom_calorie_target":int(custom_target),"activity_tracking_mode":tracking_mode,
+                "allergies":allergies.strip(),"excluded_foods":excluded_foods.strip(),"water_goal_ml":water_goal,"quantity_mode":quantity_mode
+            })
+            st.success("Profilo aggiornato")
+            st.rerun()
+
     st.divider()
-    st.subheader("🎯 Il tuo obiettivo di peso")
+    st.subheader("🎯 Percorso peso")
     projection=weight_projection()
     if projection:
         target_date=projection["target_date"].strftime("%d/%m/%Y")
-        st.caption(f"Da **{projection['current']:.1f} kg** a **{projection['goal']:.1f} kg** · stima indicativa con il deficit attuale di {projection['deficit']} kcal/giorno.")
         c1,c2,c3=st.columns(3)
-        c1.metric("Peso attuale",f"{projection['current']:.1f} kg")
-        c2.metric("Peso desiderato",f"{projection['goal']:.1f} kg")
-        c3.metric("Stima obiettivo",target_date)
-        chart_df=pd.DataFrame(projection["rows"])
-        chart_df["Data"]=pd.to_datetime(chart_df["Data"])
-        st.line_chart(chart_df,x="Data",y="Peso teorico",use_container_width=True,height=360)
-        st.caption(f"Ogni punto rappresenta una settimana. Ritmo teorico: circa {projection['kg_per_week']:.2f} kg/settimana. È una **proiezione orientativa**, non una previsione garantita: il peso reale può scendere più velocemente o più lentamente.")
+        c1.metric("Attuale",f"{projection['current']:.1f} kg")
+        c2.metric("Obiettivo",f"{projection['goal']:.1f} kg")
+        c3.metric("Data stimata",target_date)
+        chart_df=pd.DataFrame(projection["rows"]); chart_df["Data"]=pd.to_datetime(chart_df["Data"])
+        st.line_chart(chart_df,x="Data",y="Peso teorico",use_container_width=True,height=300)
     else:
-        current=float(st.session_state.get("p_weight",0) or 0)
-        goal=float(st.session_state.get("p_goal_weight",current) or current)
-        if goal >= current:
-            st.info("Imposta un **peso desiderato inferiore al peso attuale** per visualizzare il percorso di discesa.")
+        st.info("Imposta un peso desiderato inferiore al peso attuale per visualizzare il percorso di discesa.")
+
+    with st.expander("⚡ Dettagli energetici"):
+        st.write(f"**BMR stimato:** {ep['bmr_est']:,} kcal/giorno".replace(",","."))
+        st.write(f"**Mantenimento stimato:** {ep['maintenance_est']:,} kcal/giorno".replace(",","."))
+        st.write(f"**Target MyDiet:** {ep['target']:,} kcal/giorno".replace(",","."))
+        st.caption("Il piano viene generato sul Target MyDiet. Il BMR è il punto di partenza del calcolo, mentre il mantenimento tiene conto dell'attività abituale prevista.")
+
+    with st.expander("❤️ Monitoraggio attività"):
+        mode=st.session_state.get("p_activity_tracking_mode","🚫 Solo dieta — non monitorare attività")
+        if mode.startswith("⌚"):
+            st.info("Modalità automatica: MyDiet può usare i dati Health Connect quando disponibili.")
+        elif mode.startswith("✍️"):
+            st.info("Modalità manuale: puoi inserire i tuoi valori senza collegare uno smartwatch.")
         else:
-            st.info("Completa i dati del profilo per visualizzare il percorso di peso.")
+            st.info("Modalità solo dieta: nessun monitoraggio dell'attività richiesto.")
+        st.caption("In ogni modalità, l'attività reale non modifica automaticamente il piano alimentare: contribuisce al bilancio della giornata.")
 
-    ep=energy_profile()
-    st.subheader("⚡ Il tuo profilo alimentare")
-    st.caption(f"🎯 {ep['diet_goal']}  ·  🥗 {ep['diet_style']}")
-
-    # Vista essenziale: l'utente deve vedere soprattutto il target su cui viene costruita la dieta.
-    st.markdown(
-        f"<div class='hero' style='padding:18px 20px;margin:8px 0 10px;'>"
-        f"<div class='small'>TARGET GIORNALIERO</div>"
-        f"<div class='big'>{ep['target']:,} kcal</div>".replace(",",".") +
-        f"<div class='muted'>Il piano alimentare viene costruito su questo valore.</div>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-    c1,c2=st.columns(2)
-    c1.metric("💧 Obiettivo acqua",f"{water_goal_ml()/1000:.2f} L/giorno")
-    b=balance()
-    if b["using_observed"]:
-        c2.metric("🔥 Budget di oggi",f"{b['live_target']:,} kcal".replace(",","."))
-    else:
-        c2.metric("📌 Fabbisogno stimato",f"{ep['maintenance_est']:,} kcal".replace(",","."))
-
-    if ep['diet_style'] in {"💪 Iperproteica","🥩 Proteica"}:
-        st.caption("💪 Priorità alle fonti proteiche, mantenendo il target calorico scelto.")
-    elif ep['diet_style']=="🔥 Low Carb":
-        st.caption("🔥 Quota di carboidrati ridotta rispetto a un piano standard, mantenendo il target calorico.")
-
-    with st.expander("ℹ️ Come viene calcolato il target"):
-        st.write(
-            f"**BMR stimato:** {ep['bmr_est']:,} kcal/giorno  ·  "
-            f"**Mantenimento stimato:** {ep['maintenance_est']:,} kcal/giorno  ·  "
-            f"**Variazione obiettivo:** {'+' if ep['adjustment']>0 else ''}{ep['adjustment']:,} kcal/giorno".replace(",",".")
-        )
-        st.caption("Il BMR è il consumo energetico stimato a riposo. Il piano non viene costruito sul BMR: il target parte dal mantenimento stimato e viene modificato in base all'obiettivo scelto.")
-
-    st.caption(f"Acqua di oggi: {water_today_ml()/1000:.2f} L / {water_goal_ml()/1000:.2f} L.")
-    st.caption("Il peso desiderato serve anche a costruire il percorso visivo verso l'obiettivo.")
