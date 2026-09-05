@@ -2318,6 +2318,11 @@ def _save_profile_values(values):
 
 
 if not _profile_complete():
+    # During onboarding the app must remain on the profile setup screen.
+    # A bottom-tab click must never create a misleading new app page before
+    # the minimum profile exists.
+    if st.session_state.get("page") != "Profilo":
+        st.session_state.page = "Profilo"
     st.markdown("""
     <div class="hero" style="margin-top:10px;padding:24px 20px;">
       <div class="small">BENVENUTO IN MYDIET</div>
@@ -3495,10 +3500,14 @@ else:
         st.caption("In ogni modalità, l'attività reale non modifica automaticamente il piano alimentare: contribuisce al bilancio della giornata.")
 
 # ---------------- Fixed bottom navigation ----------------
-_nav_current=st.session_state.get("page","Home")
-_nav_items=[]
-for _name,_icon in APP_PAGES.items():
-    _active="active" if _name==_nav_current else ""
-    _nav_items.append(f'<a class="{_active}" href="?page={urllib.parse.quote(_name)}"><span>{_icon}</span>{_name}</a>')
-st.markdown('<div class="mydiet-bottom-nav">'+''.join(_nav_items)+'</div>',unsafe_allow_html=True)
+# Show the app navigation only after onboarding is complete.
+# This avoids letting a new user leave the profile setup and then be
+# unexpectedly returned to the onboarding screen.
+if _profile_complete():
+    _nav_current=st.session_state.get("page","Home")
+    _nav_items=[]
+    for _name,_icon in APP_PAGES.items():
+        _active="active" if _name==_nav_current else ""
+        _nav_items.append(f'<a class="{_active}" href="?page={urllib.parse.quote(_name)}"><span>{_icon}</span>{_name}</a>')
+    st.markdown('<div class="mydiet-bottom-nav">'+''.join(_nav_items)+'</div>',unsafe_allow_html=True)
 
