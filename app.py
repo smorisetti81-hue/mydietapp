@@ -569,6 +569,23 @@ hr {margin:1.1rem 0 !important;opacity:.35;}
 .mydiet-bottom-nav a.active {background:rgba(255,75,75,.18); color:#fff !important; font-weight:800;}
 @media (min-width:701px) { .mydiet-bottom-nav {left:50%;right:auto;transform:translateX(-50%);width:min(620px,calc(100% - 30px));} }
 
+/* Native Streamlit bottom tabs. URL anchors are intentionally avoided because
+   on some mobile webviews they can create a new document/session. */
+.st-key-bottom_nav {
+    position:fixed !important;
+    left:10px; right:10px; bottom:10px; z-index:9999;
+    padding:7px 6px 6px;
+    border-radius:20px;
+    background:rgba(20,22,30,.96);
+    border:1px solid rgba(255,255,255,.10);
+    box-shadow:0 10px 35px rgba(0,0,0,.35);
+    backdrop-filter:blur(14px);
+}
+.st-key-bottom_nav div[data-testid="stHorizontalBlock"] {gap:4px;}
+.st-key-bottom_nav button {min-height:3.15rem !important; padding:.35rem .15rem !important; border-radius:14px !important; font-size:.72rem !important; line-height:1.05 !important;}
+@media (min-width:701px) { .st-key-bottom_nav {left:50%; right:auto; transform:translateX(-50%); width:min(620px,calc(100% - 30px));} }
+
+
 @media (max-width: 700px) {
     .block-container {max-width:100%;padding: .35rem .75rem 5.5rem;}
     .mydiet-header {padding:4px 2px 12px;}
@@ -853,15 +870,14 @@ def enter_next_plan_editor():
     st.session_state._plan_editor_next=True
     return True
 
-def _apply_requested_page():
-    requested=st.query_params.get("page")
-    if requested not in APP_PAGES or requested==st.session_state.page:
-        return
-    if st.session_state.page=="Piano" and requested!="Piano":
-        restore_current_plan_context()
-    st.session_state.page=requested
-
-_apply_requested_page()
+# Navigation uses Streamlit state buttons instead of URL anchors.
+# URL-based tabs caused mobile browsers/webviews to open a fresh document/session,
+# which could make onboarding/profile appear again.
+if "page" in st.query_params:
+    try:
+        del st.query_params["page"]
+    except Exception:
+        pass
 
 def maybe_activate_next_plan():
     next_start=st.session_state.get("next_week_start")
@@ -3500,14 +3516,22 @@ else:
         st.caption("In ogni modalità, l'attività reale non modifica automaticamente il piano alimentare: contribuisce al bilancio della giornata.")
 
 # ---------------- Fixed bottom navigation ----------------
-# Show the app navigation only after onboarding is complete.
-# This avoids letting a new user leave the profile setup and then be
-# unexpectedly returned to the onboarding screen.
+# Use native Streamlit buttons: changing page stays in the same Streamlit
+# session instead of navigating to a URL/new document on mobile.
+def _navigate_to_page(target):
+    current=st.session_state.get("page","Home")
+    if current=="Piano" and target!="Piano":
+        restore_current_plan_context()
+    st.session_state.page=target
+
 if _profile_complete():
     _nav_current=st.session_state.get("page","Home")
-    _nav_items=[]
-    for _name,_icon in APP_PAGES.items():
-        _active="active" if _name==_nav_current else ""
-        _nav_items.append(f'<a class="{_active}" href="?page={urllib.parse.quote(_name)}"><span>{_icon}</span>{_name}</a>')
-    st.markdown('<div class="mydiet-bottom-nav">'+''.join(_nav_items)+'</div>',unsafe_allow_html=True)
+    with st.container(key="bottom_nav"):
+        _nav_cols=st.columns(len(APP_PAGES), gap="small")
+        for _col, (_name, _icon) in zip(_nav_cols, APP_PAGES.items()):
+            with _col:
+                _label=f"{_icon}\n{_name}"
+                if _col.button(_label, key=f"nav_{_name.lower()}", use_container_width=True, type="primary" if _name==_nav_current else "secondary"):
+                    _navigate_to_page(_name)
+                    st.rerun()
 
