@@ -451,7 +451,7 @@ st.markdown("""
 .block-container {
     max-width: 980px;
     padding-top: .65rem;
-    padding-bottom: 6rem;
+    padding-bottom: 7rem;
 }
 
 /* App header */
@@ -569,55 +569,49 @@ hr {margin:1.1rem 0 !important;opacity:.35;}
 .mydiet-bottom-nav a.active {background:rgba(255,75,75,.18); color:#fff !important; font-weight:800;}
 @media (min-width:701px) { .mydiet-bottom-nav {left:50%;right:auto;transform:translateX(-50%);width:min(620px,calc(100% - 30px));} }
 
-/* Native Streamlit bottom tabs. URL anchors are intentionally avoided because
-   on some mobile webviews they can create a new document/session. */
+/* Native Streamlit bottom tabs. st.bottom owns the viewport positioning. */
+[data-testid="stBottom"] {
+    background: transparent !important;
+    z-index: 9999 !important;
+    padding: 0 .5rem .5rem !important;
+}
 .st-key-bottom_nav {
-    position:fixed !important;
-    left:10px; right:10px; bottom:10px; z-index:9999;
-    padding:7px 6px 6px;
-    border-radius:20px;
-    background:rgba(20,22,30,.96);
-    border:1px solid rgba(255,255,255,.10);
-    box-shadow:0 10px 35px rgba(0,0,0,.35);
-    backdrop-filter:blur(14px);
+    width: min(680px, 100%) !important;
+    margin: 0 auto !important;
+    padding: 6px !important;
+    border-radius: 18px;
+    background: rgba(20,22,30,.96);
+    border: 1px solid rgba(255,255,255,.10);
+    box-shadow: 0 10px 35px rgba(0,0,0,.35);
+    backdrop-filter: blur(14px);
 }
 .st-key-bottom_nav div[data-testid="stHorizontalBlock"] {
-    gap:4px !important;
-    flex-wrap:nowrap !important;
-    align-items:stretch !important;
-    width:100% !important;
+    gap: 2px !important;
+    flex-wrap: nowrap !important;
+    align-items: stretch !important;
+    width: 100% !important;
 }
 .st-key-bottom_nav div[data-testid="stHorizontalBlock"] > div {
-    min-width:0 !important;
-    flex:1 1 0 !important;
-    width:20% !important;
+    min-width: 0 !important;
+    flex: 1 1 0 !important;
+    width: 20% !important;
 }
 .st-key-bottom_nav button {
-    width:100% !important;
-    min-height:3.15rem !important;
-    padding:.30rem .10rem !important;
-    border-radius:14px !important;
-    font-size:.68rem !important;
-    line-height:1.05 !important;
-    white-space:normal !important;
+    width: 100% !important;
+    min-height: 2.75rem !important;
+    padding: .32rem .05rem !important;
+    margin: 0 !important;
+    border-radius: 13px !important;
+    font-size: .68rem !important;
+    line-height: 1 !important;
+    white-space: nowrap !important;
 }
 @media (max-width: 700px) {
-    .st-key-bottom_nav {
-        left:7px; right:7px; bottom:7px;
-        padding:6px 5px 5px;
-        border-radius:18px;
-    }
-    .st-key-bottom_nav div[data-testid="stHorizontalBlock"] {
-        flex-wrap:nowrap !important;
-        gap:2px !important;
-    }
-    .st-key-bottom_nav button {
-        min-height:3.35rem !important;
-        font-size:.62rem !important;
-        padding:.28rem .05rem !important;
-    }
+    [data-testid="stBottom"] { padding: 0 .35rem calc(.35rem + env(safe-area-inset-bottom)) !important; }
+    .st-key-bottom_nav { padding: 5px !important; border-radius: 17px; }
+    .st-key-bottom_nav button { min-height: 2.7rem !important; font-size: .62rem !important; padding: .28rem .02rem !important; }
 }
-@media (min-width:701px) { .st-key-bottom_nav {left:50%; right:auto; transform:translateX(-50%); width:min(620px,calc(100% - 30px));} }
+
 
 
 @media (max-width: 700px) {
@@ -3560,12 +3554,13 @@ def _navigate_to_page(target):
 
 if _profile_complete():
     _nav_current=st.session_state.get("page","Home")
-    with st.container(key="bottom_nav"):
-        _nav_cols=st.columns(len(APP_PAGES), gap="small")
-        for _col, (_name, _icon) in zip(_nav_cols, APP_PAGES.items()):
-            with _col:
-                _label=f"{_icon}\n{_name}"
-                if _col.button(_label, key=f"nav_{_name.lower()}", use_container_width=True, type="primary" if _name==_nav_current else "secondary"):
-                    _navigate_to_page(_name)
-                    st.rerun()
+    with st.bottom:
+        with st.container(key="bottom_nav"):
+            _nav_cols=st.columns(len(APP_PAGES), gap="xxsmall", wrap=False)
+            for _col, (_name, _icon) in zip(_nav_cols, APP_PAGES.items()):
+                with _col:
+                    _label=f"{_icon}  {_name}"
+                    if _col.button(_label, key=f"nav_{_name.lower()}", use_container_width=True, type="primary" if _name==_nav_current else "secondary"):
+                        _navigate_to_page(_name)
+                        st.rerun()
 
