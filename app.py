@@ -14,6 +14,7 @@ import uuid
 import copy
 import re
 import math
+import os
 from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -870,6 +871,98 @@ for k,v in {
 # Compatibilità: se il profilo arriva da una versione precedente, il peso desiderato parte dal peso attuale.
 st.session_state.setdefault("p_goal_weight", float(st.session_state.get("p_weight", 135.0)))
 
+# ============================================================
+# Persistent browser/session state
+# Streamlit session_state is intentionally ephemeral. MyDiet keeps a
+# lightweight local snapshot on the app server and a stable anonymous ID
+# in the URL so a browser session recreated by navigation can be restored.
+# Sensitive OAuth tokens are deliberately excluded.
+# ============================================================
+_PERSIST_DIR = os.path.join("/tmp", "mydietapp_state")
+_PERSIST_FILE = os.path.join(_PERSIST_DIR, "state_{token}.json")
+_PERSIST_KEYS = [
+    "page", "meal_plan", "overrides", "eaten", "manual_foods", "health",
+    "health_history", "diagnostics", "last_sync", "water_history",
+    "plan_week_start", "plan_history", "out_lunch_days", "out_dinner_days",
+    "next_meal_plan", "next_overrides", "next_week_start",
+    "next_out_lunch_days", "next_out_dinner_days", "mensa_menus",
+    "next_mensa_menus", "plan_generation_status", "plan_generation_message",
+    "plan_generation_time", "plan_editor_selection", "_plan_editor_next",
+    "plan_edit_meal", "pantry", "shopping_checked", "pantry_consumed_by_meal",
+    "smart_food_advice", "registered_meals", "shopping_source",
+    "shopping_strategy", "shopping_radius", "shopping_cart_mode",
+    "shopping_cart_summary", "shopping_cart_time", "food_kcal_cache",
+    "profile_setup_complete",
+    # Profile values
+    "p_name", "p_weight", "p_goal_weight", "p_height", "p_age", "p_sex",
+    "p_activity_level", "p_deficit", "p_water_goal_ml", "p_quantity_mode",
+    "p_diet_goal", "p_diet_style", "p_custom_calorie_target",
+    "p_activity_tracking_mode", "p_training_frequency", "p_allergies",
+    "p_excluded_foods",
+]
+
+def _state_token():
+    return str(st.query_params.get("mdid", "") or "").strip()
+
+def _safe_json_value(value):
+    try:
+        json.dumps(value, ensure_ascii=False)
+        return value
+    except Exception:
+        return None
+
+def _persistent_snapshot():
+    data={}
+    for key in _PERSIST_KEYS:
+        if key in st.session_state:
+            value=_safe_json_value(st.session_state[key])
+            if value is not None:
+                data[key]=value
+    return data
+
+def _persist_app_state():
+    token=_state_token()
+    if not token:
+        return
+    try:
+        os.makedirs(_PERSIST_DIR, exist_ok=True)
+        tmp=_PERSIST_FILE.format(token=token)+".tmp"
+        with open(tmp,"w",encoding="utf-8") as f:
+            json.dump(_persistent_snapshot(), f, ensure_ascii=False, separators=(",",":"))
+        os.replace(tmp, _PERSIST_FILE.format(token=token))
+    except Exception:
+        # Persistence must never break the app itself.
+        pass
+
+def _restore_app_state():
+    token=_state_token()
+    if not token:
+        return False
+    path=_PERSIST_FILE.format(token=token)
+    try:
+        with open(path,"r",encoding="utf-8") as f:
+            data=json.load(f)
+        if not isinstance(data,dict):
+            return False
+        for key,value in data.items():
+            if key in _PERSIST_KEYS:
+                st.session_state[key]=value
+        return bool(st.session_state.get("profile_setup_complete",False))
+    except Exception:
+        return False
+
+# If Streamlit creates a fresh session while the browser keeps the same app
+# URL, restore the previous MyDiet state before onboarding/navigation runs.
+if not st.session_state.get("_persistent_state_loaded", False):
+    _restore_app_state()
+    st.session_state["_persistent_state_loaded"] = True
+
+# Save before every explicit rerun so meal edits, registrations, pantry
+# changes and navigation survive a recreated Streamlit session.
+def _mydiet_rerun():
+    _persist_app_state()
+    st.rerun()
+
 # Mobile navigation: the main app navigation is rendered as a fixed bottom tab bar.
 APP_PAGES={"Home":"🏠","Piano":"🍽️","Dispensa":"🛒","Attività":"🏃","Profilo":"👤"}
 
@@ -1687,7 +1780,7 @@ def show_daily_meal_recommendation(meal_name, day, balance_data):
             type="primary"
         ):
             set_meal_registered(day, meal_name, True)
-            st.rerun()
+            _mydiet_rerun()
 
 def grocery():
     """Aggregate quantities required by the active weekly plan."""
@@ -2491,6 +2584,10 @@ def _save_profile_values(values):
     else:
         st.session_state.p_deficit = 0
     st.session_state.profile_setup_complete = True
+    # First successful profile save creates the anonymous browser identity.
+    if not _state_token():
+        st.query_params["mdid"] = uuid.uuid4().hex
+    _persist_app_state()
 
 
 if not _profile_complete():
@@ -2596,7 +2693,7 @@ if not _profile_complete():
         })
         st.success("Profilo creato. Ora possiamo costruire il tuo primo piano.")
         st.session_state.page = "Home"
-        st.rerun()
+        _mydiet_rerun()
 
     st.stop()
 
@@ -2663,14 +2760,14 @@ if st.session_state.page=="Home":
         with b1:
             if st.button("− 250 ml",key="water_minus",use_container_width=True):
                 add_water_ml(-250)
-                st.rerun()
+                _mydiet_rerun()
         with b2:
             if st.button("+ 250 ml",key="water_plus",use_container_width=True,type="primary"):
                 add_water_ml(250)
-                st.rerun()
+                _mydiet_rerun()
         if st.button("Azzera oggi",key="water_reset",use_container_width=True):
             st.session_state.water_history[today()]=0
-            st.rerun()
+            _mydiet_rerun()
     st.caption("Registrazione manuale · storico conservato per data in questa sessione.")
 
     # ---------------- What should I eat today? ----------------
@@ -2720,7 +2817,7 @@ if st.session_state.page=="Home":
                         type="primary"
                     ):
                         set_meal_registered(d,next_name,True)
-                        st.rerun()
+                        _mydiet_rerun()
     else:
         if registered_count == 0:
             st.info("🌅 **Inizia dalla colazione.** Quando registrerai un pasto, MyDiet passerà automaticamente al successivo. Nessun pasto viene considerato mangiato solo in base all'orario.")
@@ -2753,7 +2850,7 @@ if st.session_state.page=="Home":
                     if registered:
                         if st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True):
                             set_meal_registered(d,mn,False)
-                            st.rerun()
+                            _mydiet_rerun()
                     else:
                         st.caption("Da registrare")
                 with c3:
@@ -2797,7 +2894,7 @@ if st.session_state.page=="Home":
         with c2:k=st.number_input("kcal",0,3000,500,10,key="manual_food_kcal_home")
         if st.button("Registra",type="primary",key="manual_food_register_home") and n.strip():
             st.session_state.manual_foods.append({"name":n.strip(),"kcal":k,"date":today()})
-            st.rerun()
+            _mydiet_rerun()
 
     if st.session_state.last_sync: st.caption("Ultima sincronizzazione Health: "+st.session_state.last_sync)
 
@@ -2830,7 +2927,7 @@ elif st.session_state.page=="Piano":
             restore_current_plan_context()
         st.session_state.plan_view_mode=new_view
         st.session_state.plan_edit_meal=None
-        st.rerun()
+        _mydiet_rerun()
     else:
         if new_view=="next" and has_next and not st.session_state.get("_plan_editor_next",False):
             enter_next_plan_editor()
@@ -2875,10 +2972,10 @@ elif st.session_state.page=="Piano":
                         if st.button("✏️ Apri bozza",key="open_next_compact",use_container_width=True,type="primary"):
                             st.session_state.plan_view_mode="current"
                             st.session_state._force_plan_next_view=True
-                            st.rerun()
+                            _mydiet_rerun()
                     with b:
                         if st.button("🔄 Rigenera",key="regen_next_compact",use_container_width=True):
-                            st.session_state.force_next_generation=True; st.rerun()
+                            st.session_state.force_next_generation=True; _mydiet_rerun()
                 else:
                     st.caption("La prossima settimana viene preparata separatamente. Il piano attuale non viene toccato.")
                     with st.expander("🍴 Pasti fuori casa",expanded=False):
@@ -2895,10 +2992,10 @@ elif st.session_state.page=="Piano":
                         st.session_state.next_out_lunch_days=sorted(next_lunch_set,key=days_week.index)
                         st.session_state.next_out_dinner_days=sorted(next_dinner_set,key=days_week.index)
                     if st.button("✨ Genera piano della prossima settimana",key="generate_next_compact",use_container_width=True,type="primary"):
-                        st.session_state.force_next_generation=True; st.rerun()
+                        st.session_state.force_next_generation=True; _mydiet_rerun()
 
         if st.session_state.pop("_force_plan_next_view",False) and has_next:
-            enter_next_plan_editor(); st.session_state.plan_view_mode="next"; st.session_state.plan_edit_meal=None; st.rerun()
+            enter_next_plan_editor(); st.session_state.plan_view_mode="next"; st.session_state.plan_edit_meal=None; _mydiet_rerun()
 
         if st.session_state.plan_generation_status=="running":
             st.info("🤖 Sto generando la bozza…")
@@ -2931,7 +3028,7 @@ elif st.session_state.page=="Piano":
                 st.session_state.plan_generation_message=f"✓ Bozza {week_label(next_start.isoformat())} pronta. Il piano attuale non è stato modificato."
                 st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
                 st.session_state.eaten={}; st.session_state.registered_meals={}
-                st.rerun()
+                _mydiet_rerun()
             except Exception as e:
                 st.session_state.plan_generation_status="error"
                 st.session_state.plan_generation_message=f"✕ Generazione non riuscita: {e}"
@@ -2976,10 +3073,10 @@ elif st.session_state.page=="Piano":
                     with right:
                         if not editing_next and meal_registered:
                             if st.button("↩",key=f"undo_{day}_{mn}",help="Annulla registrazione",use_container_width=True):
-                                set_meal_registered(day,mn,False); st.rerun()
+                                set_meal_registered(day,mn,False); _mydiet_rerun()
                     if st.button("✏️ Modifica solo questo pasto",key=f"edit_meal_{day}_{mn}",use_container_width=True):
                         st.session_state.plan_edit_meal=None if edit_key==(day,mn) else (day,mn)
-                        st.rerun()
+                        _mydiet_rerun()
 
                     if edit_key==(day,mn):
                         st.markdown("**Modifica questo pasto**")
@@ -2999,13 +3096,13 @@ elif st.session_state.page=="Piano":
                                         if quantity_mode()=="precise": set_item_qty(item,current_qty-step)
                                         else: set_item_qty(item,max(0.5,mult-0.5)*float(item.get('qty',1)))
                                         if editing_next: save_next_editor_context()
-                                        st.rerun()
+                                        _mydiet_rerun()
                                 with c:
                                     if st.button("+",key=f"edit_plus_{item['id']}",use_container_width=True):
                                         if quantity_mode()=="precise": set_item_qty(item,current_qty+step)
                                         else: set_item_qty(item,(mult+0.5)*float(item.get('qty',1)))
                                         if editing_next: save_next_editor_context()
-                                        st.rerun()
+                                        _mydiet_rerun()
                                 with st.expander(f"⚙️ {item['name']}",expanded=False):
                                     a,b,c,d=st.columns([3,1,1,1])
                                     with a: new_name=st.text_input("Alimento",value=item['name'],key=f"rn_{item['id']}")
@@ -3022,7 +3119,7 @@ elif st.session_state.page=="Piano":
                                                 st.session_state.overrides[item['id']]={"multiplier":1}
                                             st.session_state.eaten[item['id']]=False
                                             st.session_state.registered_meals[_meal_key(day,mn)]=False
-                                            st.session_state.plan_edit_meal=None; st.rerun()
+                                            st.session_state.plan_edit_meal=None; _mydiet_rerun()
                                     with y:
                                         if st.button("✕ Rimuovi",key=f"remove_{item['id']}",use_container_width=True):
                                             if editing_next:
@@ -3030,7 +3127,7 @@ elif st.session_state.page=="Piano":
                                             else:
                                                 st.session_state.overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}
                                             st.session_state.eaten[item['id']]=False; st.session_state.registered_meals[_meal_key(day,mn)]=False
-                                            st.session_state.plan_edit_meal=None; st.rerun()
+                                            st.session_state.plan_edit_meal=None; _mydiet_rerun()
                         else:
                             st.info("Questo pasto è fuori casa.")
 
@@ -3050,7 +3147,7 @@ elif st.session_state.page=="Piano":
                                             prompt=f"Analizza questo menu fuori casa per {mn} del giorno {day}. Piano previsto: {planned}; calorie previste: {planned_kcal}; {budget_label}. Confronta solo ciò che compare nella foto. Rispondi con 🟢 COSA ORDINARE, 💡 PERCHÉ, ⚠️ COSA LIMITARE."
                                             set_mensa_menu(day,mn,gemini_interaction(prompt,image=img))
                                             if editing_next: save_next_editor_context()
-                                            st.rerun()
+                                            _mydiet_rerun()
                                         except Exception as e: st.error(f"Errore analisi menu: {e}")
                         with st.expander("➕ Aggiungi alimento",expanded=False):
                             suggestions=plan_food_suggestions(day,mn,limit=8)
@@ -3061,7 +3158,7 @@ elif st.session_state.page=="Piano":
                                     if st.button("+ Aggiungi",key=f"suggest_{day}_{mn}_{idx}",use_container_width=True):
                                         st.session_state.meal_plan[day][mn]['ingredients'].append({"id":sid(),"name":sug['name'],"qty":sug['qty'],"unit":sug['unit'],"kcal":sug['kcal']})
                                         if editing_next: save_next_editor_context()
-                                        st.rerun()
+                                        _mydiet_rerun()
                             a,b,c=st.columns([3.2,1,1])
                             with a: n=st.text_input("Alimento",key=f"n_{day}_{mn}",placeholder="Es. pizza, banana, yogurt...")
                             with b: q=st.number_input("Qtà",min_value=.1,value=1.,step=1.,key=f"q_{day}_{mn}")
@@ -3077,7 +3174,7 @@ elif st.session_state.page=="Piano":
                                     st.session_state.meal_plan[day][mn]["name"] = ", ".join(active_names[:3])
                                     if editing_next: save_next_editor_context()
                                     st.success(f"{n.strip()} aggiunto · circa {estimate['kcal']} kcal ({estimate['source']}).")
-                                    st.rerun()
+                                    _mydiet_rerun()
                                 except Exception as e:
                                     st.error(str(e))
 
@@ -3126,7 +3223,7 @@ elif st.session_state.page=="Dispensa":
                         if not st.session_state.get(buy_open_key,False):
                             if st.button("✓ Ho comprato",key="buy_"+key.replace("|","_"),use_container_width=True):
                                 st.session_state[buy_open_key]=True
-                                st.rerun()
+                                _mydiet_rerun()
                         else:
                             st.markdown("**Quanto hai comprato?**")
                             default_qty=max(0.1,float(r["need"]))
@@ -3144,11 +3241,11 @@ elif st.session_state.page=="Dispensa":
                                     add_pantry_qty(r["name"],r["unit"],float(qty))
                                     st.session_state.shopping_checked[key]=True
                                     st.session_state[buy_open_key]=False
-                                    st.rerun()
+                                    _mydiet_rerun()
                             with b2:
                                 if st.button("Annulla",key="cancel_buy_"+key.replace("|","_"),use_container_width=True):
                                     st.session_state[buy_open_key]=False
-                                    st.rerun()
+                                    _mydiet_rerun()
             st.divider()
             st.caption("💡 La quantità indicata è solo il fabbisogno stimato: quando fai la spesa puoi inserire **meno, uguale o più** di quella quantità. MyDiet aggiungerà alla dispensa esattamente quanto hai acquistato.")
 
@@ -3200,7 +3297,7 @@ elif st.session_state.page=="Dispensa":
                     live = _shopping_live_for_items(to_buy)
                 st.session_state.shopping_live_results = live
                 st.session_state.shopping_live_time = datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
-                st.rerun()
+                _mydiet_rerun()
 
             live_results = st.session_state.get("shopping_live_results", {})
             live_time = st.session_state.get("shopping_live_time")
@@ -3405,11 +3502,11 @@ elif st.session_state.page=="Dispensa":
                     with c3:
                         if st.button("−",key="pantry_minus_"+item["key"].replace("|","_"),use_container_width=True):
                             step=1 if item["unit"]=="pz" else 50
-                            add_pantry_qty(item["name"],item["unit"],-step); st.rerun()
+                            add_pantry_qty(item["name"],item["unit"],-step); _mydiet_rerun()
                     with c4:
                         if st.button("+",key="pantry_plus_"+item["key"].replace("|","_"),use_container_width=True):
                             step=1 if item["unit"]=="pz" else 50
-                            add_pantry_qty(item["name"],item["unit"],step); st.rerun()
+                            add_pantry_qty(item["name"],item["unit"],step); _mydiet_rerun()
         else:
             st.info("La dispensa è vuota. Puoi aggiungere qui quello che hai già in casa.")
 
@@ -3428,7 +3525,7 @@ elif st.session_state.page=="Dispensa":
                 suggested_unit=next((x["unit"] for x in suggestions if x["name"]==selected),None)
                 if suggested_unit in ("g","ml","pz"): st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
             if st.button("Salva in dispensa",type="primary") and custom_name.strip() and qty>0:
-                add_pantry_qty(custom_name.strip(),unit,qty); st.rerun()
+                add_pantry_qty(custom_name.strip(),unit,qty); _mydiet_rerun()
 
     with st.expander("ℹ️ Come funziona la dispensa",expanded=False):
         st.write("Quando registri un pasto come mangiato, MyDietApp scala dalla dispensa solo la quantità che era effettivamente presente. Se annulli il pasto, quella quantità viene ripristinata.")
@@ -3462,7 +3559,10 @@ elif st.session_state.page=="Attività":
                 if r.status_code==200:
                     x=r.json(); st.session_state.access_token=x["access_token"]
                     if x.get("refresh_token"): st.session_state.refresh_token=x["refresh_token"]
-                    st.query_params.clear(); st.rerun()
+                    _mdid = _state_token()
+                    st.query_params.clear()
+                    if _mdid: st.query_params["mdid"] = _mdid
+                    _mydiet_rerun()
                 else: st.error("Autorizzazione Google non riuscita: "+r.text[:500])
             if "access_token" not in st.session_state:
                 url="https://accounts.google.com/o/oauth2/v2/auth?client_id="+urllib.parse.quote(cid.strip())+"&redirect_uri="+urllib.parse.quote(ru.strip(),safe="")+"&response_type=code&scope="+urllib.parse.quote(FIT_SCOPES,safe="")+"&access_type=offline&prompt=consent"
@@ -3477,7 +3577,7 @@ elif st.session_state.page=="Attività":
                         data["provider"]=provider.info()
                         st.session_state.health=data; st.session_state.health_history=hist; st.session_state.diagnostics=diag
                         st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
-                        st.rerun()
+                        _mydiet_rerun()
                     except Exception as e: st.error(f"Sincronizzazione fallita: {e}")
 
     # IMPORTANT: Native bridge data is rendered outside the Google-auth branch.
@@ -3639,7 +3739,7 @@ else:
                 "allergies":allergies.strip(),"excluded_foods":excluded_foods.strip(),"water_goal_ml":water_goal,"quantity_mode":quantity_mode
             })
             st.success("Profilo aggiornato")
-            st.rerun()
+            _mydiet_rerun()
 
     st.divider()
     st.subheader("🎯 Percorso peso")
@@ -3671,6 +3771,9 @@ else:
             st.info("Modalità solo dieta: nessun monitoraggio dell'attività richiesto.")
         st.caption("In ogni modalità, l'attività reale non modifica automaticamente il piano alimentare: contribuisce al bilancio della giornata.")
 
+# Persist the latest state at the end of a normal script run as well.
+_persist_app_state()
+
 # ---------------- Fixed bottom navigation ----------------
 # Use native Streamlit buttons: changing page stays in the same Streamlit
 # session instead of navigating to a URL/new document on mobile.
@@ -3690,5 +3793,5 @@ if _profile_complete():
                     _label=f"{_icon}  {_name}"
                     if _col.button(_label, key=f"nav_{_name.lower()}", use_container_width=True, type="primary" if _name==_nav_current else "secondary"):
                         _navigate_to_page(_name)
-                        st.rerun()
+                        _mydiet_rerun()
 
