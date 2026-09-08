@@ -55,8 +55,20 @@ UI_BETA_CSS = """
 .big {font-size:2.15rem;font-weight:850;line-height:1.05;}.muted,.small {color:#9da4b0;font-size:.84rem;}.ok {color:#5bd39a;font-weight:750;}.bad {color:#ff7279;font-weight:750;}
 .mydiet-kcal-card {border:1px solid rgba(255,255,255,.09);border-radius:26px;padding:21px;background:radial-gradient(circle at 92% 8%,rgba(215,25,32,.20),transparent 34%),linear-gradient(145deg,#181b22,#0f1115);box-shadow:0 12px 34px rgba(0,0,0,.22);}.mydiet-kcal-label {color:#aeb5c0;font-size:.76rem;font-weight:800;letter-spacing:.08em;}.mydiet-kcal-number {font-size:2.75rem;font-weight:950;letter-spacing:-.055em;line-height:1;}.mydiet-kcal-card .mydiet-kcal-sub {margin-top:8px;color:#aeb5c0;font-size:.86rem;}.mydiet-kcal-card .mydiet-kcal-sub b{color:#f5f7fa;}.mydiet-kcal-target{font-size:.76rem;color:#8f96a2;margin-top:3px;}.mydiet-meal-card{border:1px solid rgba(255,255,255,.09);border-radius:22px;padding:17px;background:linear-gradient(145deg,#15181e,#101216);box-shadow:0 8px 24px rgba(0,0,0,.15);}.mydiet-meal-title {font-size:1.02rem;font-weight:850;color:#f5f7fa;}.mydiet-meal-name{font-size:1.2rem;font-weight:900;margin-top:5px;letter-spacing:-.02em;}.mydiet-meal-meta{color:#9da4b0;font-size:.82rem;margin-top:6px;}.mydiet-section {font-size:1.12rem;font-weight:850;margin:21px 0 8px;}
 div[data-testid="stBottom"] {background:rgba(11,13,16,.96);border-top:1px solid rgba(255,255,255,.10);backdrop-filter:blur(16px);}#bottom_nav {padding:.18rem .25rem .32rem;}#bottom_nav div[data-testid="stHorizontalBlock"] {gap:.2rem !important;}#bottom_nav div[data-testid="stButton"] button {min-height:3.05rem;border-radius:15px;border:0;font-size:.76rem;font-weight:700;padding:.25rem .15rem;}#bottom_nav div[data-testid="stButton"] button[kind="primary"] {background:#d71920;color:white;box-shadow:0 4px 16px rgba(215,25,32,.25);}#bottom_nav div[data-testid="stButton"] button[kind="secondary"] {background:transparent;color:#aeb5c0;}
-button,[data-testid="stBaseButton-secondary"],[data-testid="stBaseButton-primary"] {border-radius:14px !important;}[data-testid="stMetric"] {background:#111419;border:1px solid rgba(255,255,255,.07);border-radius:18px;padding:10px 12px;}[data-testid="stExpander"] details {border-color:rgba(255,255,255,.08);background:#101318;border-radius:17px;}
-@media (max-width:700px){.block-container{padding-left:.8rem;padding-right:.8rem;padding-top:.35rem;padding-bottom:5.8rem;}h1{font-size:1.65rem !important;}h2{font-size:1.28rem !important;}h3{font-size:1.08rem !important;}.card{padding:14px;border-radius:19px}.hero{padding:17px;border-radius:21px}.big{font-size:1.8rem}.mydiet-logo{width:42px;height:42px;border-radius:14px;font-size:22px}.mydiet-brand-title{font-size:1.12rem}.mydiet-date{font-size:.72rem}.mydiet-kcal-number{font-size:2.05rem}div[data-testid="stButton"] button{min-height:2.65rem;}#bottom_nav div[data-testid="stButton"] button{min-height:2.85rem;font-size:.69rem;}}
+button,[data-testid="stBaseButton-secondary"],[data-testid="stBaseButton-primary"] {border-radius:14px !important;}[data-testid="stMetric"] {background:#111419;border:1px solid rgba(255,255,255,.07);border-radius:18px;padding:10px 12px;}
+.md-section-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:4px 0 18px;padding:2px 2px;}
+.md-eyebrow{font-size:.68rem;font-weight:850;letter-spacing:.12em;color:#8e96a5;margin-bottom:4px;}
+.md-page-title{font-size:1.85rem;font-weight:900;letter-spacing:-.04em;line-height:1.05;}
+.md-page-sub{color:#949baa;font-size:.82rem;margin-top:7px;max-width:680px;line-height:1.4;}
+.md-section-icon{width:48px;height:48px;border-radius:16px;display:flex;align-items:center;justify-content:center;background:rgba(215,25,32,.13);border:1px solid rgba(215,25,32,.24);font-size:23px;flex:0 0 auto;}
+.md-stat{display:flex;align-items:center;gap:11px;background:#111419;border:1px solid rgba(255,255,255,.075);border-radius:18px;padding:11px 13px;min-height:67px;}
+.md-stat-accent{border-color:rgba(215,25,32,.28);background:linear-gradient(145deg,#171419,#111419);}
+.md-stat-ok{border-color:rgba(53,199,123,.18);}
+.md-stat-icon{width:34px;height:34px;border-radius:11px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.055);font-size:17px;flex:0 0 auto;}
+.md-stat-value{font-size:1.25rem;font-weight:900;line-height:1;}
+.md-stat-label{font-size:.72rem;color:#949baa;margin-top:4px;}
+[data-testid="stExpander"] details {border-color:rgba(255,255,255,.08);background:#101318;border-radius:17px;}
+@media (max-width:700px){.md-page-title{font-size:1.55rem}.md-section-icon{width:43px;height:43px;border-radius:14px}.md-page-sub{font-size:.76rem}.md-stat{min-height:61px;padding:9px 10px;border-radius:16px}.md-stat-value{font-size:1.1rem}.md-stat-icon{width:30px;height:30px;border-radius:9px;font-size:15px}.block-container{padding-left:.8rem;padding-right:.8rem;padding-top:.35rem;padding-bottom:5.8rem;}h1{font-size:1.65rem !important;}h2{font-size:1.28rem !important;}h3{font-size:1.08rem !important;}.card{padding:14px;border-radius:19px}.hero{padding:17px;border-radius:21px}.big{font-size:1.8rem}.mydiet-logo{width:42px;height:42px;border-radius:14px;font-size:22px}.mydiet-brand-title{font-size:1.12rem}.mydiet-date{font-size:.72rem}.mydiet-kcal-number{font-size:2.05rem}div[data-testid="stButton"] button{min-height:2.65rem;}#bottom_nav div[data-testid="stButton"] button{min-height:2.85rem;font-size:.69rem;}}
 </style>
 """
 st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", initial_sidebar_state="collapsed")
@@ -3165,8 +3177,7 @@ elif st.session_state.page=="Piano":
 
 # ---------------- Dispensa ----------------
 elif st.session_state.page=="Dispensa":
-    st.title("🛒 Spesa & Dispensa")
-    st.caption("Piano → Dispensa → Spesa. Ora MyDiet prepara anche il confronto intelligente dei prodotti da acquistare.")
+    st.markdown("<div class=\"md-section-head\"><div><div class=\"md-eyebrow\">MYDIET · ORGANIZZA</div><div class=\"md-page-title\">Spesa & Dispensa</div><div class=\"md-page-sub\">Tieni sotto controllo quello che hai in casa e quello che manca per il tuo piano.</div></div><div class=\"md-section-icon\">🛒</div></div>", unsafe_allow_html=True)
 
     rows=shopping_list()
     to_buy=[r for r in rows if r["need"]>0]
@@ -3174,9 +3185,12 @@ elif st.session_state.page=="Dispensa":
     pantry=pantry_items()
 
     c1,c2,c3=st.columns(3)
-    with c1: st.metric("🛒 Da comprare",len(to_buy))
-    with c2: st.metric("📦 In dispensa",len(pantry))
-    with c3: st.metric("✅ Già coperti",len(covered))
+    with c1:
+        st.markdown(f"<div class=\"md-stat md-stat-accent\"><div class=\"md-stat-icon\">🛒</div><div><div class=\"md-stat-value\">{len(to_buy)}</div><div class=\"md-stat-label\">Da comprare</div></div></div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"<div class=\"md-stat\"><div class=\"md-stat-icon\">📦</div><div><div class=\"md-stat-value\">{len(pantry)}</div><div class=\"md-stat-label\">In dispensa</div></div></div>", unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"<div class=\"md-stat md-stat-ok\"><div class=\"md-stat-icon\">✓</div><div><div class=\"md-stat-value\">{len(covered)}</div><div class=\"md-stat-label\">Già coperti</div></div></div>", unsafe_allow_html=True)
 
     tab_shop, tab_smart, tab_pantry=st.tabs(["🛒 Da comprare","💰 Risparmio","📦 In casa"])
 
