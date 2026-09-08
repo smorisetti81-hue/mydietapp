@@ -44,21 +44,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 UI_BETA_CSS = """
 <style>
 #MainMenu, footer, header {visibility:hidden;}
-.stApp { background: linear-gradient(180deg, rgba(248,249,251,.98) 0%, rgba(244,246,248,.98) 100%); }
-.block-container {max-width:1050px;padding-top:.7rem;padding-bottom:5rem;}
-.card {border:1px solid rgba(128,128,128,.16);border-radius:20px;padding:16px;margin:8px 0;background:rgba(128,128,128,.045);box-shadow:0 2px 12px rgba(0,0,0,.025);}
-.hero {border-radius:24px;padding:20px;background:linear-gradient(135deg,rgba(255,75,75,.14),rgba(128,128,128,.045));border:1px solid rgba(255,75,75,.18);}
-.big {font-size:2rem;font-weight:800;line-height:1.05;}
-.muted,.small {color:#888;font-size:.86rem;}
-.ok,.bad {font-weight:700;}
-@media (max-width:700px){
-.block-container{padding-left:.75rem;padding-right:.75rem;padding-top:.45rem;}
-h1{font-size:1.75rem !important;} h2{font-size:1.35rem !important;} h3{font-size:1.1rem !important;}
-.card{padding:13px;border-radius:17px;} .hero{padding:16px;border-radius:20px;} .big{font-size:1.75rem;}
-div[data-testid="stMetric"]{padding:.35rem .15rem;} div[data-testid="stMetricValue"]{font-size:1.25rem;}
-div[data-testid="stButton"] button{border-radius:14px;min-height:2.65rem;}
-div[data-testid="stExpander"] details{border-radius:16px;}
-}
+.stApp { background:#0b0d10; color:#f5f7fa; }
+.block-container {max-width:1120px;padding-top:.55rem;padding-bottom:6rem;}
+.mydiet-top {display:flex;align-items:center;justify-content:space-between;gap:16px;margin:4px 0 16px;}
+.mydiet-brand {display:flex;align-items:center;gap:12px;}
+.mydiet-logo {width:46px;height:46px;border-radius:15px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#ff5b62,#d71920);box-shadow:0 8px 28px rgba(255,70,80,.22);font-size:25px;}
+.mydiet-brand-title {font-size:1.22rem;font-weight:850;line-height:1.05;}.mydiet-brand-sub {font-size:.78rem;color:#9da4b0;margin-top:4px;}.mydiet-date {font-size:.78rem;color:#9da4b0;}
+.card {border:1px solid rgba(255,255,255,.08);border-radius:22px;padding:17px;margin:8px 0;background:#111419;box-shadow:0 8px 28px rgba(0,0,0,.16);}
+.hero {border-radius:25px;padding:22px;background:radial-gradient(circle at 85% 15%,rgba(255,76,84,.16),transparent 38%),linear-gradient(135deg,#17191f,#101216);border:1px solid rgba(255,76,84,.28);}
+.big {font-size:2.15rem;font-weight:850;line-height:1.05;}.muted,.small {color:#9da4b0;font-size:.84rem;}.ok {color:#5bd39a;font-weight:750;}.bad {color:#ff7279;font-weight:750;}
+.mydiet-kcal-card {border:1px solid rgba(255,255,255,.08);border-radius:24px;padding:20px;background:linear-gradient(145deg,#151820,#101216);}.mydiet-kcal-number {font-size:2.55rem;font-weight:900;letter-spacing:-.04em;}.mydiet-kcal-label {color:#9da4b0;font-size:.82rem;}.mydiet-meal-title {font-size:1.08rem;font-weight:800;}.mydiet-section {font-size:1.22rem;font-weight:850;margin:20px 0 7px;}
+div[data-testid="stBottom"] {background:rgba(11,13,16,.96);border-top:1px solid rgba(255,255,255,.10);backdrop-filter:blur(16px);}#bottom_nav {padding:.18rem .25rem .32rem;}#bottom_nav div[data-testid="stHorizontalBlock"] {gap:.2rem !important;}#bottom_nav div[data-testid="stButton"] button {min-height:3.05rem;border-radius:15px;border:0;font-size:.76rem;font-weight:700;padding:.25rem .15rem;}#bottom_nav div[data-testid="stButton"] button[kind="primary"] {background:#d71920;color:white;box-shadow:0 4px 16px rgba(215,25,32,.25);}#bottom_nav div[data-testid="stButton"] button[kind="secondary"] {background:transparent;color:#aeb5c0;}
+button,[data-testid="stBaseButton-secondary"],[data-testid="stBaseButton-primary"] {border-radius:14px !important;}[data-testid="stMetric"] {background:#111419;border:1px solid rgba(255,255,255,.07);border-radius:18px;padding:10px 12px;}[data-testid="stExpander"] details {border-color:rgba(255,255,255,.08);background:#101318;border-radius:17px;}
+@media (max-width:700px){.block-container{padding-left:.8rem;padding-right:.8rem;padding-top:.35rem;padding-bottom:5.8rem;}h1{font-size:1.65rem !important;}h2{font-size:1.28rem !important;}h3{font-size:1.08rem !important;}.card{padding:14px;border-radius:19px}.hero{padding:17px;border-radius:21px}.big{font-size:1.8rem}.mydiet-logo{width:42px;height:42px;border-radius:14px;font-size:22px}.mydiet-brand-title{font-size:1.12rem}.mydiet-date{font-size:.72rem}.mydiet-kcal-number{font-size:2.05rem}div[data-testid="stButton"] button{min-height:2.65rem;}#bottom_nav div[data-testid="stButton"] button{min-height:2.85rem;font-size:.69rem;}}
 </style>
 """
 st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", initial_sidebar_state="collapsed")
@@ -950,6 +948,11 @@ def _restore_app_state():
         return bool(st.session_state.get("profile_setup_complete",False))
     except Exception:
         return False
+
+# Stable anonymous browser token: keeps the same MyDiet identity when Streamlit
+# recreates the Python session during navigation.
+if not str(st.query_params.get("mdid", "") or "").strip():
+    st.query_params["mdid"] = uuid.uuid4().hex[:16]
 
 # If Streamlit creates a fresh session while the browser keeps the same app
 # URL, restore the previous MyDiet state before onboarding/navigation runs.
@@ -2701,202 +2704,50 @@ if not _profile_complete():
 
 # ---------------- Home ----------------
 if st.session_state.page=="Home":
-    # Health snapshot received from the Android bridge for this session.
-    # Keep this local variable available to the whole Home block.
     h=st.session_state.get("health",{})
-    b=balance()
-    rem=b["remaining"]
-    msg=f"Ti restano {rem:,} kcal".replace(",",".") if rem>=0 else f"Sei sopra il target di {abs(rem):,} kcal".replace(",",".")
-    cls="ok" if rem>=0 else "bad"
-    target_label="budget dinamico" if b["using_observed"] else "target stimato"
-    st.markdown(f"""<div class="card"><div class="muted">CALORIE ASSUNTE / {target_label.upper()}</div>
-    <div class="big">{b["eaten"]:,} / {b["live_target"]:,} kcal</div>
-    <div class="muted">Consumo previsto: {b["projected_burn"]:,} kcal · {'surplus' if b.get('surplus',0)>0 else 'deficit'}: {b.get('surplus',0) if b.get('surplus',0)>0 else b['deficit']:,} kcal · BMR: {b["bmr_health"] or b["bmr_est"]} kcal/giorno</div>
-    <div class="{cls}">{msg}</div></div>""".replace(",","."),unsafe_allow_html=True)
-    st.progress(min(max(b["eaten"]/max(b["live_target"],1),0),1))
+    b=balance(); d=current_day_name(); next_meal=_next_meal_for_today(d)
+    rem=b["remaining"]; target=int(b["live_target"] or 0); eaten=int(b["eaten"] or 0)
+    pct=min(max(eaten/max(target,1),0),1)
+    weekdays=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+    date_label=f"{weekdays[datetime.now(ROME).weekday()]} {datetime.now(ROME).day:02d}/{datetime.now(ROME).month:02d}"
+    st.markdown(f"""<div class="mydiet-top"><div class="mydiet-brand"><div class="mydiet-logo">🥗</div><div><div class="mydiet-brand-title">MyDiet</div><div class="mydiet-brand-sub">Il tuo piano. La tua giornata.</div></div></div><div class="mydiet-date">{date_label}</div></div>""",unsafe_allow_html=True)
+    st.markdown(f"""<div class="mydiet-kcal-card"><div class="mydiet-kcal-label">OGGI · {d.upper()}</div><div style="display:flex;align-items:end;justify-content:space-between;gap:12px;margin-top:5px;"><div><div class="mydiet-kcal-number">{eaten:,} <span style="font-size:1rem;font-weight:650;color:#9da4b0;">/ {target:,} kcal</span></div><div class="muted">{'Ti restano' if rem>=0 else 'Sei sopra il target di'} <b>{abs(rem):,} kcal</b></div></div><div style="font-size:1.8rem;">🎯</div></div></div>""".replace(",","."),unsafe_allow_html=True)
+    st.progress(pct)
+    if next_meal:
+        mn=next_meal.get("_meal_name"); meal=st.session_state.meal_plan.get(d,{}).get(mn)
+        if meal:
+            items=active_items(meal); kcal=round(sum(item_kcal(i) for i in items)); registered=_meal_is_registered(d,mn)
+            st.markdown('<div class="mydiet-section">🍽️ Prossimo pasto</div>',unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown(f"""<div class="mydiet-meal-title">{mn}</div><div style="font-size:1.18rem;font-weight:800;margin-top:6px;">{meal.get('name','Pasto')}</div><div class="muted" style="margin-top:5px;">{kcal} kcal · {'Già registrato' if registered else 'Da registrare'}</div>""",unsafe_allow_html=True)
+                if items: st.caption(" · ".join(f"{i['name']} {quantity_caption(i)}" for i in items))
+                if not registered and st.button("🍴 Ho mangiato",key=f"home_next_eat_{d}_{mn}",use_container_width=True,type="primary"):
+                    set_meal_registered(d,mn,True); _mydiet_rerun()
+                elif registered and st.button("↩ Annulla registrazione",key=f"home_next_undo_{d}_{mn}",use_container_width=True):
+                    set_meal_registered(d,mn,False); _mydiet_rerun()
+    st.markdown('<div class="mydiet-section">💧 Idratazione</div>',unsafe_allow_html=True)
+    water=water_today_ml(); goal=water_goal_ml(); wp=min(max(water/max(goal,1),0),1)
+    with st.container(border=True):
+        c1,c2=st.columns([3,1]); c1.markdown(f"**{water/1000:.2f} L** / {goal/1000:.2f} L"); c1.progress(wp)
+        with c2:
+            if st.button("+ 250 ml",key="water_plus",use_container_width=True,type="primary"): add_water_ml(250); _mydiet_rerun()
+    ms=st.session_state.meal_plan.get(d,{})
+    st.markdown('<div class="mydiet-section">📋 I tuoi pasti</div>',unsafe_allow_html=True)
+    for idx,(mn,m) in enumerate(ms.items()):
+        items=active_items(m); kcal=round(sum(item_kcal(i) for i in items)); registered=_meal_is_registered(d,mn)
+        with st.container(border=True):
+            c1,c2=st.columns([5,1]); c1.markdown(f"**{mn}**"); c1.caption(f"{m.get('name','Pasto')} · {kcal} kcal · {'✓ Registrato' if registered else 'Da fare'}"); c2.metric("kcal",kcal)
+            if registered and st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True): set_meal_registered(d,mn,False); _mydiet_rerun()
     if b["using_observed"]:
-        c1,c2,c3=st.columns(3)
-        c1.metric("🔥 Consumo finora",f"{b['observed_burn']:,} kcal".replace(",","."))
-        active_display = f"{b['active_observed']:,} kcal".replace(",",".") if b.get("active_observed", 0) > 0 else "Non disponibili"
-        active_label = "⚡ Calorie attive" if b.get("active_verified") else "⚡ Attive stimate finora"
-        c2.metric(active_label,active_display)
-        c3.metric("🎯 Consumo stimato oggi",f"{b['projected_burn']:,} kcal".replace(",","."))
-        st.caption(
-            f"Il budget dinamico usa il consumo Health osservato ({b['observed_burn']} kcal) "
-            f"e aggiunge solo il consumo a riposo residuo fino a mezzanotte ({b['remaining_rest']} kcal). "
-            "Non vengono inventate attività future."
-        )
-        st.caption(f"Fonte del bilancio: {b['source']}. Snapshot Health: {b['snapshot_date'] or 'nessuno'}.")
+        st.markdown('<div class="mydiet-section">🏃 Attività</div>',unsafe_allow_html=True)
         a=activity_summary()
         with st.container(border=True):
-            st.markdown("**🏃 Attività di oggi**")
-            ac1,ac2,ac3,ac4=st.columns(4)
-            ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
-            ac2.metric("⚡ Calorie attive" if a["active_source"] != "stima" else "⚡ Calorie attive stimate", f"{a['active_calories']:,} kcal".replace(",","."))
-            ac3.metric("📏 Distanza", f"{a['distance_km']:.2f} km")
-            ac4.metric("🏋️ Allenamenti", str(a['workouts']))
-            if a["details"]:
-                for w in a["details"]:
-                    st.write(f"• **{w['name']}** · {w['duration_minutes']} min")
-            else:
-                st.caption("Nessuna sessione di allenamento registrata. I passi e le calorie attive continuano comunque ad aggiornarsi.")
-            st.caption(f"Fonte calorie attive: {a['active_source']}. Sono già comprese nel consumo totale Health osservato e non vengono sommate una seconda volta.")
-    # ---------------- Water tracking ----------------
-    st.divider()
-    st.subheader("💧 Acqua")
-    water=water_today_ml()
-    goal=water_goal_ml()
-    pct=min(max(water/max(goal,1),0.0),1.0)
-    wc1,wc2=st.columns([5,2])
-    with wc1:
-        st.markdown(f"### {water/1000:.2f} L / {goal/1000:.2f} L")
-        st.progress(pct)
-        if water >= goal:
-            st.success("🎉 Obiettivo acqua raggiunto oggi.")
-        else:
-            st.caption(f"Ti mancano {(goal-water)/1000:.2f} L per raggiungere l'obiettivo di oggi.")
-    with wc2:
-        b1,b2=st.columns(2)
-        with b1:
-            if st.button("− 250 ml",key="water_minus",use_container_width=True):
-                add_water_ml(-250)
-                _mydiet_rerun()
-        with b2:
-            if st.button("+ 250 ml",key="water_plus",use_container_width=True,type="primary"):
-                add_water_ml(250)
-                _mydiet_rerun()
-        if st.button("Azzera oggi",key="water_reset",use_container_width=True):
-            st.session_state.water_history[today()]=0
-            _mydiet_rerun()
-    st.caption("Registrazione manuale · storico conservato per data in questa sessione.")
-
-    # ---------------- What should I eat today? ----------------
-    st.divider()
-    st.subheader("🍴 Cosa mangio oggi?")
-
-    d=current_day_name()
-    next_meal=_next_meal_for_today(d)
-    meal_order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
-    registered_count=sum(1 for mn in meal_order if mn in st.session_state.meal_plan.get(d,{}) and _meal_is_registered(d,mn))
-
-    if next_meal:
-        next_name=next_meal.get("_meal_name")
-
-        if registered_count == 0:
-            st.caption("Non hai ancora registrato un pasto oggi: partiamo dal primo pasto previsto, senza dedurre nulla dall'orario.")
-        else:
-            st.caption("Il prossimo pasto da registrare viene determinato dai pasti che hai effettivamente registrato.")
-
-        if next_name in ("🍽️ Pranzo","🌙 Cena"):
-            show_daily_meal_recommendation(next_name,d,b)
-        else:
-            meal=st.session_state.meal_plan.get(d,{}).get(next_name)
-
-            if meal:
-                items=active_items(meal)
-                kcal=round(sum(item_kcal(i) for i in items))
-
-                with st.container(border=True):
-                    st.markdown(f"### {next_name}")
-                    st.markdown(f"**{meal.get('name','Pasto')}**")
-                    st.caption(f"{kcal} kcal · prossimo pasto da registrare")
-
-                    if items:
-                        with st.expander("Dettagli"):
-                            for item in items:
-                                st.write(
-                                    f"• {item['name']} — "
-                                    f"{quantity_caption(item)} · "
-                                    f"{round(item_kcal(item))} kcal"
-                                )
-
-                    if st.button(
-                        "🍴 Ho mangiato",
-                        key=f"home_next_eat_{d}_{next_name}",
-                        use_container_width=True,
-                        type="primary"
-                    ):
-                        set_meal_registered(d,next_name,True)
-                        _mydiet_rerun()
-    else:
-        if registered_count == 0:
-            st.info("🌅 **Inizia dalla colazione.** Quando registrerai un pasto, MyDiet passerà automaticamente al successivo. Nessun pasto viene considerato mangiato solo in base all'orario.")
-        else:
-            st.success(
-                "🎉 **Giornata alimentare completata!** "
-                "Hai registrato tutti i pasti previsti per oggi."
-            )
-
-    st.subheader("🍽️ Oggi")
-    st.caption("Registra i pasti quando li mangi: il totale in alto si aggiorna automaticamente.")
-    d=current_day_name(); ms=st.session_state.meal_plan.get(d)
-
-    if not ms:
-        st.info(f"Non hai ancora un piano alimentare per {d}. Vai in **Piano** e genera il piano settimanale.")
-    else:
-        for idx,(mn,m) in enumerate(ms.items()):
-            items=active_items(m)
-            kcal=round(sum(item_kcal(i) for i in items))
-            registered=_meal_is_registered(d,mn)
-            status="✅ Registrato" if registered else "○ Non registrato"
-            with st.container(border=True):
-                c1,c2,c3=st.columns([5,2,1])
-                with c1:
-                    st.markdown(f"**{mn}**")
-                    st.caption(f"{m.get('name','Pasto')} · {kcal} kcal · {status}")
-                with c2:
-                    # Registration is handled in "Cosa mangio oggi?".
-                    # Keep only an undo action here once a meal has been registered.
-                    if registered:
-                        if st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True):
-                            set_meal_registered(d,mn,False)
-                            _mydiet_rerun()
-                    else:
-                        st.caption("Da registrare")
-                with c3:
-                    st.metric("kcal",kcal)
-                with st.expander("Dettagli"):
-                    for item in items:
-                        st.write(f"• {item['name']} — {quantity_caption(item)} · {round(item_kcal(item))} kcal")
-
-    # ---------------- Live energy balance ----------------
-    st.divider()
-    st.subheader("⚡ Bilancio energetico di oggi")
-    if b["using_observed"]:
-        net_so_far=b["eaten"]-b["observed_burn"]
-        c1,c2,c3,c4=st.columns(4)
-        c1.metric("🍽️ Assunte",f"{b['eaten']:,} kcal".replace(",","."))
-        c2.metric("🔥 Consumate finora",f"{b['observed_burn']:,} kcal".replace(",","."))
-        c3.metric("🎯 Target alimentare",f"{b['live_target']:,} kcal".replace(",","."))
-        c4.metric("📉 Deficit obiettivo",f"{b['deficit']:,} kcal".replace(",","."))
-        if net_so_far < 0:
-            st.success(f"Sei attualmente a **{abs(net_so_far):,} kcal sotto il consumo osservato**. Il deficit obiettivo di oggi è **{b['deficit']} kcal**. Il dato continua ad aggiornarsi con Health.".replace(",","."))
-        elif net_so_far > 0:
-            st.warning(f"Sei attualmente a **{net_so_far:,} kcal sopra il consumo osservato**. Il deficit obiettivo di oggi è **{b['deficit']} kcal**. È un dato provvisorio della giornata.".replace(",","."))
-        else:
-            st.info("Assunte e consumate sono momentaneamente allo stesso livello.")
-        if h.get("active_calories_today") is not None:
-            st.caption(f"👣 {int(h.get('steps_today') or 0):,} passi · ⚡ {float(h['active_calories_today']):.0f} kcal attive · 🔥 {b['projected_burn']:,} kcal consumo stimato a fine giornata.".replace(",","."))
-    else:
-        st.info("Collega il bridge Health Connect per trasformare il target stimato in un budget dinamico basato sul consumo reale di oggi.")
-
-    manual_today=[x for x in st.session_state.manual_foods if x["date"]==today()]
-    if manual_today:
-        with st.container(border=True):
-            st.markdown("**🍴 Alimenti registrati manualmente**")
-            for j,x in enumerate(manual_today):
-                st.write(f"• {x['name']} · {round(float(x['kcal']))} kcal")
-
-    with st.expander("🍴 Registra qualcosa che hai mangiato fuori dal piano", expanded=False):
-        st.caption("Utile, ad esempio, se hai mangiato una pizza o un pasto diverso da quello previsto.")
-        c1,c2=st.columns([3,1])
-        with c1:n=st.text_input("Alimento",placeholder="Pizza margherita",key="manual_food_name_home")
-        with c2:k=st.number_input("kcal",0,3000,500,10,key="manual_food_kcal_home")
-        if st.button("Registra",type="primary",key="manual_food_register_home") and n.strip():
-            st.session_state.manual_foods.append({"name":n.strip(),"kcal":k,"date":today()})
-            _mydiet_rerun()
-
-    if st.session_state.last_sync: st.caption("Ultima sincronizzazione Health: "+st.session_state.last_sync)
+            c1,c2,c3=st.columns(3); c1.metric("👣 Passi",f"{a['steps']:,}".replace(",",".")); c2.metric("⚡ Attive",f"{a['active_calories']:,} kcal".replace(",",".")); c3.metric("🏋️ Allenamenti",str(a['workouts']))
+            st.caption("L'attività aggiorna il bilancio della giornata, ma non modifica automaticamente il piano alimentare.")
+    with st.expander("🍴 Ho mangiato qualcosa fuori dal piano",expanded=False):
+        c1,c2=st.columns([3,1]); n=c1.text_input("Alimento",placeholder="Pizza margherita",key="manual_food_name_home"); k=c2.number_input("kcal",0,3000,500,10,key="manual_food_kcal_home")
+        if st.button("Registra",type="primary",key="manual_food_register_home") and n.strip(): st.session_state.manual_foods.append({"name":n.strip(),"kcal":k,"date":today()}); _mydiet_rerun()
+    if st.session_state.last_sync: st.caption("Health Connect · ultima sincronizzazione: "+st.session_state.last_sync)
 
 # ---------------- Piano ----------------
 elif st.session_state.page=="Piano":
@@ -3782,6 +3633,7 @@ def _navigate_to_page(target):
     if current=="Piano" and target!="Piano":
         restore_current_plan_context()
     st.session_state.page=target
+    _persist_app_state()
 
 if _profile_complete():
     _nav_current=st.session_state.get("page","Home")
