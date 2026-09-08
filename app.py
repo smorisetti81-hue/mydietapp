@@ -856,7 +856,7 @@ _defaults = {
     "plan_generation_status":"idle", "plan_generation_message":"", "plan_generation_time":None,
     "plan_editor_selection":"current", "_plan_editor_next":False, "plan_edit_meal":None,
     "pantry":{}, "shopping_checked":{}, "pantry_consumed_by_meal":{}, "smart_food_advice":None, "registered_meals":{}, "shopping_source":"Tutte", "shopping_strategy":"⚖️ Qualità / prezzo", "shopping_radius":5,
-    "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None, "profile_setup_complete":False
+    "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None, "food_kcal_cache":{}, "profile_setup_complete":False
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
@@ -1220,6 +1220,84 @@ def plan_food_suggestions(current_day=None, current_meal=None, limit=8):
     values=list(foods.values())
     values.sort(key=lambda x:(not x["current"],-x["uses"],x["name"].lower()))
     return values[:limit]
+
+
+def _food_name_key(name):
+    return re.sub(r"\s+", " ", str(name or "").strip().lower())
+
+def _known_food_kcal(name, unit, qty):
+    """Reuse a previously known food value when the same food/unit exists in a plan."""
+    key_name=_food_name_key(name)
+    unit=str(unit or "g").strip()
+    try:
+        qty=float(qty)
+    except Exception:
+        return None
+    if qty <= 0:
+        return None
+    candidates=[]
+    def collect(plan):
+        for ms in plan.values():
+            for meal in ms.values():
+                for item in meal.get("ingredients",[]):
+                    if _food_name_key(item.get("name")) != key_name:
+                        continue
+                    if str(item.get("unit","g")).strip() != unit:
+                        continue
+                    iq=float(item.get("qty",0) or 0)
+                    ik=float(item.get("kcal",0) or 0)
+                    if iq > 0 and ik >= 0:
+                        candidates.append((iq,ik))
+    collect(st.session_state.meal_plan)
+    for rec in st.session_state.plan_history.values():
+        collect(rec.get("plan",{}))
+    if not candidates:
+        return None
+    iq,ik=candidates[0]
+    return round(ik * qty / iq)
+
+def estimate_food_kcal(name, qty, unit):
+    """Estimate total kcal for a newly added food. Prefer known plan data, then Gemini."""
+    name=str(name or "").strip()
+    unit=str(unit or "g").strip()
+    qty=float(qty or 0)
+    if not name or qty <= 0:
+        raise ValueError("Inserisci alimento e quantità validi.")
+
+    known=_known_food_kcal(name,unit,qty)
+    if known is not None:
+        return {"kcal":known,"source":"database MyDiet","assumption":"Valore già presente nel piano/storico MyDiet, proporzionato alla quantità."}
+
+    cache_key=f"{_food_name_key(name)}|{qty:g}|{unit}"
+    cached=st.session_state.get("food_kcal_cache",{}).get(cache_key)
+    if cached:
+        return cached
+
+    prompt=f"""Stima le calorie dell'alimento che sto aggiungendo a un piano alimentare.
+Alimento: {name}
+Quantità: {qty:g} {unit}
+
+Regole:
+- Restituisci SOLO JSON valido con le chiavi: total_kcal, assumption.
+- total_kcal deve essere un numero intero ed è il totale per la quantità indicata, NON kcal per 100 g.
+- Usa una stima realistica di un alimento comune in Italia.
+- Se l'alimento è 'pizza' e non ci sono altre specifiche, considera una pizza tonda italiana standard da pizzeria (30-32 cm), tipo margherita.
+- Se la quantità è in pezzi (pz), usa una porzione standard coerente con il nome.
+- Non inventare precisione: arrotonda a una stima ragionevole.
+- Nell'assumption indica in poche parole quale porzione/tipologia hai assunto.
+"""
+    raw=gemini_interaction(prompt, thinking_level="low")
+    try:
+        match=re.search(r"\{.*\}",raw,re.S)
+        data=json.loads(match.group(0) if match else raw)
+        kcal=max(0,int(round(float(data.get("total_kcal",0)))))
+        if kcal <= 0:
+            raise ValueError("Calorie non valide")
+        result={"kcal":kcal,"source":"stima AI","assumption":str(data.get("assumption") or "Stima standard").strip()}
+    except Exception:
+        raise ValueError(f"MyDiet non è riuscita a stimare le calorie per '{name}'. Puoi inserirle manualmente modificando il pasto.")
+    st.session_state.setdefault("food_kcal_cache",{})[cache_key]=result
+    return result
 
 
 def _meal_kcal_for_day(day, meal_name):
@@ -2887,7 +2965,13 @@ elif st.session_state.page=="Piano":
                     left,right=st.columns([5.5,1.5])
                     with left:
                         st.markdown(f"**{mn}**")
-                        st.write(m.get("name","Pasto") if not out_of_home else "Pasto fuori")
+                        if out_of_home:
+                            display_name="Pasto fuori"
+                        elif items:
+                            display_name=m.get("name","Pasto")
+                        else:
+                            display_name="Nessun alimento inserito"
+                        st.write(display_name)
                         st.caption(f"{kcal} kcal · {status}")
                     with right:
                         if not editing_next and meal_registered:
@@ -2908,6 +2992,8 @@ elif st.session_state.page=="Piano":
                                 with a:
                                     st.markdown(f"**{item['name']}**")
                                     st.caption(f"{current_qty:g} {item.get('unit','g')} · {round(current_kcal)} kcal")
+                                    if item.get("kcal_source"):
+                                        st.caption(f"Fonte calorie: {item.get('kcal_source')} · {item.get('kcal_assumption','')}")
                                 with b:
                                     if st.button("−",key=f"edit_minus_{item['id']}",use_container_width=True):
                                         if quantity_mode()=="precise": set_item_qty(item,current_qty-step)
@@ -2976,15 +3062,24 @@ elif st.session_state.page=="Piano":
                                         st.session_state.meal_plan[day][mn]['ingredients'].append({"id":sid(),"name":sug['name'],"qty":sug['qty'],"unit":sug['unit'],"kcal":sug['kcal']})
                                         if editing_next: save_next_editor_context()
                                         st.rerun()
-                            a,b,c,d=st.columns([3,1,1,1])
-                            with a: n=st.text_input("Nome",key=f"n_{day}_{mn}")
-                            with b: q=st.number_input("Qtà",min_value=.1,value=10.,step=1.,key=f"q_{day}_{mn}")
+                            a,b,c=st.columns([3.2,1,1])
+                            with a: n=st.text_input("Alimento",key=f"n_{day}_{mn}",placeholder="Es. pizza, banana, yogurt...")
+                            with b: q=st.number_input("Qtà",min_value=.1,value=1.,step=1.,key=f"q_{day}_{mn}")
                             with c: u=st.selectbox("Unità",["g","ml","pz"],key=f"u_{day}_{mn}")
-                            with d: k=st.number_input("kcal",min_value=0,value=50,step=5,key=f"k_{day}_{mn}")
-                            if st.button("Aggiungi al pasto",key=f"add_{day}_{mn}") and n.strip():
-                                st.session_state.meal_plan[day][mn]['ingredients'].append({"id":sid(),"name":n.strip(),"qty":q,"unit":u,"kcal":k})
-                                if editing_next: save_next_editor_context()
-                                st.rerun()
+                            st.caption("💡 Le calorie vengono stimate automaticamente quando aggiungi l'alimento. Potrai sempre correggerle dopo.")
+                            if st.button("✨ Aggiungi e calcola calorie",key=f"add_{day}_{mn}",type="primary",use_container_width=True) and n.strip():
+                                try:
+                                    with st.spinner("Calcolo delle calorie…"):
+                                        estimate=estimate_food_kcal(n,q,u)
+                                    new_item={"id":sid(),"name":n.strip(),"qty":float(q),"unit":u,"kcal":estimate["kcal"],"kcal_source":estimate["source"],"kcal_assumption":estimate["assumption"]}
+                                    st.session_state.meal_plan[day][mn]['ingredients'].append(new_item)
+                                    active_names=[x["name"] for x in st.session_state.meal_plan[day][mn].get("ingredients",[]) if not st.session_state.overrides.get(x["id"],{}).get("removed")]
+                                    st.session_state.meal_plan[day][mn]["name"] = ", ".join(active_names[:3])
+                                    if editing_next: save_next_editor_context()
+                                    st.success(f"{n.strip()} aggiunto · circa {estimate['kcal']} kcal ({estimate['source']}).")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(str(e))
 
         if editing_next:
             save_next_editor_context()
