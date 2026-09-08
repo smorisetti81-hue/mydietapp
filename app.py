@@ -2452,11 +2452,11 @@ if not _profile_complete():
 
         st.divider()
         st.subheader("🎯 Il tuo obiettivo")
-        diet_goal = st.radio(
+        goal_options = ["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"]
+        diet_goal = st.selectbox(
             "Cosa vuoi ottenere?",
-            ["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"],
-            index=["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"].index(st.session_state.p_diet_goal),
-            horizontal=True
+            goal_options,
+            index=goal_options.index(st.session_state.p_diet_goal)
         )
         custom_target = st.number_input(
             "Target kcal personalizzato", 1200, 6000,
@@ -2465,11 +2465,11 @@ if not _profile_complete():
         )
 
         st.subheader("🥗 Come vuoi mangiare?")
-        diet_style = st.radio(
+        style_options = ["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"]
+        diet_style = st.selectbox(
             "Stile alimentare",
-            ["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"],
-            index=["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"].index(st.session_state.p_diet_style),
-            horizontal=True
+            style_options,
+            index=style_options.index(st.session_state.p_diet_style)
         )
         c1,c2 = st.columns(2)
         with c1:
@@ -2484,18 +2484,26 @@ if not _profile_complete():
             "✍️ Inserisco i valori manualmente",
             "🚫 Solo dieta — non monitorare attività"
         ]
-        tracking_mode = st.radio(
-            "Scegli il livello di monitoraggio", tracking_options,
+        tracking_mode = st.selectbox(
+            "Scegli il livello di monitoraggio",
+            tracking_options,
             index=tracking_options.index(st.session_state.get("p_activity_tracking_mode", tracking_options[0])),
             help="Puoi usare MyDiet anche senza smartwatch. L'attività reale non cambierà automaticamente il tuo piano alimentare."
         )
 
-        water_goal = st.select_slider("💧 Obiettivo acqua", options=list(range(1500,4001,250)), value=int(st.session_state.p_water_goal_ml), format_func=lambda x:f"{x/1000:.2f} L/giorno")
-        quantity_mode = st.radio(
-            "Come vuoi vedere le quantità?", ["porzioni","both","precise"],
-            index=["porzioni","both","precise"].index(st.session_state.get("p_quantity_mode","porzioni")),
-            format_func=lambda x: {"porzioni":"👌 Porzioni","both":"⚖️ Porzioni + grammature","precise":"⚖️ Grammature precise"}[x],
-            horizontal=True
+        water_options = list(range(1500,4001,250))
+        water_goal = st.selectbox(
+            "💧 Obiettivo acqua",
+            water_options,
+            index=water_options.index(int(st.session_state.p_water_goal_ml)),
+            format_func=lambda x:f"{x/1000:.2f} L/giorno"
+        )
+        quantity_options = ["porzioni","both","precise"]
+        quantity_mode = st.selectbox(
+            "Come vuoi vedere le quantità?",
+            quantity_options,
+            index=quantity_options.index(st.session_state.get("p_quantity_mode","porzioni")),
+            format_func=lambda x: {"porzioni":"👌 Porzioni","both":"⚖️ Porzioni + grammature","precise":"⚖️ Grammature precise"}[x]
         )
 
         submitted = st.form_submit_button("🚀 Crea il mio profilo", type="primary", use_container_width=True)
@@ -3553,9 +3561,11 @@ else:
 
         st.subheader("❤️ Monitoraggio")
         tracking_options=["⌚ Smartwatch / dati automatici","✍️ Inserisco i valori manualmente","🚫 Solo dieta — non monitorare attività"]
-        tracking_mode=st.radio("Come vuoi gestire l'attività?",tracking_options,index=tracking_options.index(st.session_state.get("p_activity_tracking_mode",tracking_options[0])),horizontal=True)
-        water_goal=st.select_slider("💧 Obiettivo acqua",options=list(range(1500,4001,250)),value=int(st.session_state.p_water_goal_ml),format_func=lambda x:f"{x/1000:.2f} L/giorno")
-        quantity_mode=st.radio("Visualizzazione quantità",["porzioni","both","precise"],index=["porzioni","both","precise"].index(st.session_state.get("p_quantity_mode","porzioni")),format_func=lambda x:{"porzioni":"👌 Porzioni","both":"⚖️ Porzioni + grammature","precise":"⚖️ Grammature precise"}[x],horizontal=True)
+        tracking_mode=st.selectbox("Come vuoi gestire l'attività?",tracking_options,index=tracking_options.index(st.session_state.get("p_activity_tracking_mode",tracking_options[0])))
+        water_options=list(range(1500,4001,250))
+        water_goal=st.selectbox("💧 Obiettivo acqua",water_options,index=water_options.index(int(st.session_state.p_water_goal_ml)),format_func=lambda x:f"{x/1000:.2f} L/giorno")
+        quantity_options=["porzioni","both","precise"]
+        quantity_mode=st.selectbox("Visualizzazione quantità",quantity_options,index=quantity_options.index(st.session_state.get("p_quantity_mode","porzioni")),format_func=lambda x:{"porzioni":"👌 Porzioni","both":"⚖️ Porzioni + grammature","precise":"⚖️ Grammature precise"}[x])
 
         if st.form_submit_button("Salva modifiche",type="primary",use_container_width=True):
             _save_profile_values({
