@@ -3039,22 +3039,26 @@ elif st.session_state.page=="Piano":
 
                         if out_of_home:
                             menu=current_mensa_menu(day,mn)
-                            with st.expander("🍴 Menu associato",expanded=bool(menu)):
-                                if menu:
+                            st.markdown("**📷 Menu del pasto fuori casa**")
+                            st.caption("Fotografa il menu oppure aggiungi una foto dal telefono/PC. MyDiet lo analizzerà confrontandolo con il piano.")
+                            img=st.camera_input("📸 Scatta una foto del menu",key=f"mensa_camera_{new_view}_{day}_{mn}")
+                            uploaded=st.file_uploader("🖼️ Oppure aggiungi una foto",type=["jpg","jpeg","png","webp"],key=f"mensa_upload_{new_view}_{day}_{mn}")
+                            img=img or uploaded
+                            if img:
+                                st.image(img,width=420)
+                                if st.button("✨ Analizza menu e associa a questo pasto",key=f"analyze_mensa_{new_view}_{day}_{mn}",use_container_width=True,type="primary"):
+                                    try:
+                                        b=balance(); rec=meal_recommendation(day,mn,b); planned=rec["name"] if rec else "nessun piatto previsto"; planned_kcal=rec["planned_kcal"] if rec else 0
+                                        budget_label=f"target alimentare: {energy_profile()['target']} kcal/giorno" if editing_next else f"calorie ancora disponibili oggi: {b['remaining']} kcal"
+                                        prompt=f"Analizza questo menu fuori casa per {mn} del giorno {day}. Piano previsto: {planned}; calorie previste: {planned_kcal}; {budget_label}. Confronta solo ciò che compare nella foto. Rispondi con 🟢 COSA ORDINARE, 💡 PERCHÉ, ⚠️ COSA LIMITARE."
+                                        set_mensa_menu(day,mn,gemini_interaction(prompt,image=img))
+                                        if editing_next: save_next_editor_context()
+                                        _mydiet_rerun()
+                                    except Exception as e: st.error(f"Errore analisi menu: {e}")
+                            if menu:
+                                with st.expander("🍴 Menu analizzato",expanded=True):
                                     st.success(f"Menu associato · {menu.get('analyzed_at','—')}")
                                     st.info(menu.get("result","Menu analizzato."))
-                                img=st.camera_input("Scatta il menu",key=f"mensa_camera_{new_view}_{day}_{mn}") or st.file_uploader("Carica una foto",type=["jpg","jpeg","png"],key=f"mensa_upload_{new_view}_{day}_{mn}")
-                                if img:
-                                    st.image(img,width=420)
-                                    if st.button("✨ Analizza e associa",key=f"analyze_mensa_{new_view}_{day}_{mn}"):
-                                        try:
-                                            b=balance(); rec=meal_recommendation(day,mn,b); planned=rec["name"] if rec else "nessun piatto previsto"; planned_kcal=rec["planned_kcal"] if rec else 0
-                                            budget_label=f"target alimentare: {energy_profile()['target']} kcal/giorno" if editing_next else f"calorie ancora disponibili oggi: {b['remaining']} kcal"
-                                            prompt=f"Analizza questo menu fuori casa per {mn} del giorno {day}. Piano previsto: {planned}; calorie previste: {planned_kcal}; {budget_label}. Confronta solo ciò che compare nella foto. Rispondi con 🟢 COSA ORDINARE, 💡 PERCHÉ, ⚠️ COSA LIMITARE."
-                                            set_mensa_menu(day,mn,gemini_interaction(prompt,image=img))
-                                            if editing_next: save_next_editor_context()
-                                            _mydiet_rerun()
-                                        except Exception as e: st.error(f"Errore analisi menu: {e}")
                         with st.expander("➕ Aggiungi alimento",expanded=False):
                             suggestions=plan_food_suggestions(day,mn,limit=8)
                             for idx,sug in enumerate(suggestions):
