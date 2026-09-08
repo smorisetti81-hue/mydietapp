@@ -2988,105 +2988,105 @@ elif st.session_state.page=="Piano":
                         st.markdown("**Modifica questo pasto**")
                         if not editing_next:
                             st.caption("Il piano attuale non viene modificato globalmente: stai modificando solo questo pasto.")
-                        if items:
-                            for item in items:
-                                mult=item_multiplier(item); current_qty=item_qty(item); current_kcal=item_kcal(item); step=qty_step(item.get("unit","g"),current_qty)
-                                a,b,c=st.columns([5,1,1])
-                                with a:
-                                    st.markdown(f"**{item['name']}**")
-                                    st.caption(f"{current_qty:g} {item.get('unit','g')} · {round(current_kcal)} kcal")
-                                    if item.get("kcal_source"):
-                                        st.caption(f"Fonte calorie: {item.get('kcal_source')} · {item.get('kcal_assumption','')}")
-                                with b:
-                                    if st.button("−",key=f"edit_minus_{item['id']}",use_container_width=True):
-                                        if quantity_mode()=="precise": set_item_qty(item,current_qty-step)
-                                        else: set_item_qty(item,max(0.5,mult-0.5)*float(item.get('qty',1)))
-                                        if editing_next: save_next_editor_context()
-                                        _mydiet_rerun()
-                                with c:
-                                    if st.button("+",key=f"edit_plus_{item['id']}",use_container_width=True):
-                                        if quantity_mode()=="precise": set_item_qty(item,current_qty+step)
-                                        else: set_item_qty(item,(mult+0.5)*float(item.get('qty',1)))
-                                        if editing_next: save_next_editor_context()
-                                        _mydiet_rerun()
-                                with st.expander(f"⚙️ {item['name']}",expanded=False):
-                                    a,b,c,d=st.columns([3,1,1,1])
-                                    with a: new_name=st.text_input("Alimento",value=item['name'],key=f"rn_{item['id']}")
-                                    with b: new_qty=st.number_input("Qtà",min_value=.1,value=float(current_qty),step=step,key=f"rq_{item['id']}")
-                                    with c: new_unit=st.selectbox("Unità",["g","ml","pz"],index=["g","ml","pz"].index(item.get('unit','g')) if item.get('unit','g') in ["g","ml","pz"] else 0,key=f"ru_{item['id']}")
-                                    with d: new_kcal=st.number_input("kcal",min_value=0,value=int(round(current_kcal)),step=5,key=f"rk_{item['id']}")
-                                    x,y=st.columns(2)
-                                    with x:
-                                        if st.button("💾 Salva",key=f"save_{item['id']}",use_container_width=True,type="primary") and new_name.strip():
-                                            item['name']=new_name.strip(); item['unit']=new_unit; item['qty']=float(new_qty); item['kcal']=int(new_kcal)
-                                            if editing_next:
-                                                st.session_state.next_overrides[item['id']]={"multiplier":1}; save_next_editor_context()
-                                            else:
-                                                st.session_state.overrides[item['id']]={"multiplier":1}
-                                            st.session_state.eaten[item['id']]=False
-                                            st.session_state.registered_meals[_meal_key(day,mn)]=False
-                                            st.session_state.plan_edit_meal=None; _mydiet_rerun()
-                                    with y:
-                                        if st.button("✕ Rimuovi",key=f"remove_{item['id']}",use_container_width=True):
-                                            if editing_next:
-                                                st.session_state.next_overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}; save_next_editor_context()
-                                            else:
-                                                st.session_state.overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}
-                                            st.session_state.eaten[item['id']]=False; st.session_state.registered_meals[_meal_key(day,mn)]=False
-                                            st.session_state.plan_edit_meal=None; _mydiet_rerun()
-                        else:
-                            st.info("Questo pasto è fuori casa.")
+                        if not out_of_home:
+                            if items:
+                                for item in items:
+                                    mult=item_multiplier(item); current_qty=item_qty(item); current_kcal=item_kcal(item); step=qty_step(item.get("unit","g"),current_qty)
+                                    a,b,c=st.columns([5,1,1])
+                                    with a:
+                                        st.markdown(f"**{item['name']}**")
+                                        st.caption(f"{current_qty:g} {item.get('unit','g')} · {round(current_kcal)} kcal")
+                                        if item.get("kcal_source"):
+                                            st.caption(f"Fonte calorie: {item.get('kcal_source')} · {item.get('kcal_assumption','')}")
+                                    with b:
+                                        if st.button("−",key=f"edit_minus_{item['id']}",use_container_width=True):
+                                            if quantity_mode()=="precise": set_item_qty(item,current_qty-step)
+                                            else: set_item_qty(item,max(0.5,mult-0.5)*float(item.get('qty',1)))
+                                            if editing_next: save_next_editor_context()
+                                            _mydiet_rerun()
+                                    with c:
+                                        if st.button("+",key=f"edit_plus_{item['id']}",use_container_width=True):
+                                            if quantity_mode()=="precise": set_item_qty(item,current_qty+step)
+                                            else: set_item_qty(item,(mult+0.5)*float(item.get('qty',1)))
+                                            if editing_next: save_next_editor_context()
+                                            _mydiet_rerun()
+                                    with st.expander(f"⚙️ {item['name']}",expanded=False):
+                                        a,b,c,d=st.columns([3,1,1,1])
+                                        with a: new_name=st.text_input("Alimento",value=item['name'],key=f"rn_{item['id']}")
+                                        with b: new_qty=st.number_input("Qtà",min_value=.1,value=float(current_qty),step=step,key=f"rq_{item['id']}")
+                                        with c: new_unit=st.selectbox("Unità",["g","ml","pz"],index=["g","ml","pz"].index(item.get('unit','g')) if item.get('unit','g') in ["g","ml","pz"] else 0,key=f"ru_{item['id']}")
+                                        with d: new_kcal=st.number_input("kcal",min_value=0,value=int(round(current_kcal)),step=5,key=f"rk_{item['id']}")
+                                        x,y=st.columns(2)
+                                        with x:
+                                            if st.button("💾 Salva",key=f"save_{item['id']}",use_container_width=True,type="primary") and new_name.strip():
+                                                item['name']=new_name.strip(); item['unit']=new_unit; item['qty']=float(new_qty); item['kcal']=int(new_kcal)
+                                                if editing_next:
+                                                    st.session_state.next_overrides[item['id']]={"multiplier":1}; save_next_editor_context()
+                                                else:
+                                                    st.session_state.overrides[item['id']]={"multiplier":1}
+                                                st.session_state.eaten[item['id']]=False
+                                                st.session_state.registered_meals[_meal_key(day,mn)]=False
+                                                st.session_state.plan_edit_meal=None; _mydiet_rerun()
+                                        with y:
+                                            if st.button("✕ Rimuovi",key=f"remove_{item['id']}",use_container_width=True):
+                                                if editing_next:
+                                                    st.session_state.next_overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}; save_next_editor_context()
+                                                else:
+                                                    st.session_state.overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}
+                                                st.session_state.eaten[item['id']]=False; st.session_state.registered_meals[_meal_key(day,mn)]=False
+                                                st.session_state.plan_edit_meal=None; _mydiet_rerun()
+                            else:
+                                st.info("Questo pasto non contiene ancora alimenti.")
 
                         if out_of_home:
                             menu=current_mensa_menu(day,mn)
-                            st.markdown("**📷 Menu del pasto fuori casa**")
-                            st.caption("Fotografa il menu oppure aggiungi una foto dal telefono/PC. MyDiet lo analizzerà confrontandolo con il piano.")
-                            img=st.camera_input("📸 Scatta una foto del menu",key=f"mensa_camera_{new_view}_{day}_{mn}")
-                            uploaded=st.file_uploader("🖼️ Oppure aggiungi una foto",type=["jpg","jpeg","png","webp"],key=f"mensa_upload_{new_view}_{day}_{mn}")
-                            img=img or uploaded
-                            if img:
-                                st.image(img,width=420)
-                                if st.button("✨ Analizza menu e associa a questo pasto",key=f"analyze_mensa_{new_view}_{day}_{mn}",use_container_width=True,type="primary"):
-                                    try:
-                                        b=balance(); rec=meal_recommendation(day,mn,b); planned=rec["name"] if rec else "nessun piatto previsto"; planned_kcal=rec["planned_kcal"] if rec else 0
-                                        budget_label=f"target alimentare: {energy_profile()['target']} kcal/giorno" if editing_next else f"calorie ancora disponibili oggi: {b['remaining']} kcal"
-                                        prompt=f"Analizza questo menu fuori casa per {mn} del giorno {day}. Piano previsto: {planned}; calorie previste: {planned_kcal}; {budget_label}. Confronta solo ciò che compare nella foto. Rispondi con 🟢 COSA ORDINARE, 💡 PERCHÉ, ⚠️ COSA LIMITARE."
-                                        set_mensa_menu(day,mn,gemini_interaction(prompt,image=img))
-                                        if editing_next: save_next_editor_context()
-                                        _mydiet_rerun()
-                                    except Exception as e: st.error(f"Errore analisi menu: {e}")
-                            if menu:
-                                with st.expander("🍴 Menu analizzato",expanded=True):
+                            with st.expander("🍴 Menu associato",expanded=bool(menu)):
+                                if menu:
                                     st.success(f"Menu associato · {menu.get('analyzed_at','—')}")
                                     st.info(menu.get("result","Menu analizzato."))
-                        with st.expander("➕ Aggiungi alimento",expanded=False):
-                            suggestions=plan_food_suggestions(day,mn,limit=8)
-                            for idx,sug in enumerate(suggestions):
-                                a,b=st.columns([5,1.4])
-                                with a: st.markdown(f"**{sug['name']}** · {sug['qty']:g} {sug['unit']} · {round(sug['kcal'])} kcal")
-                                with b:
-                                    if st.button("+ Aggiungi",key=f"suggest_{day}_{mn}_{idx}",use_container_width=True):
-                                        st.session_state.meal_plan[day][mn]['ingredients'].append({"id":sid(),"name":sug['name'],"qty":sug['qty'],"unit":sug['unit'],"kcal":sug['kcal']})
+                                st.markdown("**📷 Menu del pasto fuori casa**")
+                                st.caption("Qui non devi modificare gli alimenti del piano: scegli cosa ordinare fotografando il menu reale.")
+                                img=st.camera_input("📸 Scatta una foto del menu",key=f"mensa_camera_{new_view}_{day}_{mn}") or st.file_uploader("🖼️ Oppure aggiungi una foto",type=["jpg","jpeg","png","webp"],key=f"mensa_upload_{new_view}_{day}_{mn}")
+                                if img:
+                                    st.image(img,width=420)
+                                    if st.button("✨ Analizza e associa",key=f"analyze_mensa_{new_view}_{day}_{mn}"):
+                                        try:
+                                            b=balance(); rec=meal_recommendation(day,mn,b); planned=rec["name"] if rec else "nessun piatto previsto"; planned_kcal=rec["planned_kcal"] if rec else 0
+                                            budget_label=f"target alimentare: {energy_profile()['target']} kcal/giorno" if editing_next else f"calorie ancora disponibili oggi: {b['remaining']} kcal"
+                                            prompt=f"Analizza questo menu fuori casa per {mn} del giorno {day}. Piano previsto: {planned}; calorie previste: {planned_kcal}; {budget_label}. Confronta solo ciò che compare nella foto. Rispondi con 🟢 COSA ORDINARE, 💡 PERCHÉ, ⚠️ COSA LIMITARE."
+                                            set_mensa_menu(day,mn,gemini_interaction(prompt,image=img))
+                                            if editing_next: save_next_editor_context()
+                                            _mydiet_rerun()
+                                        except Exception as e: st.error(f"Errore analisi menu: {e}")
+                        if not out_of_home:
+                            with st.expander("➕ Aggiungi alimento",expanded=False):
+                                suggestions=plan_food_suggestions(day,mn,limit=8)
+                                for idx,sug in enumerate(suggestions):
+                                    a,b=st.columns([5,1.4])
+                                    with a: st.markdown(f"**{sug['name']}** · {sug['qty']:g} {sug['unit']} · {round(sug['kcal'])} kcal")
+                                    with b:
+                                        if st.button("+ Aggiungi",key=f"suggest_{day}_{mn}_{idx}",use_container_width=True):
+                                            st.session_state.meal_plan[day][mn]['ingredients'].append({"id":sid(),"name":sug['name'],"qty":sug['qty'],"unit":sug['unit'],"kcal":sug['kcal']})
+                                            if editing_next: save_next_editor_context()
+                                            _mydiet_rerun()
+                                a,b,c=st.columns([3.2,1,1])
+                                with a: n=st.text_input("Alimento",key=f"n_{day}_{mn}",placeholder="Es. pizza, banana, yogurt...")
+                                with b: q=st.number_input("Qtà",min_value=.1,value=1.,step=1.,key=f"q_{day}_{mn}")
+                                with c: u=st.selectbox("Unità",["g","ml","pz"],key=f"u_{day}_{mn}")
+                                st.caption("💡 Le calorie vengono stimate automaticamente quando aggiungi l'alimento. Potrai sempre correggerle dopo.")
+                                if st.button("✨ Aggiungi e calcola calorie",key=f"add_{day}_{mn}",type="primary",use_container_width=True) and n.strip():
+                                    try:
+                                        with st.spinner("Calcolo delle calorie…"):
+                                            estimate=estimate_food_kcal(n,q,u)
+                                        new_item={"id":sid(),"name":n.strip(),"qty":float(q),"unit":u,"kcal":estimate["kcal"],"kcal_source":estimate["source"],"kcal_assumption":estimate["assumption"]}
+                                        st.session_state.meal_plan[day][mn]['ingredients'].append(new_item)
+                                        active_names=[x["name"] for x in st.session_state.meal_plan[day][mn].get("ingredients",[]) if not st.session_state.overrides.get(x["id"],{}).get("removed")]
+                                        st.session_state.meal_plan[day][mn]["name"] = ", ".join(active_names[:3])
                                         if editing_next: save_next_editor_context()
+                                        st.success(f"{n.strip()} aggiunto · circa {estimate['kcal']} kcal ({estimate['source']}).")
                                         _mydiet_rerun()
-                            a,b,c=st.columns([3.2,1,1])
-                            with a: n=st.text_input("Alimento",key=f"n_{day}_{mn}",placeholder="Es. pizza, banana, yogurt...")
-                            with b: q=st.number_input("Qtà",min_value=.1,value=1.,step=1.,key=f"q_{day}_{mn}")
-                            with c: u=st.selectbox("Unità",["g","ml","pz"],key=f"u_{day}_{mn}")
-                            st.caption("💡 Le calorie vengono stimate automaticamente quando aggiungi l'alimento. Potrai sempre correggerle dopo.")
-                            if st.button("✨ Aggiungi e calcola calorie",key=f"add_{day}_{mn}",type="primary",use_container_width=True) and n.strip():
-                                try:
-                                    with st.spinner("Calcolo delle calorie…"):
-                                        estimate=estimate_food_kcal(n,q,u)
-                                    new_item={"id":sid(),"name":n.strip(),"qty":float(q),"unit":u,"kcal":estimate["kcal"],"kcal_source":estimate["source"],"kcal_assumption":estimate["assumption"]}
-                                    st.session_state.meal_plan[day][mn]['ingredients'].append(new_item)
-                                    active_names=[x["name"] for x in st.session_state.meal_plan[day][mn].get("ingredients",[]) if not st.session_state.overrides.get(x["id"],{}).get("removed")]
-                                    st.session_state.meal_plan[day][mn]["name"] = ", ".join(active_names[:3])
-                                    if editing_next: save_next_editor_context()
-                                    st.success(f"{n.strip()} aggiunto · circa {estimate['kcal']} kcal ({estimate['source']}).")
-                                    _mydiet_rerun()
-                                except Exception as e:
-                                    st.error(str(e))
+                                    except Exception as e:
+                                        st.error(str(e))
 
         if editing_next:
             save_next_editor_context()
