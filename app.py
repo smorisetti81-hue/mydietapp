@@ -578,6 +578,26 @@ div[data-testid="stProgressBar"] {height:9px !important;}
 
 /* Reduce Streamlit vertical noise */
 hr {margin:1.1rem 0 !important;opacity:.35;}
+
+/* V81: daily meal cards — app-like status list */
+.mydiet-day-meal {
+    border:1px solid rgba(255,255,255,.085); border-radius:19px; padding:13px 14px;
+    margin:7px 0 5px; background:linear-gradient(145deg,#15181e,#101216);
+    box-shadow:0 6px 18px rgba(0,0,0,.13); transition:transform .15s ease,border-color .15s ease;
+}
+.mydiet-day-meal.done {border-color:rgba(53,199,123,.22); background:linear-gradient(145deg,rgba(53,199,123,.075),#111419);}
+.mydiet-day-meal-main {display:flex; align-items:center; gap:11px; min-width:0;}
+.mydiet-day-meal-icon {width:38px;height:38px;border-radius:12px;display:flex;align-items:center;justify-content:center;flex:0 0 38px;background:rgba(255,255,255,.055);font-size:1.08rem;}
+.mydiet-day-meal.done .mydiet-day-meal-icon {background:rgba(53,199,123,.12);}
+.mydiet-day-meal-copy {min-width:0; flex:1;}
+.mydiet-day-meal-title {font-size:.94rem;font-weight:850;line-height:1.1;}
+.mydiet-day-meal-name {font-size:.78rem;color:#a5abb6;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mydiet-day-meal-status {font-size:.70rem;color:#8f96a2;margin-top:5px;}
+.mydiet-day-meal.done .mydiet-day-meal-status {color:#35c77b;font-weight:750;}
+.mydiet-day-meal-kcal {display:flex;flex-direction:column;align-items:flex-end;line-height:1;}
+.mydiet-day-meal-kcal b {font-size:1rem;font-weight:900;}
+.mydiet-day-meal-kcal span {font-size:.64rem;color:#7f8693;margin-top:4px;}
+
 /* Piano modes */
 .plan-mode-banner {
     border:1px solid var(--md-border); border-radius:16px; padding:13px 15px;
@@ -2778,9 +2798,12 @@ if st.session_state.page=="Home":
     st.markdown('<div class="mydiet-section">📋 I tuoi pasti</div>',unsafe_allow_html=True)
     for idx,(mn,m) in enumerate(ms.items()):
         items=active_items(m); kcal=round(sum(item_kcal(i) for i in items)); registered=_meal_is_registered(d,mn)
-        with st.container(border=True):
-            c1,c2=st.columns([5,1]); c1.markdown(f"**{mn}**"); c1.caption(f"{m.get('name','Pasto')} · {kcal} kcal · {'✓ Registrato' if registered else 'Da fare'}"); c2.metric("kcal",kcal)
-            if registered and st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True): set_meal_registered(d,mn,False); _mydiet_rerun()
+        meal_icon = mn.split(" ",1)[0] if " " in mn else "🍽️"
+        meal_label = mn.split(" ",1)[1] if " " in mn else mn
+        status_class = "done" if registered else "pending"
+        status_text = "✓ Registrato" if registered else "Da registrare"
+        st.markdown(f"""<div class=\"mydiet-day-meal {status_class}\"><div class=\"mydiet-day-meal-main\"><div class=\"mydiet-day-meal-icon\">{meal_icon}</div><div class=\"mydiet-day-meal-copy\"><div class=\"mydiet-day-meal-title\">{meal_label}</div><div class=\"mydiet-day-meal-name\">{m.get('name','Pasto')}</div><div class=\"mydiet-day-meal-status\">{status_text}</div></div><div class=\"mydiet-day-meal-kcal\"><b>{kcal}</b><span>kcal</span></div></div></div>""",unsafe_allow_html=True)
+        if registered and st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True): set_meal_registered(d,mn,False); _mydiet_rerun()
     tracking_mode=st.session_state.get("p_activity_tracking_mode","🚫 Solo dieta — non monitorare attività")
     if tracking_mode.startswith("⌚") and b["using_observed"]:
         st.markdown('<div class="mydiet-section">🏃 Attività</div>',unsafe_allow_html=True)
