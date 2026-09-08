@@ -442,15 +442,41 @@ st.markdown("""
    ========================================================== */
 #MainMenu, footer, header {visibility:hidden;}
 
+/* MyDiet owns its visual theme: do not inherit Streamlit/browser light mode. */
 :root {
+    color-scheme: dark;
+    --md-bg: #090a0f;
+    --md-bg-soft: #0d0f15;
+    --md-surface: #11131a;
+    --md-surface-2: #151821;
+    --md-surface-3: #1a1d27;
+    --md-border: rgba(255,255,255,.105);
+    --md-border-strong: rgba(255,255,255,.16);
+    --md-soft: rgba(255,255,255,.045);
+    --md-text: #f5f6f8;
+    --md-muted: #9aa0ad;
+    --md-subtle: #747b89;
+    --md-accent: #ff4b4b;
+    --md-accent-soft: rgba(255,75,75,.14);
+    --md-success: #35c77b;
     --md-radius: 22px;
     --md-radius-sm: 15px;
-    --md-border: rgba(128,128,128,.14);
-    --md-soft: rgba(128,128,128,.045);
-    --md-surface: rgba(255,255,255,.72);
-    --md-text: #20242b;
-    --md-muted: #747b86;
 }
+
+html, body, [data-testid="stAppViewContainer"], [data-testid="stAppViewBlockContainer"] {
+    background: var(--md-bg) !important;
+    color: var(--md-text) !important;
+}
+.stApp {
+    background: radial-gradient(circle at 50% -10%, #171923 0%, var(--md-bg) 42%, #07080c 100%) !important;
+}
+
+/* Force readable text even when the host Streamlit theme is light. */
+.stMarkdown, .stText, label, p, li, span, div {
+    color: inherit;
+}
+.stCaption, [data-testid="stCaptionContainer"] { color: var(--md-muted) !important; }
+[data-testid="stHeader"] { background: transparent !important; }
 
 .block-container {
     max-width: 940px;
@@ -478,8 +504,8 @@ st.markdown("""
     color:white;font-size:22px;box-shadow:0 8px 22px rgba(255,75,75,.18);
 }
 .mydiet-name {font-size:1.15rem;font-weight:850;letter-spacing:-.02em;line-height:1.05;}
-.mydiet-sub {font-size:.76rem;color:#888;margin-top:3px;}
-.mydiet-date {font-size:.78rem;color:#888;text-align:right;}
+.mydiet-sub {font-size:.76rem;color:var(--md-muted);margin-top:3px;}
+.mydiet-date {font-size:.78rem;color:var(--md-muted);text-align:right;}
 
 /* Navigation buttons */
 div[data-testid="stHorizontalBlock"] button {
@@ -514,11 +540,11 @@ h3 {font-size:1rem !important;letter-spacing:-.02em !important;}
     border:1px solid rgba(255,75,75,.20);
     box-shadow:0 8px 26px rgba(0,0,0,.045);
 }
-.muted {color:#888;font-size:.86rem;}
+.muted {color:var(--md-muted);font-size:.86rem;}
 .big {font-size:2.25rem;font-weight:850;letter-spacing:-.04em;line-height:1.05;}
 .ok {color:#22a06b;font-weight:750;}
 .bad {color:#d64545;font-weight:750;}
-.small {font-size:.78rem;color:#888;}
+.small {font-size:.78rem;color:var(--md-muted);}
 
 /* Streamlit metric cards */
 div[data-testid="stMetric"] {
@@ -536,7 +562,7 @@ div[data-testid="stExpander"] {
     border:1px solid var(--md-border) !important;
     border-radius:17px !important;
     overflow:hidden;
-    background:rgba(255,255,255,.42);
+    background:var(--md-surface-2);
 }
 div[data-baseweb="tab-list"] {gap:5px;}
 button[data-baseweb="tab"] {border-radius:12px !important;}
@@ -620,6 +646,27 @@ hr {margin:1.1rem 0 !important;opacity:.35;}
 }
 
 
+
+/* Form controls */
+.stTextInput input, .stNumberInput input, .stDateInput input,
+.stTextArea textarea, div[data-baseweb="select"] > div,
+div[data-baseweb="input"] > div, .stMultiSelect div[data-baseweb="select"] > div {
+    background: var(--md-surface-2) !important;
+    color: var(--md-text) !important;
+    border-color: var(--md-border-strong) !important;
+}
+.stTextInput input::placeholder, .stNumberInput input::placeholder, .stTextArea textarea::placeholder {
+    color: var(--md-subtle) !important;
+}
+.stSelectbox label, .stMultiSelect label, .stNumberInput label, .stTextInput label,
+.stTextArea label, .stRadio label, .stCheckbox label {
+    color: var(--md-muted) !important;
+}
+button[data-baseweb="tab"] { color: var(--md-muted) !important; }
+button[data-baseweb="tab"][aria-selected="true"] { color: var(--md-text) !important; }
+
+/* Keep success/warning/error surfaces readable in the dark theme. */
+div[data-testid="stAlert"] { color: var(--md-text) !important; }
 
 @media (max-width: 700px) {
     .block-container {max-width:100%;padding: .25rem .68rem 6rem;}
