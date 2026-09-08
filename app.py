@@ -3530,6 +3530,49 @@ elif st.session_state.page=="Dispensa":
 # ---------------- Attività / Health ----------------
 elif st.session_state.page=="Attività":
     st.title("🏃 Attività")
+    st.markdown("""
+    <style>
+    body:has(.activity-ui-marker) div[data-testid="stMetric"] {
+        background: linear-gradient(145deg, rgba(255,255,255,.055), rgba(255,255,255,.025));
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 18px;
+        padding: 12px 14px;
+        min-height: 92px;
+        box-shadow: 0 8px 24px rgba(0,0,0,.12);
+    }
+    body:has(.activity-ui-marker) div[data-testid="stMetricLabel"] {
+        font-size: .78rem; opacity: .72;
+    }
+    body:has(.activity-ui-marker) div[data-testid="stMetricValue"] {
+        font-size: 1.45rem; font-weight: 750;
+    }
+    body:has(.activity-ui-marker) .activity-hero {
+        background: linear-gradient(135deg, rgba(185,35,45,.18), rgba(255,255,255,.035));
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 24px; padding: 18px 20px; margin: 4px 0 18px;
+    }
+    body:has(.activity-ui-marker) .activity-hero-title { font-size: 1.15rem; font-weight: 750; margin-bottom: 4px; }
+    body:has(.activity-ui-marker) .activity-hero-sub { font-size: .86rem; opacity: .72; }
+    body:has(.activity-ui-marker) .activity-section {
+        font-size: 1.02rem; font-weight: 750; margin: 20px 0 10px;
+    }
+    body:has(.activity-ui-marker) .activity-source {
+        display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:999px;
+        background:rgba(255,255,255,.055); border:1px solid rgba(255,255,255,.07);
+        font-size:.76rem; opacity:.82; margin-top:6px;
+    }
+    @media (max-width: 700px) {
+        body:has(.activity-ui-marker) .activity-hero { padding: 15px 16px; border-radius: 20px; }
+        body:has(.activity-ui-marker) div[data-testid="stMetric"] { min-height: 82px; padding: 10px 11px; border-radius: 16px; }
+        body:has(.activity-ui-marker) div[data-testid="stMetricValue"] { font-size: 1.22rem; }
+    }
+    </style>
+    <div class="activity-ui-marker"></div>
+    <div class="activity-hero">
+      <div class="activity-hero-title">Movimento di oggi</div>
+      <div class="activity-hero-sub">Qui trovi attività, passi e consumo energetico senza modificare automaticamente il tuo piano alimentare.</div>
+    </div>
+    """, unsafe_allow_html=True)
     mode=st.session_state.get("p_activity_tracking_mode","🚫 Solo dieta — non monitorare attività")
     # Always initialize Health variables before the mode-specific branches.
     # Manual/solo-diet modes do not enter the native Health branch, but the
@@ -3607,7 +3650,7 @@ elif st.session_state.page=="Attività":
         st.caption(f"Provider Health attivo: **{provider_info.get('name','—')}** · stato: **{provider_info.get('status','—')}**")
 
     if h:
-        st.divider(); st.subheader("📊 Dati di oggi")
+        st.markdown('<div class="activity-section">📊 Dati di oggi</div>',unsafe_allow_html=True)
         cards=[
             ("👣 Passi oggi",h.get("steps_today"),"passi"),
             ("🔥 Calorie totali",h.get("calories_today"),"kcal"),
@@ -3633,7 +3676,7 @@ elif st.session_state.page=="Attività":
                     st.metric(lab,display)
 
         a=activity_summary()
-        st.divider(); st.subheader("🏃 Attività di oggi")
+        st.markdown('<div class="activity-section">🏃 Attività di oggi</div>',unsafe_allow_html=True)
         ac1,ac2,ac3=st.columns(3)
         ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
         ac2.metric("⚡ Calorie attive" if a["active_source"] != "stima" else "⚡ Calorie attive stimate", f"{a['active_calories']:,} kcal".replace(",","."))
@@ -3668,7 +3711,7 @@ elif st.session_state.page=="Attività":
                 st.write("**Trust:**",payload.get("trust",{}))
                 st.caption("Il payload compatto contiene solo metriche normalizzate e informazioni di trust; le sorgenti dettagliate restano nel bridge Android.")
         else:
-            st.divider(); st.subheader("🧪 Diagnostica")
+            st.markdown('<div class="activity-section">🧪 Diagnostica</div>',unsafe_allow_html=True)
             st.info("Google Fit legacy resta disponibile solo come diagnostica. I passi derivati e le calorie legacy non vengono usati nel bilancio perché non possiamo dimostrare che rappresentino correttamente il Galaxy Watch Ultra 2.")
 
             diag_view=st.session_state.get("diagnostics",{})
