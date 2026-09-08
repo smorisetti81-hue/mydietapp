@@ -3441,6 +3441,11 @@ elif st.session_state.page=="Dispensa":
 elif st.session_state.page=="Attività":
     st.title("🏃 Attività")
     mode=st.session_state.get("p_activity_tracking_mode","🚫 Solo dieta — non monitorare attività")
+    # Always initialize Health variables before the mode-specific branches.
+    # Manual/solo-diet modes do not enter the native Health branch, but the
+    # rendering below may still reference these variables.
+    h=st.session_state.get("health",{})
+    native=bool(h.get("native_health_snapshot")) if isinstance(h,dict) else False
     if mode.startswith("🚫"):
         st.info("🥗 Modalità solo dieta: MyDiet non monitora l'attività. Il piano alimentare resta indipendente dagli allenamenti.")
     elif mode.startswith("✍️"):
@@ -3457,8 +3462,8 @@ elif st.session_state.page=="Attività":
         if manual:
             st.success(f"✓ Attività manuale salvata · {int(manual.get('steps',0)):,} passi · {int(manual.get('active_calories',0)):,} kcal attive".replace(",","."))
     else:
-        h=st.session_state.get("health",{})
-        native=bool(h.get("native_health_snapshot"))
+        # Health variables are already initialized above.
+        pass
 
     if mode.startswith("⌚") and native:
         p=h.get("provider",{})
