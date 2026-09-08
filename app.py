@@ -3598,10 +3598,11 @@ elif st.session_state.page=="Attività":
                 elif x["status"]=="source_error": st.error(f"✕ {k}: impossibile leggere l'elenco delle sorgenti · HTTP {x.get('http','')} · {x.get('detail','')}")
                 else: st.error(f"✕ {k}: HTTP {x.get('http','')} · {x.get('detail','')}")
 
-    elif native:
-        st.warning("Il bridge è stato rilevato ma non contiene metriche leggibili. Ritorna al bridge Android, premi 'Leggi dati di oggi' e poi 'Invia dati'.")
     else:
-        st.info("Nessun dato Health disponibile in questa sessione.")
+        if native:
+            st.warning("Il bridge è stato rilevato ma non contiene metriche leggibili. Ritorna al bridge Android, premi 'Leggi dati di oggi' e poi 'Invia dati'.")
+        else:
+            st.info("Nessun dato Health disponibile in questa sessione.")
 
 # ---------------- Profilo ----------------
 
