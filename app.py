@@ -43,6 +43,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 UI_BETA_CSS = """
 <style>
 #MainMenu, footer, header {visibility:hidden;}
+.stApp { background: linear-gradient(180deg, rgba(248,249,251,.98) 0%, rgba(244,246,248,.98) 100%); }
 .block-container {max-width:1050px;padding-top:.7rem;padding-bottom:5rem;}
 .card {border:1px solid rgba(128,128,128,.16);border-radius:20px;padding:16px;margin:8px 0;background:rgba(128,128,128,.045);box-shadow:0 2px 12px rgba(0,0,0,.025);}
 .hero {border-radius:24px;padding:20px;background:linear-gradient(135deg,rgba(255,75,75,.14),rgba(128,128,128,.045));border:1px solid rgba(255,75,75,.18);}
@@ -442,16 +443,19 @@ st.markdown("""
 #MainMenu, footer, header {visibility:hidden;}
 
 :root {
-    --md-radius: 20px;
-    --md-radius-sm: 14px;
-    --md-border: rgba(128,128,128,.18);
-    --md-soft: rgba(128,128,128,.055);
+    --md-radius: 22px;
+    --md-radius-sm: 15px;
+    --md-border: rgba(128,128,128,.14);
+    --md-soft: rgba(128,128,128,.045);
+    --md-surface: rgba(255,255,255,.72);
+    --md-text: #20242b;
+    --md-muted: #747b86;
 }
 
 .block-container {
-    max-width: 980px;
-    padding-top: .65rem;
-    padding-bottom: 7rem;
+    max-width: 940px;
+    padding-top: .45rem;
+    padding-bottom: 7.5rem;
 }
 
 /* App header */
@@ -460,7 +464,7 @@ st.markdown("""
     align-items:center;
     justify-content:space-between;
     gap:16px;
-    padding: 8px 4px 18px;
+    padding: 6px 2px 12px;
 }
 .mydiet-brand {
     display:flex;
@@ -468,7 +472,7 @@ st.markdown("""
     gap:11px;
 }
 .mydiet-logo {
-    width:42px;height:42px;border-radius:14px;
+    width:40px;height:40px;border-radius:13px;
     display:flex;align-items:center;justify-content:center;
     background:linear-gradient(135deg,rgba(255,75,75,.95),rgba(255,145,100,.88));
     color:white;font-size:22px;box-shadow:0 8px 22px rgba(255,75,75,.18);
@@ -488,26 +492,27 @@ div[data-testid="stHorizontalBlock"] button {
 div[data-testid="stHorizontalBlock"] button:hover {transform:translateY(-1px);}
 
 /* Typography */
-h1 {font-size:2rem !important;letter-spacing:-.035em !important;margin-bottom:.15rem !important;}
-h2 {font-size:1.35rem !important;letter-spacing:-.025em !important;}
-h3 {font-size:1.05rem !important;letter-spacing:-.015em !important;}
+h1 {font-size:1.9rem !important;letter-spacing:-.045em !important;margin-bottom:.1rem !important;}
+h2 {font-size:1.3rem !important;letter-spacing:-.03em !important;}
+h3 {font-size:1rem !important;letter-spacing:-.02em !important;}
 .stCaption {line-height:1.45;}
 
 /* Generic cards */
 .card {
     border:1px solid var(--md-border);
     border-radius:var(--md-radius);
-    padding:18px 20px;
-    margin:9px 0;
-    background:var(--md-soft);
-    box-shadow:0 5px 20px rgba(0,0,0,.025);
+    padding:16px 18px;
+    margin:7px 0;
+    background:var(--md-surface);
+    box-shadow:0 4px 18px rgba(0,0,0,.035);
+    backdrop-filter: blur(8px);
 }
 .hero {
     border-radius:24px;
-    padding:22px;
+    padding:20px;
     background:linear-gradient(135deg,rgba(255,75,75,.16),rgba(255,145,100,.06) 58%,rgba(128,128,128,.035));
     border:1px solid rgba(255,75,75,.20);
-    box-shadow:0 10px 30px rgba(255,75,75,.06);
+    box-shadow:0 8px 26px rgba(0,0,0,.045);
 }
 .muted {color:#888;font-size:.86rem;}
 .big {font-size:2.25rem;font-weight:850;letter-spacing:-.04em;line-height:1.05;}
@@ -518,9 +523,10 @@ h3 {font-size:1.05rem !important;letter-spacing:-.015em !important;}
 /* Streamlit metric cards */
 div[data-testid="stMetric"] {
     border:1px solid var(--md-border);
-    border-radius:16px;
-    padding:12px 14px;
-    background:var(--md-soft);
+    border-radius:18px;
+    padding:11px 13px;
+    background:var(--md-surface);
+    box-shadow:0 3px 14px rgba(0,0,0,.025);
 }
 div[data-testid="stMetricLabel"] {font-size:.78rem !important;}
 div[data-testid="stMetricValue"] {font-weight:800 !important;}
@@ -528,8 +534,9 @@ div[data-testid="stMetricValue"] {font-weight:800 !important;}
 /* Inputs / expanders / tabs */
 div[data-testid="stExpander"] {
     border:1px solid var(--md-border) !important;
-    border-radius:16px !important;
+    border-radius:17px !important;
     overflow:hidden;
+    background:rgba(255,255,255,.42);
 }
 div[data-baseweb="tab-list"] {gap:5px;}
 button[data-baseweb="tab"] {border-radius:12px !important;}
@@ -578,9 +585,9 @@ hr {margin:1.1rem 0 !important;opacity:.35;}
 .st-key-bottom_nav {
     width: min(680px, 100%) !important;
     margin: 0 auto !important;
-    padding: 6px !important;
-    border-radius: 18px;
-    background: rgba(20,22,30,.96);
+    padding: 5px !important;
+    border-radius: 19px;
+    background: rgba(30,33,40,.96);
     border: 1px solid rgba(255,255,255,.10);
     box-shadow: 0 10px 35px rgba(0,0,0,.35);
     backdrop-filter: blur(14px);
@@ -615,15 +622,15 @@ hr {margin:1.1rem 0 !important;opacity:.35;}
 
 
 @media (max-width: 700px) {
-    .block-container {max-width:100%;padding: .35rem .75rem 5.5rem;}
-    .mydiet-header {padding:4px 2px 12px;}
+    .block-container {max-width:100%;padding: .25rem .68rem 6rem;}
+    .mydiet-header {padding:3px 1px 10px;}
     .mydiet-logo {width:38px;height:38px;border-radius:12px;font-size:20px;}
     .mydiet-name {font-size:1.02rem;}
     .mydiet-date {display:none;}
     h1 {font-size:1.65rem !important;}
     h2 {font-size:1.18rem !important;}
-    .hero {padding:18px;border-radius:20px;}
-    .card {padding:15px 16px;border-radius:17px;}
+    .hero {padding:16px;border-radius:20px;}
+    .card {padding:13px 14px;border-radius:17px;}
     .big {font-size:2rem;}
     div[data-testid="stMetric"] {padding:10px 11px;}
     div[data-testid="stHorizontalBlock"] {gap:6px !important;}
