@@ -19,7 +19,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v69 · onboarding + profilo + monitoraggio
+# MyDietApp v78.1 · UI cleanup + BMR target
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -689,7 +689,7 @@ div[data-testid="stAlert"] { color: var(--md-text) !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# Minimal app-style header: intentionally beta, to validate the visual direction
+# Global MyDiet header: rendered once for the whole app
 weekday_it={0:'Lunedì',1:'Martedì',2:'Mercoledì',3:'Giovedì',4:'Venerdì',5:'Sabato',6:'Domenica'}
 month_it={1:'gennaio',2:'febbraio',3:'marzo',4:'aprile',5:'maggio',6:'giugno',7:'luglio',8:'agosto',9:'settembre',10:'ottobre',11:'novembre',12:'dicembre'}
 now_ui=datetime.now(ROME)
@@ -1935,21 +1935,23 @@ def energy_profile():
     bmr=bmr_mifflin(float(p["weight"]),float(p["height"]),int(p["age"]),p["sex"])
     maintenance=round(bmr*ACTIVITY_FACTORS[p["activity_level"]])
     goal=st.session_state.get("p_diet_goal","🔻 Dimagrimento")
-    adjustments={
-        "🔻 Dimagrimento":-500,
-        "⚖️ Mantenimento":0,
-        "🔺 Aumento di peso":300,
-        "💪 Massa muscolare":200,
+    # The meal-plan target is anchored to BMR, not to the full activity-adjusted
+    # maintenance value. Planned training is a profile preference, not a reason
+    # to automatically increase today's food target.
+    bmr_targets={
+        "🔻 Dimagrimento":0.00,
+        "⚖️ Mantenimento":0.10,
+        "🔺 Aumento di peso":0.15,
+        "💪 Massa muscolare":0.10,
     }
     if goal=="🎯 Calorie personalizzate":
         custom=int(float(st.session_state.get("p_custom_calorie_target",0) or 0))
-        target=max(1200, custom if custom>0 else maintenance)
-        adjustment=target-maintenance
+        target=max(1500, custom if custom>0 else bmr)
     else:
-        adjustment=adjustments.get(goal,-500)
-        target=max(1200, maintenance+adjustment)
-    deficit=max(0, -adjustment)
-    surplus=max(0, adjustment)
+        target=max(1500, round(bmr*(1+bmr_targets.get(goal,0.0))))
+    adjustment=target-maintenance
+    deficit=max(0, maintenance-target)
+    surplus=max(0, target-maintenance)
     return {
         "bmr_est":bmr,"maintenance_est":maintenance,"target":target,
         "deficit":deficit,"surplus":surplus,"adjustment":adjustment,
@@ -2580,12 +2582,13 @@ def _save_profile_values(values):
         * ACTIVITY_FACTORS[values["activity_level"]]
     )
     goal = values["diet_goal"]
-    if goal == "🔻 Dimagrimento":
-        st.session_state.p_deficit = 500
-    elif goal == "🎯 Calorie personalizzate":
-        st.session_state.p_deficit = max(0, maintenance_for_save - int(values["custom_calorie_target"]))
+    bmr_save = bmr_mifflin(float(values["weight"]), float(values["height"]), int(values["age"]), values["sex"])
+    if goal == "🎯 Calorie personalizzate":
+        chosen_target = max(1500, int(values["custom_calorie_target"]))
     else:
-        st.session_state.p_deficit = 0
+        bmr_factor = {"🔻 Dimagrimento":0.00,"⚖️ Mantenimento":0.10,"🔺 Aumento di peso":0.15,"💪 Massa muscolare":0.10}.get(goal,0.0)
+        chosen_target = max(1500, round(bmr_save * (1 + bmr_factor)))
+    st.session_state.p_deficit = max(0, maintenance_for_save - chosen_target)
     st.session_state.profile_setup_complete = True
     # First successful profile save creates the anonymous browser identity.
     if not _state_token():
@@ -2636,11 +2639,17 @@ if not _profile_complete():
             goal_options,
             index=goal_options.index(st.session_state.p_diet_goal)
         )
-        custom_target = st.number_input(
-            "Target kcal personalizzato", 1200, 6000,
-            int(st.session_state.get("p_custom_calorie_target",0) or max(1200, energy_profile()["maintenance_est"])),
-            50, disabled=(diet_goal != "🎯 Calorie personalizzate")
-        )
+        if diet_goal == "🎯 Calorie personalizzate":
+            custom_target = st.number_input(
+                "Target kcal personalizzato", 1500, 6000,
+                int(st.session_state.get("p_custom_calorie_target",0) or max(1500, energy_profile()["bmr_est"])),
+                50
+            )
+            st.caption(f"BMR stimato: {energy_profile()['bmr_est']} kcal · mantenimento stimato: {energy_profile()['maintenance_est']} kcal")
+        else:
+            custom_target = 0
+            preview = energy_profile()
+            st.info(f"🎯 Target calcolato automaticamente: **{preview['target']} kcal/giorno** · base BMR {preview['bmr_est']} kcal. L'attività prevista non aumenta automaticamente il target.")
 
         st.subheader("🥗 Come vuoi mangiare?")
         style_options = ["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"]
@@ -2710,7 +2719,6 @@ if st.session_state.page=="Home":
     pct=min(max(eaten/max(target,1),0),1)
     weekdays=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
     date_label=f"{weekdays[datetime.now(ROME).weekday()]} {datetime.now(ROME).day:02d}/{datetime.now(ROME).month:02d}"
-    st.markdown(f"""<div class="mydiet-top"><div class="mydiet-brand"><div class="mydiet-logo">🥗</div><div><div class="mydiet-brand-title">MyDiet</div><div class="mydiet-brand-sub">Il tuo piano. La tua giornata.</div></div></div><div class="mydiet-date">{date_label}</div></div>""",unsafe_allow_html=True)
     st.markdown(f"""<div class="mydiet-kcal-card"><div class="mydiet-kcal-label">OGGI · {d.upper()}</div><div style="display:flex;align-items:end;justify-content:space-between;gap:12px;margin-top:5px;"><div><div class="mydiet-kcal-number">{eaten:,} <span style="font-size:1rem;font-weight:650;color:#9da4b0;">/ {target:,} kcal</span></div><div class="muted">{'Ti restano' if rem>=0 else 'Sei sopra il target di'} <b>{abs(rem):,} kcal</b></div></div><div style="font-size:1.8rem;">🎯</div></div></div>""".replace(",","."),unsafe_allow_html=True)
     st.progress(pct)
     if next_meal:
@@ -3565,7 +3573,12 @@ else:
         st.subheader("🎯 Obiettivo")
         goal_options=["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"]
         diet_goal=st.selectbox("Cosa vuoi ottenere?",goal_options,index=goal_options.index(st.session_state.p_diet_goal))
-        custom_target=st.number_input("Target kcal personalizzato",1200,6000,int(st.session_state.get("p_custom_calorie_target",0) or max(1200,ep["maintenance_est"])),50,disabled=(diet_goal!="🎯 Calorie personalizzate"))
+        if diet_goal == "🎯 Calorie personalizzate":
+            custom_target=st.number_input("Target kcal personalizzato",1500,6000,int(st.session_state.get("p_custom_calorie_target",0) or max(1500,ep["bmr_est"])),50)
+            st.caption(f"BMR stimato: {ep['bmr_est']} kcal · mantenimento stimato: {ep['maintenance_est']} kcal")
+        else:
+            custom_target=0
+            st.info(f"🎯 Target automatico: **{ep['target']} kcal/giorno** · calcolato a partire dal BMR ({ep['bmr_est']} kcal).")
 
         st.subheader("🥗 Stile alimentare")
         style_options=["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"]
