@@ -19,7 +19,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v78.1 · UI cleanup + BMR target
+# MyDietApp v79 · Profilo dinamico
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -855,7 +855,7 @@ _defaults = {
     "plan_generation_status":"idle", "plan_generation_message":"", "plan_generation_time":None,
     "plan_editor_selection":"current", "_plan_editor_next":False, "plan_edit_meal":None,
     "pantry":{}, "shopping_checked":{}, "pantry_consumed_by_meal":{}, "smart_food_advice":None, "registered_meals":{}, "shopping_source":"Tutte", "shopping_strategy":"⚖️ Qualità / prezzo", "shopping_radius":5,
-    "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None, "food_kcal_cache":{}, "profile_setup_complete":False
+    "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None, "food_kcal_cache":{}, "profile_setup_complete":False, "profile_change_summary":[], "plan_needs_regeneration":False, "manual_activity_today":{}, "profile_change_time":None
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
@@ -890,7 +890,7 @@ _PERSIST_KEYS = [
     "smart_food_advice", "registered_meals", "shopping_source",
     "shopping_strategy", "shopping_radius", "shopping_cart_mode",
     "shopping_cart_summary", "shopping_cart_time", "food_kcal_cache",
-    "profile_setup_complete",
+    "profile_setup_complete", "profile_change_summary", "plan_needs_regeneration", "manual_activity_today", "profile_change_time",
     # Profile values
     "p_name", "p_weight", "p_goal_weight", "p_height", "p_age", "p_sex",
     "p_activity_level", "p_deficit", "p_water_goal_ml", "p_quantity_mode",
@@ -2574,8 +2574,31 @@ def _profile_complete():
     return bool(st.session_state.get("profile_setup_complete", False))
 
 def _save_profile_values(values):
+    # Profile is the control center of MyDiet: compare the previous state first,
+    # then save the new one and record the consequences explicitly.
+    tracked = [
+        ("name", "Nome"), ("weight", "Peso attuale"), ("goal_weight", "Peso desiderato"),
+        ("height", "Altezza"), ("age", "Età"), ("sex", "Sesso"),
+        ("activity_level", "Attività abituale"), ("training_frequency", "Allenamento previsto"),
+        ("diet_goal", "Obiettivo"), ("diet_style", "Stile alimentare"),
+        ("custom_calorie_target", "Target calorie"), ("activity_tracking_mode", "Monitoraggio attività"),
+        ("water_goal_ml", "Obiettivo acqua"), ("quantity_mode", "Visualizzazione quantità"),
+        ("allergies", "Allergie / intolleranze"), ("excluded_foods", "Alimenti esclusi"),
+    ]
+    changes=[]
+    for key,label in tracked:
+        before=st.session_state.get("p_"+key)
+        after=values.get(key)
+        if before != after:
+            def fmt(v):
+                if key=="water_goal_ml": return f"{float(v)/1000:.2f} L" if v is not None else "—"
+                if key=="custom_calorie_target": return f"{int(v):,} kcal".replace(",", ".") if v else "automatico"
+                return str(v) if v not in (None, "") else "—"
+            changes.append({"label":label,"before":fmt(before),"after":fmt(after),"key":key})
+
     for key, value in values.items():
         st.session_state["p_"+key] = value
+
     # Keep legacy deficit aligned for the weight projection and older state.
     maintenance_for_save = round(
         bmr_mifflin(float(values["weight"]), float(values["height"]), int(values["age"]), values["sex"])
@@ -2590,6 +2613,18 @@ def _save_profile_values(values):
         chosen_target = max(1500, round(bmr_save * (1 + bmr_factor)))
     st.session_state.p_deficit = max(0, maintenance_for_save - chosen_target)
     st.session_state.profile_setup_complete = True
+
+    # Changes that affect the generated menu make the existing plan stale, but
+    # never overwrite it silently. The user gets an explicit regeneration action.
+    regeneration_keys={
+        "weight","goal_weight","height","age","sex","activity_level",
+        "training_frequency","diet_goal","diet_style","custom_calorie_target",
+        "allergies","excluded_foods"
+    }
+    if any(c["key"] in regeneration_keys for c in changes):
+        st.session_state.plan_needs_regeneration = True
+    st.session_state.profile_change_summary = changes
+    st.session_state.profile_change_time = datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
     # First successful profile save creates the anonymous browser identity.
     if not _state_token():
         st.query_params["mdid"] = uuid.uuid4().hex
@@ -2746,12 +2781,21 @@ if st.session_state.page=="Home":
         with st.container(border=True):
             c1,c2=st.columns([5,1]); c1.markdown(f"**{mn}**"); c1.caption(f"{m.get('name','Pasto')} · {kcal} kcal · {'✓ Registrato' if registered else 'Da fare'}"); c2.metric("kcal",kcal)
             if registered and st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True): set_meal_registered(d,mn,False); _mydiet_rerun()
-    if b["using_observed"]:
+    tracking_mode=st.session_state.get("p_activity_tracking_mode","🚫 Solo dieta — non monitorare attività")
+    if tracking_mode.startswith("⌚") and b["using_observed"]:
         st.markdown('<div class="mydiet-section">🏃 Attività</div>',unsafe_allow_html=True)
         a=activity_summary()
         with st.container(border=True):
             c1,c2,c3=st.columns(3); c1.metric("👣 Passi",f"{a['steps']:,}".replace(",",".")); c2.metric("⚡ Attive",f"{a['active_calories']:,} kcal".replace(",",".")); c3.metric("🏋️ Allenamenti",str(a['workouts']))
             st.caption("L'attività aggiorna il bilancio della giornata, ma non modifica automaticamente il piano alimentare.")
+    elif tracking_mode.startswith("✍️"):
+        manual=st.session_state.get("manual_activity_today",{})
+        st.markdown('<div class="mydiet-section">🏃 Attività manuale</div>',unsafe_allow_html=True)
+        with st.container(border=True):
+            if manual.get("date")==today():
+                c1,c2,c3=st.columns(3); c1.metric("👣 Passi",f"{int(manual.get('steps',0)):,}".replace(",",".")); c2.metric("⚡ Attive",f"{int(manual.get('active_calories',0)):,} kcal".replace(",",".")); c3.metric("🏋️ Allenamenti",str(int(manual.get('workouts',0))))
+            else:
+                st.caption("Nessuna attività manuale registrata oggi.")
     with st.expander("🍴 Ho mangiato qualcosa fuori dal piano",expanded=False):
         c1,c2=st.columns([3,1]); n=c1.text_input("Alimento",placeholder="Pizza margherita",key="manual_food_name_home"); k=c2.number_input("kcal",0,3000,500,10,key="manual_food_kcal_home")
         if st.button("Registra",type="primary",key="manual_food_register_home") and n.strip(): st.session_state.manual_foods.append({"name":n.strip(),"kcal":k,"date":today()}); _mydiet_rerun()
@@ -2761,6 +2805,9 @@ if st.session_state.page=="Home":
 elif st.session_state.page=="Piano":
     ensure_plan_metadata()
     st.title("🍽️ Piano")
+    if st.session_state.get("plan_needs_regeneration"):
+        st.warning("⚠️ Il profilo è cambiato: il piano attuale non è ancora aggiornato.")
+        st.caption("Puoi continuare a usare il piano attuale oppure rigenerarlo esplicitamente con i nuovi dati del profilo.")
 
     days_week=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
     has_next=bool(st.session_state.get("next_meal_plan"))
@@ -3392,11 +3439,28 @@ elif st.session_state.page=="Dispensa":
 
 # ---------------- Attività / Health ----------------
 elif st.session_state.page=="Attività":
-    st.title("🏃 Attività & Health")
-    h=st.session_state.get("health",{})
-    native=bool(h.get("native_health_snapshot"))
+    st.title("🏃 Attività")
+    mode=st.session_state.get("p_activity_tracking_mode","🚫 Solo dieta — non monitorare attività")
+    if mode.startswith("🚫"):
+        st.info("🥗 Modalità solo dieta: MyDiet non monitora l'attività. Il piano alimentare resta indipendente dagli allenamenti.")
+    elif mode.startswith("✍️"):
+        st.caption("Inserimento manuale · questi valori descrivono la giornata ma non cambiano automaticamente il piano alimentare.")
+        manual=st.session_state.setdefault("manual_activity_today",{})
+        c1,c2,c3=st.columns(3)
+        with c1: msteps=st.number_input("👣 Passi",0,100000,int(manual.get("steps",0)),500)
+        with c2: mcal=st.number_input("⚡ Calorie attività",0,10000,int(manual.get("active_calories",0)),50)
+        with c3: mw=st.number_input("🏋️ Allenamenti",0,10,int(manual.get("workouts",0)),1)
+        mdur=st.number_input("Durata allenamento (min)",0,1440,int(manual.get("duration_minutes",0)),5)
+        if st.button("💾 Salva attività di oggi",type="primary",use_container_width=True):
+            st.session_state.manual_activity_today={"date":today(),"steps":msteps,"active_calories":mcal,"workouts":mw,"duration_minutes":mdur}
+            _mydiet_rerun()
+        if manual:
+            st.success(f"✓ Attività manuale salvata · {int(manual.get('steps',0)):,} passi · {int(manual.get('active_calories',0)):,} kcal attive".replace(",","."))
+    else:
+        h=st.session_state.get("health",{})
+        native=bool(h.get("native_health_snapshot"))
 
-    if native:
+    if mode.startswith("⌚") and native:
         p=h.get("provider",{})
         st.success(f"✓ Health Connect nativo attivo · snapshot ricevuto {st.session_state.get('last_sync') or '—'}")
         st.caption(f"Bridge Android {p.get('bridge_version') or '—'} · Samsung Health → Health Connect → MyDietApp")
@@ -3406,7 +3470,7 @@ elif st.session_state.page=="Attività":
         c1.metric("Passi verificati", "Sì" if trust.get("steps") else "No")
         c2.metric("Calorie totali verificate", "Sì" if trust.get("total_calories") else "No")
         c3.metric("Snapshot", h.get("date") or "—")
-    else:
+    elif mode.startswith("⌚"):
         st.caption("Dati reali separati dal target alimentare. Health Connect nativo è la fonte produttiva; Google Fit resta solo diagnostica.")
 
         cid=st.secrets.get("GOOGLE_CLIENT_ID"); cs=st.secrets.get("GOOGLE_CLIENT_SECRET"); ru=st.secrets.get("REDIRECT_URI")
@@ -3546,6 +3610,16 @@ else:
     st.caption("Il profilo guida il target e il piano. Il monitoraggio dell'attività è opzionale.")
 
     ep = energy_profile()
+
+    if st.session_state.get("profile_change_summary"):
+        changes=st.session_state.get("profile_change_summary",[])
+        st.markdown("### ✅ Profilo aggiornato")
+        for c in changes:
+            st.caption(f"**{c['label']}** · {c['before']} → **{c['after']}**")
+        if st.session_state.get("plan_needs_regeneration"):
+            st.warning("⚠️ Il piano attuale è ancora basato sui parametri precedenti. MyDiet non lo modifica automaticamente per non perdere le tue modifiche manuali.")
+            st.caption("Quando vuoi, vai in Piano e scegli esplicitamente di rigenerare il piano con il nuovo profilo.")
+
     st.markdown(
         f"<div class='hero' style='padding:18px 20px;margin:8px 0 12px;'>"
         f"<div class='small'>TARGET DEL TUO PIANO</div>"
