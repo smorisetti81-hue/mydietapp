@@ -605,6 +605,49 @@ hr {margin:1.1rem 0 !important;opacity:.35;}
 }
 .plan-mode-banner strong {display:block;font-size:1.02rem;margin:2px 0;}
 
+
+/* V82: Piano visual refresh — weekly context, day header and meal containers */
+div[data-testid="stRadio"] [role="radiogroup"] {
+    gap:6px !important;
+    background:var(--md-surface-2);
+    border:1px solid var(--md-border);
+    border-radius:16px;
+    padding:5px;
+}
+div[data-testid="stRadio"] label {
+    border-radius:11px !important;
+    padding:7px 10px !important;
+    min-height:34px !important;
+}
+div[data-testid="stRadio"] label:has(input:checked) {
+    background:rgba(255,75,75,.16) !important;
+}
+.mydiet-plan-day-head {
+    display:flex; align-items:flex-end; justify-content:space-between; gap:12px;
+    margin:14px 0 10px; padding:2px 2px 0;
+}
+.mydiet-plan-day-title {font-size:1.28rem;font-weight:900;letter-spacing:-.025em;line-height:1.05;}
+.mydiet-plan-day-meta {font-size:.72rem;color:#8f96a2;margin-top:5px;}
+.mydiet-plan-meal-head {
+    display:flex;align-items:center;gap:10px;margin-bottom:8px;
+}
+.mydiet-plan-meal-icon {
+    width:36px;height:36px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+    background:rgba(255,255,255,.055);font-size:1.02rem;flex:0 0 36px;
+}
+.mydiet-plan-meal-title {font-size:.92rem;font-weight:850;line-height:1.1;}
+.mydiet-plan-meal-name {font-size:.78rem;color:#9ba1ad;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mydiet-plan-meal-kcal {margin-left:auto;text-align:right;white-space:nowrap;}
+.mydiet-plan-meal-kcal b {font-size:.92rem;font-weight:900;}
+.mydiet-plan-meal-kcal span {display:block;font-size:.62rem;color:#7f8693;margin-top:3px;}
+/* Make the bordered meal containers feel like native cards. */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius:19px !important;
+    background:linear-gradient(145deg,#15181e,#101216) !important;
+    border-color:rgba(255,255,255,.075) !important;
+    box-shadow:0 5px 18px rgba(0,0,0,.12);
+}
+
 /* Fixed mobile-style bottom navigation */
 .mydiet-bottom-nav {
     position:fixed; left:10px; right:10px; bottom:10px; z-index:9999;
@@ -2974,8 +3017,11 @@ elif st.session_state.page=="Piano":
             day_meals=st.session_state.meal_plan.get(day,{})
             day_total=round(sum(item_kcal(i) for m in day_meals.values() for i in active_items(m)))
             registered_count=sum(1 for mn in day_meals if _meal_is_registered(day,mn)) if not editing_next else 0
-            st.markdown(f"### {day}")
-            st.caption(f"{day_total} kcal · {('bozza' if editing_next else f'{registered_count}/{len(day_meals)} pasti registrati')}")
+            day_status = 'BOZZA · non attiva' if editing_next else f'{registered_count}/{len(day_meals)} pasti registrati'
+            st.markdown(
+                f"<div class='mydiet-plan-day-head'><div><div class='mydiet-plan-day-title'>📅 {day}</div><div class='mydiet-plan-day-meta'>{day_status}</div></div><div class='mydiet-plan-meal-kcal'><b>{day_total}</b><span>kcal previste</span></div></div>",
+                unsafe_allow_html=True
+            )
 
             edit_key=st.session_state.get("plan_edit_meal")
             if edit_key and (edit_key[0]!=day or edit_key[1] not in day_meals):
@@ -2990,15 +3036,18 @@ elif st.session_state.page=="Piano":
                 with st.container(border=True):
                     left,right=st.columns([5.5,1.5])
                     with left:
-                        st.markdown(f"**{mn}**")
+                        meal_icon = '📍' if out_of_home else mn.split(' ',1)[0]
+                        meal_title = mn.split(' ',1)[1] if ' ' in mn else mn
                         if out_of_home:
                             display_name="Pasto fuori"
                         elif items:
                             display_name=m.get("name","Pasto")
                         else:
                             display_name="Nessun alimento inserito"
-                        st.write(display_name)
-                        st.caption(f"{kcal} kcal · {status}")
+                        st.markdown(
+                            f"<div class='mydiet-plan-meal-head'><div class='mydiet-plan-meal-icon'>{meal_icon}</div><div style='min-width:0;flex:1'><div class='mydiet-plan-meal-title'>{meal_title}</div><div class='mydiet-plan-meal-name'>{display_name}</div></div><div class='mydiet-plan-meal-kcal'><b>{kcal}</b><span>kcal · {status}</span></div></div>",
+                            unsafe_allow_html=True
+                        )
                     with right:
                         if not editing_next and meal_registered:
                             if st.button("↩",key=f"undo_{day}_{mn}",help="Annulla registrazione",use_container_width=True):
