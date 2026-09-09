@@ -15,11 +15,14 @@ import copy
 import re
 import math
 import os
+
+# V86: durable PostgreSQL/Supabase profile persistence.
+from db import ensure_schema as db_ensure_schema, load_profile as db_load_profile, save_profile as db_save_profile
 from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v79 · Profilo dinamico
+# MyDietApp v86 · PostgreSQL profile persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -1034,6 +1037,46 @@ if not str(st.query_params.get("mdid", "") or "").strip():
 if not st.session_state.get("_persistent_state_loaded", False):
     _restore_app_state()
     st.session_state["_persistent_state_loaded"] = True
+
+# ============================================================
+# V86 — PostgreSQL/Supabase durable profile persistence
+# ============================================================
+def _database_url():
+    try:
+        return str(st.secrets.get("DATABASE_URL", "") or "").strip()
+    except Exception:
+        return ""
+
+def _db_load_profile_once():
+    if st.session_state.get("_db_profile_loaded", False):
+        return
+    st.session_state["_db_profile_loaded"] = True
+    mdid = _state_token()
+    dsn = _database_url()
+    if not mdid or not dsn:
+        st.session_state["_db_status"] = "non configurato"
+        return
+    try:
+        db_ensure_schema(dsn)
+        row = db_load_profile(mdid, dsn)
+        if row:
+            for key in ["name", "weight", "goal_weight", "height", "age", "sex",
+                        "activity_level", "deficit", "water_goal_ml", "quantity_mode",
+                        "diet_goal", "diet_style", "custom_calorie_target",
+                        "activity_tracking_mode", "training_frequency", "allergies",
+                        "excluded_foods"]:
+                if key in row and row[key] is not None:
+                    st.session_state["p_" + key] = row[key]
+            st.session_state["profile_setup_complete"] = bool(row.get("profile_setup_complete", False))
+            st.session_state["_db_profile_found"] = True
+            st.session_state["_db_status"] = "profilo caricato"
+        else:
+            st.session_state["_db_status"] = "pronto"
+    except Exception as e:
+        # DB must never make the app unusable; keep the /tmp transition fallback.
+        st.session_state["_db_status"] = "errore: " + str(e)[:160]
+
+_db_load_profile_once()
 
 # Pull background Health data when an API transport is configured.
 def _ingest_remote_health_sync():
@@ -2768,6 +2811,17 @@ def _save_profile_values(values):
     if not _state_token():
         st.query_params["mdid"] = uuid.uuid4().hex
     _persist_app_state()
+
+    # V86: PostgreSQL is the durable source for profile data. The local /tmp
+    # snapshot above remains only as a transition fallback while DB is configured.
+    dsn = _database_url()
+    if dsn:
+        try:
+            db_ensure_schema(dsn)
+            db_save_profile(_state_token(), values, profile_setup_complete=True, url=dsn)
+            st.session_state["_db_status"] = "salvato su PostgreSQL"
+        except Exception as e:
+            st.session_state["_db_status"] = "salvataggio DB non riuscito: " + str(e)[:160]
 
 
 if not _profile_complete():
