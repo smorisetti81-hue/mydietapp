@@ -1035,6 +1035,69 @@ if not st.session_state.get("_persistent_state_loaded", False):
     _restore_app_state()
     st.session_state["_persistent_state_loaded"] = True
 
+# Pull background Health data when an API transport is configured.
+_ingest_remote_health_sync()
+
+def _ingest_remote_health_sync():
+    """Pull the latest native Health snapshot from the optional sync API.
+
+    The Android bridge writes to the API in background. MyDiet only reads the
+    latest snapshot here; the local URL bridge remains a supported fallback.
+    """
+    if st.session_state.get("_remote_health_checked_at"):
+        try:
+            age=(datetime.now(ROME)-datetime.fromisoformat(st.session_state["_remote_health_checked_at"])).total_seconds()
+            if age < 300:
+                return False
+        except Exception:
+            pass
+    api_url=str(st.secrets.get("HEALTH_SYNC_API_URL","") or "").strip().rstrip("/")
+    token=str(st.secrets.get("HEALTH_SYNC_TOKEN","") or "").strip()
+    profile_id=_state_token()
+    st.session_state["_remote_health_checked_at"]=datetime.now(ROME).isoformat()
+    if not api_url or not token or not profile_id:
+        return False
+    try:
+        r=requests.get(f"{api_url}/v1/health/latest/{urllib.parse.quote(profile_id,safe='')}",
+                       headers={"X-MyDiet-Token":token,"Accept":"application/json"}, timeout=8)
+        if r.status_code != 200:
+            return False
+        obj=r.json()
+        raw=obj.get("payload")
+        payload=_decode_health_bridge_payload(raw)
+        if not payload:
+            return False
+        fingerprint=str(raw)[:32]
+        if st.session_state.get("health_bridge_fingerprint")==fingerprint:
+            return False
+        metrics=payload.get("metrics",{})
+        health={
+            "provider":{"key":"health_connect_native","name":"Health Connect (Android nativo)","status":"active","schema":payload.get("schema"),"received_at":datetime.now(ROME).isoformat(),"bridge_version":payload.get("bridge_version")},
+            "date":payload.get("date") or today(),
+            "steps_today":metrics.get("steps"),"calories_today":metrics.get("total_calories"),"active_calories_today":metrics.get("active_calories"),
+            "distance_today":metrics.get("distance_km"),"weight":metrics.get("weight_kg"),"body_fat":metrics.get("body_fat_percent"),
+            "lean_mass":metrics.get("lean_mass_kg"),"bmr":metrics.get("bmr_kcal_per_day"),"workouts_today":metrics.get("workouts"),
+            "workout_details_today":metrics.get("workout_details",[]),"heart_rate_avg":metrics.get("heart_rate_avg"),
+            "heart_rate_min":metrics.get("heart_rate_min"),"heart_rate_max":metrics.get("heart_rate_max"),"heart_rate_samples":metrics.get("heart_rate_samples"),
+            "sleep_minutes":metrics.get("sleep_minutes"),
+            "steps_source_verified":bool(payload.get("trust",{}).get("steps",False)),
+            "calories_source_verified":bool(payload.get("trust",{}).get("total_calories",False)),
+            "active_calories_source_verified":bool(payload.get("trust",{}).get("active_calories",False)),
+            "native_health_snapshot":True,"native_health_payload":payload,
+        }
+        hist={}
+        for key,value in (("steps",metrics.get("steps")),("calories",metrics.get("total_calories")),("weight",metrics.get("weight_kg")),("body_fat",metrics.get("body_fat_percent")),("distance",metrics.get("distance_km"))):
+            if value is not None: hist[key]=[{"date":health["date"],"value":value}]
+        st.session_state.health=health
+        st.session_state.health_history=hist
+        st.session_state.diagnostics={"native_bridge":{"status":"available","type":"Health Connect native background sync","bridge_version":payload.get("bridge_version"),"received_at":health["provider"]["received_at"]}}
+        st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+        st.session_state.health_bridge_fingerprint=fingerprint
+        st.session_state["health_remote_synced"]=True
+        return True
+    except Exception:
+        return False
+
 # Save before every explicit rerun so meal edits, registrations, pantry
 # changes and navigation survive a recreated Streamlit session.
 def _mydiet_rerun():
