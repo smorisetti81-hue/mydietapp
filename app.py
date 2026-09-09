@@ -1036,9 +1036,8 @@ if not st.session_state.get("_persistent_state_loaded", False):
     st.session_state["_persistent_state_loaded"] = True
 
 # Pull background Health data when an API transport is configured.
-_ingest_remote_health_sync()
-
 def _ingest_remote_health_sync():
+
     """Pull the latest native Health snapshot from the optional sync API.
 
     The Android bridge writes to the API in background. MyDiet only reads the
@@ -1097,6 +1096,8 @@ def _ingest_remote_health_sync():
         return True
     except Exception:
         return False
+
+_ingest_remote_health_sync()
 
 # Save before every explicit rerun so meal edits, registrations, pantry
 # changes and navigation survive a recreated Streamlit session.
