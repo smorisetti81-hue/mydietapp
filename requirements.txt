@@ -5,3 +5,4 @@ Pillow
 streamlit-option-menu
 requests
 google-genai>=2.3.0
+psycopg[binary]>=3.2,<4
