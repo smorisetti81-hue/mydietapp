@@ -1074,9 +1074,31 @@ def _db_load_profile_once():
             st.session_state["_db_status"] = "pronto"
     except Exception as e:
         # DB must never make the app unusable; keep the /tmp transition fallback.
-        st.session_state["_db_status"] = "errore: " + str(e)[:160]
+        st.session_state["_db_status"] = "errore PostgreSQL: " + str(e)[:300]
 
 _db_load_profile_once()
+
+def _db_diagnostic():
+    """Safe connectivity/read test; never displays the database password."""
+    dsn = _database_url()
+    if not dsn:
+        return {"ok": False, "status": "DATABASE_URL assente nei Secrets"}
+    try:
+        import psycopg
+        dsn_test = dsn if "sslmode=" in dsn else dsn + (("&" if "?" in dsn else "?") + "sslmode=require")
+        with psycopg.connect(dsn_test, connect_timeout=8) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_database(), current_user, current_schema()")
+                dbname, user, schema = cur.fetchone()
+                cur.execute("SELECT to_regclass('public.profiles')")
+                table = cur.fetchone()[0]
+                count = None
+                if table:
+                    cur.execute("SELECT COUNT(*) FROM public.profiles")
+                    count = cur.fetchone()[0]
+        return {"ok": True, "database": dbname, "user": user, "schema": schema, "table": table, "rows": count}
+    except Exception as e:
+        return {"ok": False, "status": str(e)[:500]}
 
 # Pull background Health data when an API transport is configured.
 def _ingest_remote_health_sync():
@@ -2821,7 +2843,7 @@ def _save_profile_values(values):
             db_save_profile(_state_token(), values, profile_setup_complete=True, url=dsn)
             st.session_state["_db_status"] = "salvato su PostgreSQL"
         except Exception as e:
-            st.session_state["_db_status"] = "salvataggio DB non riuscito: " + str(e)[:160]
+            st.session_state["_db_status"] = "salvataggio DB non riuscito: " + str(e)[:300]
 
 
 if not _profile_complete():
@@ -3865,6 +3887,23 @@ elif st.session_state.page=="Attività":
 else:
     st.title("👤 Profilo")
     st.caption("Il profilo guida il target e il piano. Il monitoraggio dell'attività è opzionale.")
+    db_status = st.session_state.get("_db_status", "non verificato")
+    if db_status == "profilo caricato":
+        st.success("🟢 PostgreSQL: profilo caricato da Supabase")
+    elif db_status.startswith("DB raggiunto"):
+        st.info("🟡 PostgreSQL raggiunto, ma nessun profilo trovato per questo mdid.")
+    elif db_status.startswith("errore") or db_status.startswith("salvataggio"):
+        st.error("🔴 " + db_status)
+    with st.expander("🔧 Diagnostica PostgreSQL", expanded=db_status.startswith("errore") or db_status.startswith("salvataggio")):
+        if st.button("Testa connessione PostgreSQL", key="db_diag_button"):
+            diag = _db_diagnostic()
+            if diag.get("ok"):
+                st.success("Connessione PostgreSQL OK")
+                st.write(f"Database: `{diag.get('database')}` · Utente: `{diag.get('user')}` · Schema: `{diag.get('schema')}`")
+                st.write(f"Tabella `public.profiles`: `{diag.get('table')}` · Righe: `{diag.get('rows')}`")
+            else:
+                st.error("Test PostgreSQL fallito: " + str(diag.get("status", "errore sconosciuto")))
+
 
     ep = energy_profile()
 
