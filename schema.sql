@@ -26,3 +26,27 @@ CREATE TABLE IF NOT EXISTS profiles (
 );
 
 CREATE INDEX IF NOT EXISTS idx_profiles_updated_at ON profiles(updated_at);
+
+
+-- MyDiet v86.2 — Phase 2 durable meal-plan aggregate
+CREATE TABLE IF NOT EXISTS meal_plans (
+    mdid TEXT PRIMARY KEY REFERENCES profiles(mdid) ON DELETE CASCADE,
+    plan_week_start DATE,
+    meal_plan JSONB NOT NULL DEFAULT '{}'::jsonb,
+    overrides JSONB NOT NULL DEFAULT '{}'::jsonb,
+    plan_history JSONB NOT NULL DEFAULT '{}'::jsonb,
+    out_lunch_days JSONB NOT NULL DEFAULT '[]'::jsonb,
+    out_dinner_days JSONB NOT NULL DEFAULT '[]'::jsonb,
+    mensa_menus JSONB NOT NULL DEFAULT '{}'::jsonb,
+    next_meal_plan JSONB,
+    next_overrides JSONB NOT NULL DEFAULT '{}'::jsonb,
+    next_week_start DATE,
+    next_out_lunch_days JSONB NOT NULL DEFAULT '[]'::jsonb,
+    next_out_dinner_days JSONB NOT NULL DEFAULT '[]'::jsonb,
+    next_mensa_menus JSONB NOT NULL DEFAULT '{}'::jsonb,
+    plan_needs_regeneration BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_meal_plans_updated_at ON meal_plans(updated_at);
+ALTER TABLE meal_plans ENABLE ROW LEVEL SECURITY;

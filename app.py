@@ -17,12 +17,16 @@ import math
 import os
 
 # V86: durable PostgreSQL/Supabase profile persistence.
-from db import ensure_schema as db_ensure_schema, load_profile as db_load_profile, save_profile as db_save_profile
+from db import (
+    ensure_schema as db_ensure_schema, load_profile as db_load_profile, save_profile as db_save_profile,
+    ensure_plan_schema as db_ensure_plan_schema, load_meal_plan_state as db_load_meal_plan_state,
+    save_meal_plan_state as db_save_meal_plan_state,
+)
 from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v86 · PostgreSQL profile persistence
+# MyDietApp v86.2 · PostgreSQL profile + meal plan persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -1096,9 +1100,81 @@ def _db_diagnostic():
                 if table:
                     cur.execute("SELECT COUNT(*) FROM public.profiles")
                     count = cur.fetchone()[0]
-        return {"ok": True, "database": dbname, "user": user, "schema": schema, "table": table, "rows": count}
+                cur.execute("SELECT to_regclass('public.meal_plans')")
+                plan_table = cur.fetchone()[0]
+                plan_rows = None
+                if plan_table:
+                    cur.execute("SELECT COUNT(*) FROM public.meal_plans")
+                    plan_rows = cur.fetchone()[0]
+        return {"ok": True, "database": dbname, "user": user, "schema": schema, "table": table, "rows": count, "plan_table": plan_table, "plan_rows": plan_rows}
     except Exception as e:
         return {"ok": False, "status": str(e)[:500]}
+
+def _db_plan_state():
+    """Return only durable meal-plan domain data, never the full Streamlit session."""
+    return {
+        "plan_week_start": st.session_state.get("plan_week_start"),
+        "meal_plan": st.session_state.get("meal_plan", {}),
+        "overrides": st.session_state.get("overrides", {}),
+        "plan_history": st.session_state.get("plan_history", {}),
+        "out_lunch_days": st.session_state.get("out_lunch_days", []),
+        "out_dinner_days": st.session_state.get("out_dinner_days", []),
+        "mensa_menus": st.session_state.get("mensa_menus", {}),
+        "next_meal_plan": st.session_state.get("next_meal_plan"),
+        "next_overrides": st.session_state.get("next_overrides", {}),
+        "next_week_start": st.session_state.get("next_week_start"),
+        "next_out_lunch_days": st.session_state.get("next_out_lunch_days", []),
+        "next_out_dinner_days": st.session_state.get("next_out_dinner_days", []),
+        "next_mensa_menus": st.session_state.get("next_mensa_menus", {}),
+        "plan_needs_regeneration": bool(st.session_state.get("plan_needs_regeneration", False)),
+    }
+
+
+def _db_load_plan_once():
+    if st.session_state.get("_db_plan_loaded", False):
+        return
+    st.session_state["_db_plan_loaded"] = True
+    mdid = _state_token()
+    dsn = _database_url()
+    if not mdid or not dsn:
+        return
+    try:
+        db_ensure_plan_schema(dsn)
+        row = db_load_meal_plan_state(mdid, dsn)
+        if row:
+            for key, value in row.items():
+                if key in {
+                    "plan_week_start", "meal_plan", "overrides", "plan_history",
+                    "out_lunch_days", "out_dinner_days", "mensa_menus",
+                    "next_meal_plan", "next_overrides", "next_week_start",
+                    "next_out_lunch_days", "next_out_dinner_days", "next_mensa_menus",
+                    "plan_needs_regeneration"
+                }:
+                    # A DB row is the durable source. It is allowed to replace the
+                    # transient /tmp snapshot for these plan-domain fields.
+                    st.session_state[key] = value
+            st.session_state["_db_plan_found"] = True
+            st.session_state["_db_plan_status"] = "piano caricato"
+        else:
+            st.session_state["_db_plan_status"] = "nessun piano salvato"
+    except Exception as e:
+        st.session_state["_db_plan_status"] = "errore PostgreSQL piano: " + str(e)[:300]
+
+
+def _db_save_plan_state():
+    dsn = _database_url()
+    mdid = _state_token()
+    if not dsn or not mdid:
+        return False
+    try:
+        db_ensure_plan_schema(dsn)
+        db_save_meal_plan_state(mdid, _db_plan_state(), dsn)
+        st.session_state["_db_plan_status"] = "piano salvato"
+        return True
+    except Exception as e:
+        st.session_state["_db_plan_status"] = "salvataggio piano non riuscito: " + str(e)[:300]
+        return False
+
 
 # Pull background Health data when an API transport is configured.
 def _ingest_remote_health_sync():
@@ -1306,8 +1382,6 @@ def archive_current_plan(reason="Nuovo piano"):
     return archive_id
 
 
-maybe_activate_next_plan()
-
 def normalize_ai_plan(raw):
     """Normalize Gemini's weekly-plan JSON into the internal MyDiet structure."""
     if isinstance(raw, str):
@@ -1424,6 +1498,10 @@ def historical_food_library(limit=None):
     return vals[:limit] if limit else vals
 
 ensure_plan_metadata()
+_db_load_plan_once()
+# A freshly loaded DB plan may contain a next-week draft whose start date has arrived.
+if maybe_activate_next_plan():
+    _db_save_plan_state()
 
 def item_multiplier(item):
     return float(st.session_state.overrides.get(item["id"],{}).get("multiplier",1))
@@ -2841,6 +2919,9 @@ def _save_profile_values(values):
         try:
             db_ensure_schema(dsn)
             db_save_profile(_state_token(), values, profile_setup_complete=True, url=dsn)
+            # Keep a durable plan aggregate linked to the new profile.
+            if st.session_state.get("_db_plan_loaded", False):
+                _db_save_plan_state()
             st.session_state["_db_status"] = "salvato su PostgreSQL"
         except Exception as e:
             st.session_state["_db_status"] = "salvataggio DB non riuscito: " + str(e)[:300]
@@ -3901,6 +3982,7 @@ else:
                 st.success("Connessione PostgreSQL OK")
                 st.write(f"Database: `{diag.get('database')}` · Utente: `{diag.get('user')}` · Schema: `{diag.get('schema')}`")
                 st.write(f"Tabella `public.profiles`: `{diag.get('table')}` · Righe: `{diag.get('rows')}`")
+                st.write(f"Tabella `public.meal_plans`: `{diag.get('plan_table')}` · Righe: `{diag.get('plan_rows')}`")
             else:
                 st.error("Test PostgreSQL fallito: " + str(diag.get("status", "errore sconosciuto")))
 

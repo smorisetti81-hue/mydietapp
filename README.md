@@ -1,9 +1,9 @@
-# MyDietApp V86 — PostgreSQL profile persistence
+# MyDietApp V86.2 — PostgreSQL profile persistence
 
 Phase 1 moves the MyDiet profile from ephemeral Streamlit state to PostgreSQL/Supabase.
 
 ## Files
-- `app.py` — V85 app + V86 durable profile persistence
+- `app.py` — V85 app + V86.2 durable profile persistence
 - `db.py` — PostgreSQL access layer
 - `schema.sql` — one-time database schema
 - `requirements.txt` — adds psycopg
@@ -31,4 +31,13 @@ After deployment:
 4. Restart/reload the Streamlit app.
 5. Confirm the profile is restored even after the app container/session is recreated.
 
-If `DATABASE_URL` is missing or temporarily unavailable, V86 falls back to the existing `/tmp` persistence and does not break the app.
+If `DATABASE_URL` is missing or temporarily unavailable, V86.2 falls back to the existing `/tmp` persistence and does not break the app.
+
+
+## Phase 2 — Meal plan persistence
+
+V86.2 adds durable PostgreSQL persistence for the meal-plan domain without dumping the Streamlit session state into the database. The `meal_plans` table stores the active plan, next-week draft, history, meal overrides, out-of-home settings and menu associations.
+
+After deploying V86.2, the first test is intentionally simple: open **Piano**, verify the existing plan is visible, make one harmless meal edit, allow the app to rerun, then restart/redeploy the Streamlit app and verify the edit is still present.
+
+The existing `/tmp` snapshot remains as a transition fallback; it is not the durable source for plan data when PostgreSQL is available.
