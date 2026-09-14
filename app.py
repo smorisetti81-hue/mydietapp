@@ -3356,7 +3356,11 @@ elif st.session_state.page=="Piano":
             if edit_key and (edit_key[0]!=day or edit_key[1] not in day_meals):
                 st.session_state.plan_edit_meal=None; edit_key=None
 
-            for mn,m in day_meals.items():
+            # JSONB does not preserve object key order. Always render meals in
+            # the canonical order used throughout MyDiet.
+            ordered_day_meals = [(mn, day_meals[mn]) for mn in _PLAN_MEALS if mn in day_meals]
+            ordered_day_meals += [(mn, m) for mn, m in day_meals.items() if mn not in _PLAN_MEALS]
+            for mn,m in ordered_day_meals:
                 out_of_home=out_of_home_meal_configured(day,mn)
                 items=active_items(m)
                 kcal=round(sum(item_kcal(i) for i in items))
