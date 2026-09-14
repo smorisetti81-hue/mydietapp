@@ -32,7 +32,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v87.1 · PostgreSQL profile + meal plan + meal logs persistence
+# MyDietApp v87.2.1 · PostgreSQL profile + meal plan + meal logs persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -1057,6 +1057,13 @@ def _database_url():
     except Exception:
         return ""
 
+def _db_ensure_profile_schema_once(dsn):
+    if st.session_state.get("_db_profile_schema_ready", False):
+        return True
+    db_ensure_schema(dsn)
+    st.session_state["_db_profile_schema_ready"] = True
+    return True
+
 def _db_load_profile_once():
     if st.session_state.get("_db_profile_loaded", False):
         return
@@ -1067,7 +1074,7 @@ def _db_load_profile_once():
         st.session_state["_db_status"] = "non configurato"
         return
     try:
-        db_ensure_schema(dsn)
+        _db_ensure_profile_schema_once(dsn)
         row = db_load_profile(mdid, dsn)
         if row:
             for key in ["name", "weight", "goal_weight", "height", "age", "sex",
@@ -1115,6 +1122,13 @@ def _db_diagnostic():
         return {"ok": True, "database": dbname, "user": user, "schema": schema, "table": table, "rows": count, "plan_table": plan_table, "plan_rows": plan_rows}
     except Exception as e:
         return {"ok": False, "status": str(e)[:500]}
+
+def _db_ensure_plan_schema_once(dsn):
+    if st.session_state.get("_db_plan_schema_ready", False):
+        return True
+    db_ensure_plan_schema(dsn)
+    st.session_state["_db_plan_schema_ready"] = True
+    return True
 
 def _db_plan_state():
     """Return only durable meal-plan domain data, never the full Streamlit session."""
@@ -1169,7 +1183,7 @@ def _db_load_plan_once():
     local_candidate = copy.deepcopy(_db_plan_state())
     st.session_state["_db_local_plan_candidate"] = local_candidate
     try:
-        db_ensure_plan_schema(dsn)
+        _db_ensure_plan_schema_once(dsn)
         row = db_load_meal_plan_state(mdid, dsn)
         if row:
             db_plan = row.get("meal_plan") or {}
@@ -1221,7 +1235,7 @@ def _db_save_plan_state():
     if not dsn or not mdid:
         return False
     try:
-        db_ensure_plan_schema(dsn)
+        _db_ensure_plan_schema_once(dsn)
         state = _db_plan_state()
         db_save_meal_plan_state(mdid, state, dsn)
         st.session_state["_db_plan_status"] = "piano salvato"
@@ -1243,6 +1257,13 @@ def _db_maybe_save_plan_state():
     if not fp or fp == st.session_state.get("_db_last_saved_fingerprint", ""):
         return False
     return _db_save_plan_state()
+
+def _db_ensure_meal_logs_schema_once(dsn):
+    if st.session_state.get("_db_meal_logs_schema_ready", False):
+        return True
+    db_ensure_meal_logs_schema(dsn)
+    st.session_state["_db_meal_logs_schema_ready"] = True
+    return True
 
 def _current_week_meal_log_state():
     """Build durable registration state for every meal in the active week."""
@@ -1289,7 +1310,7 @@ def _db_load_meal_logs_once():
     try:
         if not all((db_ensure_meal_logs_schema, db_load_meal_logs, db_save_meal_logs)):
             raise RuntimeError("db.py non aggiornato: funzioni meal_logs mancanti")
-        db_ensure_meal_logs_schema(dsn)
+        _db_ensure_meal_logs_schema_once(dsn)
         rows = db_load_meal_logs(mdid, start_iso, dsn)
         if rows:
             st.session_state.registered_meals = {}
@@ -1313,28 +1334,42 @@ def _db_load_meal_logs_once():
                     st.session_state.eaten[str(iid)] = True
             st.session_state["_db_meal_logs_found"] = True
             st.session_state["_db_meal_logs_status"] = "registrazioni pasti caricate"
+            st.session_state["_db_meal_logs_last_saved_fingerprint"] = _meal_logs_fingerprint()
         else:
             local_rows = _current_week_meal_log_state()
             if any(r["registered"] or r["eaten_items"] for r in local_rows):
                 db_save_meal_logs(mdid, local_rows, dsn)
                 st.session_state["_db_meal_logs_status"] = "registrazioni locali migrate su PostgreSQL"
+                st.session_state["_db_meal_logs_last_saved_fingerprint"] = _meal_logs_fingerprint(local_rows)
             else:
                 st.session_state["_db_meal_logs_status"] = "nessuna registrazione pasti"
     except Exception as e:
         st.session_state["_db_meal_logs_status"] = "errore PostgreSQL registrazioni: " + str(e)[:300]
 
-def _db_save_meal_logs_state():
+def _meal_logs_fingerprint(rows=None):
+    rows = _current_week_meal_log_state() if rows is None else rows
+    try:
+        return json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        return ""
+
+def _db_save_meal_logs_state(force=False):
     dsn = _database_url()
     mdid = _state_token()
     start_iso = st.session_state.get("plan_week_start")
     if not dsn or not mdid or not start_iso:
         return False
+    rows = _current_week_meal_log_state()
+    fp = _meal_logs_fingerprint(rows)
+    if not force and fp and fp == st.session_state.get("_db_meal_logs_last_saved_fingerprint", ""):
+        return False
     try:
         if not all((db_ensure_meal_logs_schema, db_load_meal_logs, db_save_meal_logs)):
             raise RuntimeError("db.py non aggiornato: funzioni meal_logs mancanti")
-        db_ensure_meal_logs_schema(dsn)
-        db_save_meal_logs(mdid, _current_week_meal_log_state(), dsn)
+        _db_ensure_meal_logs_schema_once(dsn)
+        db_save_meal_logs(mdid, rows, dsn)
         st.session_state["_db_meal_logs_status"] = "registrazioni pasti salvate"
+        st.session_state["_db_meal_logs_last_saved_fingerprint"] = fp
         return True
     except Exception as e:
         st.session_state["_db_meal_logs_status"] = "salvataggio registrazioni non riuscito: " + str(e)[:300]
@@ -1429,6 +1464,8 @@ _ingest_remote_health_sync()
 # changes and navigation survive a recreated Streamlit session.
 def _mydiet_rerun():
     _persist_app_state()
+    # V87.2: meal logs are written only when their durable fingerprint changes.
+    # This keeps navigation fast and avoids unnecessary Supabase round-trips.
     # V86.4.1: write to PostgreSQL only when the durable plan domain changed.
     # Navigation, meal registration, water, pantry and other reruns must never
     # overwrite the plan accidentally.

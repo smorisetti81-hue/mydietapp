@@ -1,7 +1,7 @@
-# MyDietApp V87.1 — PostgreSQL meal logs (safe import)
+# MyDietApp V87.2 — PostgreSQL meal logs + performance fix
 
-Based on the verified V86.6 build. Adds durable meal registration while making the new meal-log DB API safe against a stale db.py deployment: the app no longer crashes at import time if an old db.py is temporarily present.
+Based on V87.1. Meal-log persistence is now fingerprint-gated: PostgreSQL is not contacted on ordinary Streamlit reruns/navigation unless the durable meal-registration state actually changed.
 
-Deploy all files together. Keep the existing DATABASE_URL secret unchanged.
+This reduces the delay when switching Home/Piano/Dispensa/Attività/Profilo and avoids the transient dim/duplicate-looking render that can appear while Streamlit is waiting for an unnecessary DB write.
 
-After deployment, first verify Home/Piano still show the current plan. Then register one meal and reboot to test persistence.
+No Secrets changes are required. Existing DATABASE_URL remains valid.
