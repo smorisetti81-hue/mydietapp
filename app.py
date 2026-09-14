@@ -3161,7 +3161,11 @@ if st.session_state.page=="Home":
             if st.button("+ 250 ml",key="water_plus",use_container_width=True,type="primary"): add_water_ml(250); _mydiet_rerun()
     ms=st.session_state.meal_plan.get(d,{})
     st.markdown('<div class="mydiet-section">📋 I tuoi pasti</div>',unsafe_allow_html=True)
-    for idx,(mn,m) in enumerate(ms.items()):
+    # JSONB does not preserve object key order. Always show meals in the
+    # canonical order used throughout MyDiet.
+    meal_order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
+    ordered_meals=[(mn,ms[mn]) for mn in meal_order if mn in ms]
+    for idx,(mn,m) in enumerate(ordered_meals):
         items=active_items(m); kcal=round(sum(item_kcal(i) for i in items)); registered=_meal_is_registered(d,mn)
         meal_icon = mn.split(" ",1)[0] if " " in mn else "🍽️"
         meal_label = mn.split(" ",1)[1] if " " in mn else mn
@@ -3329,7 +3333,10 @@ elif st.session_state.page=="Piano":
 
         # Active plan is a read-only list until a user opens one specific meal.
         # Next-week draft is editable, but still only one meal at a time.
-        active_days=list(st.session_state.meal_plan.keys())
+        # JSONB does not preserve object key order. Always render the week in
+        # the canonical Monday->Sunday order instead of trusting dict insertion order.
+        canonical_days=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+        active_days=[d for d in canonical_days if d in st.session_state.meal_plan]
         if not active_days:
             st.info("Nessun piano disponibile.")
         else:
