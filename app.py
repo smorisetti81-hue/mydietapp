@@ -21,12 +21,14 @@ from db import (
     ensure_schema as db_ensure_schema, load_profile as db_load_profile, save_profile as db_save_profile,
     ensure_plan_schema as db_ensure_plan_schema, load_meal_plan_state as db_load_meal_plan_state,
     save_meal_plan_state as db_save_meal_plan_state,
+    ensure_meal_logs_schema as db_ensure_meal_logs_schema, load_meal_logs as db_load_meal_logs,
+    save_meal_logs as db_save_meal_logs,
 )
 from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v86.4.1 · PostgreSQL profile + safe meal plan persistence
+# MyDietApp v87 · PostgreSQL profile + meal plan + meal logs persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -1238,6 +1240,99 @@ def _db_maybe_save_plan_state():
         return False
     return _db_save_plan_state()
 
+def _current_week_meal_log_state():
+    """Build durable registration state for every meal in the active week."""
+    start_iso = st.session_state.get("plan_week_start")
+    if not start_iso:
+        return []
+    try:
+        start = date.fromisoformat(str(start_iso))
+    except Exception:
+        return []
+    rows = []
+    plan = st.session_state.get("meal_plan", {}) or {}
+    registered_map = st.session_state.get("registered_meals", {}) or {}
+    eaten_map = st.session_state.get("eaten", {}) or {}
+    for day in _PLAN_DAYS:
+        meal_map = plan.get(day, {}) or {}
+        meal_date = (start + timedelta(days=_PLAN_DAYS.index(day))).isoformat()
+        for meal_name in _PLAN_MEALS:
+            meal = meal_map.get(meal_name)
+            if not meal:
+                continue
+            key = _meal_key(day, meal_name)
+            eaten_items = [
+                str(item.get("id")) for item in active_items(meal)
+                if eaten_map.get(item.get("id"), False)
+            ]
+            rows.append({
+                "meal_date": meal_date,
+                "meal_name": meal_name,
+                "registered": bool(registered_map.get(key, False)),
+                "eaten_items": eaten_items,
+            })
+    return rows
+
+def _db_load_meal_logs_once():
+    if st.session_state.get("_db_meal_logs_loaded", False):
+        return
+    st.session_state["_db_meal_logs_loaded"] = True
+    mdid = _state_token()
+    dsn = _database_url()
+    start_iso = st.session_state.get("plan_week_start")
+    if not mdid or not dsn or not start_iso:
+        return
+    try:
+        db_ensure_meal_logs_schema(dsn)
+        rows = db_load_meal_logs(mdid, start_iso, dsn)
+        if rows:
+            st.session_state.registered_meals = {}
+            st.session_state.eaten = {}
+            for row in rows:
+                meal_date = row.get("meal_date")
+                if hasattr(meal_date, "isoformat"):
+                    meal_date = meal_date.isoformat()
+                try:
+                    offset = (date.fromisoformat(str(meal_date)) - date.fromisoformat(str(start_iso))).days
+                except Exception:
+                    continue
+                if offset < 0 or offset > 6:
+                    continue
+                day = _PLAN_DAYS[offset]
+                meal_name = row.get("meal_name")
+                if meal_name not in _PLAN_MEALS:
+                    continue
+                st.session_state.registered_meals[_meal_key(day, meal_name)] = bool(row.get("registered", False))
+                for iid in (row.get("eaten_items") or []):
+                    st.session_state.eaten[str(iid)] = True
+            st.session_state["_db_meal_logs_found"] = True
+            st.session_state["_db_meal_logs_status"] = "registrazioni pasti caricate"
+        else:
+            local_rows = _current_week_meal_log_state()
+            if any(r["registered"] or r["eaten_items"] for r in local_rows):
+                db_save_meal_logs(mdid, local_rows, dsn)
+                st.session_state["_db_meal_logs_status"] = "registrazioni locali migrate su PostgreSQL"
+            else:
+                st.session_state["_db_meal_logs_status"] = "nessuna registrazione pasti"
+    except Exception as e:
+        st.session_state["_db_meal_logs_status"] = "errore PostgreSQL registrazioni: " + str(e)[:300]
+
+def _db_save_meal_logs_state():
+    dsn = _database_url()
+    mdid = _state_token()
+    start_iso = st.session_state.get("plan_week_start")
+    if not dsn or not mdid or not start_iso:
+        return False
+    try:
+        db_ensure_meal_logs_schema(dsn)
+        db_save_meal_logs(mdid, _current_week_meal_log_state(), dsn)
+        st.session_state["_db_meal_logs_status"] = "registrazioni pasti salvate"
+        return True
+    except Exception as e:
+        st.session_state["_db_meal_logs_status"] = "salvataggio registrazioni non riuscito: " + str(e)[:300]
+        return False
+
+
 def _db_recover_local_plan():
     candidate = st.session_state.get("_db_local_plan_candidate")
     if not candidate or not _plan_is_complete(candidate.get("meal_plan")):
@@ -1331,6 +1426,7 @@ def _mydiet_rerun():
     # overwrite the plan accidentally.
     try:
         _db_maybe_save_plan_state()
+        _db_save_meal_logs_state()
     except Exception:
         pass
     st.rerun()
@@ -1995,6 +2091,8 @@ def _sync_eaten_from_widget(iid):
                     _restore_meal_to_pantry(day,meal_name)
             st.session_state.registered_meals[meal_key]=registered
             break
+
+_db_load_meal_logs_once()
 
 def _next_meal_for_today(day):
     """Return the first planned meal that has not actually been registered.

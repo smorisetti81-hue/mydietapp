@@ -50,3 +50,17 @@ CREATE TABLE IF NOT EXISTS meal_plans (
 
 CREATE INDEX IF NOT EXISTS idx_meal_plans_updated_at ON meal_plans(updated_at);
 ALTER TABLE meal_plans ENABLE ROW LEVEL SECURITY;
+
+-- MyDiet v87 — durable meal registrations / logs
+CREATE TABLE IF NOT EXISTS meal_logs (
+    mdid TEXT NOT NULL REFERENCES profiles(mdid) ON DELETE CASCADE,
+    meal_date DATE NOT NULL,
+    meal_name TEXT NOT NULL,
+    registered BOOLEAN NOT NULL DEFAULT FALSE,
+    eaten_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+    registered_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (mdid, meal_date, meal_name)
+);
+CREATE INDEX IF NOT EXISTS idx_meal_logs_date ON meal_logs(mdid, meal_date);
+ALTER TABLE meal_logs ENABLE ROW LEVEL SECURITY;

@@ -248,3 +248,68 @@ def save_meal_plan_state(mdid: str, state: Dict[str, Any], url: Optional[str] = 
             cur.execute(sql, params)
         conn.commit()
     return True
+
+
+MEAL_LOG_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS meal_logs (
+    mdid TEXT NOT NULL REFERENCES profiles(mdid) ON DELETE CASCADE,
+    meal_date DATE NOT NULL,
+    meal_name TEXT NOT NULL,
+    registered BOOLEAN NOT NULL DEFAULT FALSE,
+    eaten_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+    registered_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (mdid, meal_date, meal_name)
+);
+CREATE INDEX IF NOT EXISTS idx_meal_logs_date ON meal_logs(mdid, meal_date);
+ALTER TABLE meal_logs ENABLE ROW LEVEL SECURITY;
+"""
+
+def ensure_meal_logs_schema(url: Optional[str] = None) -> bool:
+    with connection(url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(MEAL_LOG_SCHEMA_SQL)
+        conn.commit()
+    return True
+
+def load_meal_logs(mdid: str, week_start: str, url: Optional[str] = None):
+    mdid = str(mdid or '').strip()
+    if not mdid or not week_start:
+        return []
+    sql = """
+        SELECT meal_date, meal_name, registered, eaten_items, registered_at
+        FROM meal_logs
+        WHERE mdid=%s AND meal_date >= %s::date AND meal_date < (%s::date + INTERVAL '7 days')
+        ORDER BY meal_date, meal_name
+    """
+    with connection(url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (mdid, week_start, week_start))
+            rows = cur.fetchall()
+    keys = ['meal_date','meal_name','registered','eaten_items','registered_at']
+    return [dict(zip(keys, row)) for row in rows]
+
+def save_meal_logs(mdid: str, rows, url: Optional[str] = None) -> bool:
+    mdid = str(mdid or '').strip()
+    if not mdid:
+        return False
+    rows = rows or []
+    sql = """
+        INSERT INTO meal_logs (mdid, meal_date, meal_name, registered, eaten_items, registered_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, CASE WHEN %s THEN COALESCE((SELECT registered_at FROM meal_logs WHERE mdid=%s AND meal_date=%s AND meal_name=%s), NOW()) ELSE NULL END, NOW())
+        ON CONFLICT (mdid, meal_date, meal_name) DO UPDATE SET
+            registered=EXCLUDED.registered,
+            eaten_items=EXCLUDED.eaten_items,
+            registered_at=CASE WHEN EXCLUDED.registered THEN COALESCE(meal_logs.registered_at, NOW()) ELSE NULL END,
+            updated_at=NOW()
+    """
+    with connection(url) as conn:
+        with conn.cursor() as cur:
+            for row in rows:
+                meal_date = row.get('meal_date')
+                meal_name = str(row.get('meal_name',''))
+                registered = bool(row.get('registered', False))
+                eaten_items = list(row.get('eaten_items') or [])
+                cur.execute(sql, (mdid, meal_date, meal_name, registered, _json_param(eaten_items), registered, mdid, meal_date, meal_name))
+        conn.commit()
+    return True
