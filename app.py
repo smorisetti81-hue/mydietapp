@@ -26,7 +26,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v86.2 · PostgreSQL profile + meal plan persistence
+# MyDietApp v86.3 · PostgreSQL profile + meal plan persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -1244,6 +1244,14 @@ _ingest_remote_health_sync()
 # changes and navigation survive a recreated Streamlit session.
 def _mydiet_rerun():
     _persist_app_state()
+    # V86.3: persist durable meal-plan changes before every rerun.
+    # This covers current-week meal edits, additions/removals and other
+    # plan mutations that previously only reached the /tmp snapshot.
+    if st.session_state.get("_db_plan_loaded", False):
+        try:
+            _db_save_plan_state()
+        except Exception:
+            pass
     st.rerun()
 
 # Mobile navigation: the main app navigation is rendered as a fixed bottom tab bar.
