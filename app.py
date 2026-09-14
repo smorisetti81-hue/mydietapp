@@ -26,7 +26,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v86.3 · PostgreSQL profile + meal plan persistence
+# MyDietApp v86.4.1 · PostgreSQL profile + safe meal plan persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -1130,6 +1130,25 @@ def _db_plan_state():
     }
 
 
+_PLAN_DAYS = ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+_PLAN_MEALS = ["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
+
+def _plan_is_complete(plan):
+    """A valid weekly plan must contain all 7 days and the 4 expected meals."""
+    if not isinstance(plan, dict) or set(plan.keys()) != set(_PLAN_DAYS):
+        return False
+    return all(isinstance(plan.get(day), dict) and all(m in plan[day] for m in _PLAN_MEALS) for day in _PLAN_DAYS)
+
+def _plan_day_count(plan):
+    return sum(1 for d in _PLAN_DAYS if isinstance(plan, dict) and isinstance(plan.get(d), dict))
+
+def _db_plan_fingerprint(state=None):
+    state = state or _db_plan_state()
+    try:
+        return json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",",":"), default=str)
+    except Exception:
+        return ""
+
 def _db_load_plan_once():
     if st.session_state.get("_db_plan_loaded", False):
         return
@@ -1138,10 +1157,40 @@ def _db_load_plan_once():
     dsn = _database_url()
     if not mdid or not dsn:
         return
+    # Capture the state restored from the old /tmp fallback BEFORE PostgreSQL
+    # gets a chance to replace it. This gives us a safe recovery candidate if a
+    # previous build wrote an incomplete plan to the database.
+    local_candidate = copy.deepcopy(_db_plan_state())
+    st.session_state["_db_local_plan_candidate"] = local_candidate
     try:
         db_ensure_plan_schema(dsn)
         row = db_load_meal_plan_state(mdid, dsn)
         if row:
+            db_plan = row.get("meal_plan") or {}
+            if not _plan_is_complete(db_plan):
+                st.session_state["_db_plan_found"] = True
+                st.session_state["_db_plan_incomplete"] = True
+                st.session_state["_db_plan_db_days"] = _plan_day_count(db_plan)
+                st.session_state["_db_plan_status"] = f"piano PostgreSQL incompleto ({_plan_day_count(db_plan)}/7 giorni)"
+                st.session_state["_db_local_plan_available"] = _plan_is_complete(local_candidate.get("meal_plan"))
+                # If the pre-DB /tmp snapshot is a complete weekly plan, it is
+                # safer to recover it automatically than to expose the known
+                # incomplete DB row to the user. Then immediately make the
+                # recovered plan the durable PostgreSQL source.
+                if st.session_state["_db_local_plan_available"]:
+                    for key, value in local_candidate.items():
+                        if key in {
+                            "plan_week_start", "meal_plan", "overrides", "plan_history",
+                            "out_lunch_days", "out_dinner_days", "mensa_menus",
+                            "next_meal_plan", "next_overrides", "next_week_start",
+                            "next_out_lunch_days", "next_out_dinner_days", "next_mensa_menus",
+                            "plan_needs_regeneration"
+                        }:
+                            st.session_state[key] = copy.deepcopy(value)
+                    st.session_state["_db_plan_incomplete"] = False
+                    if _db_save_plan_state():
+                        st.session_state["_db_plan_status"] = "vecchio piano locale recuperato e salvato su PostgreSQL"
+                return
             for key, value in row.items():
                 if key in {
                     "plan_week_start", "meal_plan", "overrides", "plan_history",
@@ -1150,11 +1199,10 @@ def _db_load_plan_once():
                     "next_out_lunch_days", "next_out_dinner_days", "next_mensa_menus",
                     "plan_needs_regeneration"
                 }:
-                    # A DB row is the durable source. It is allowed to replace the
-                    # transient /tmp snapshot for these plan-domain fields.
                     st.session_state[key] = value
             st.session_state["_db_plan_found"] = True
             st.session_state["_db_plan_status"] = "piano caricato"
+            st.session_state["_db_last_saved_fingerprint"] = _db_plan_fingerprint()
         else:
             st.session_state["_db_plan_status"] = "nessun piano salvato"
     except Exception as e:
@@ -1168,12 +1216,46 @@ def _db_save_plan_state():
         return False
     try:
         db_ensure_plan_schema(dsn)
-        db_save_meal_plan_state(mdid, _db_plan_state(), dsn)
+        state = _db_plan_state()
+        db_save_meal_plan_state(mdid, state, dsn)
         st.session_state["_db_plan_status"] = "piano salvato"
+        st.session_state["_db_last_saved_fingerprint"] = _db_plan_fingerprint(state)
+        st.session_state["_db_plan_incomplete"] = False
         return True
     except Exception as e:
         st.session_state["_db_plan_status"] = "salvataggio piano non riuscito: " + str(e)[:300]
         return False
+
+def _db_maybe_save_plan_state():
+    """Persist only when durable plan data actually changed. Never on every rerun."""
+    if not st.session_state.get("_db_plan_loaded", False):
+        return False
+    if st.session_state.get("_db_plan_incomplete", False):
+        return False
+    current = _db_plan_state()
+    fp = _db_plan_fingerprint(current)
+    if not fp or fp == st.session_state.get("_db_last_saved_fingerprint", ""):
+        return False
+    return _db_save_plan_state()
+
+def _db_recover_local_plan():
+    candidate = st.session_state.get("_db_local_plan_candidate")
+    if not candidate or not _plan_is_complete(candidate.get("meal_plan")):
+        st.session_state["_db_plan_status"] = "nessun piano locale completo recuperabile"
+        return False
+    for key, value in candidate.items():
+        if key in {
+            "plan_week_start", "meal_plan", "overrides", "plan_history",
+            "out_lunch_days", "out_dinner_days", "mensa_menus",
+            "next_meal_plan", "next_overrides", "next_week_start",
+            "next_out_lunch_days", "next_out_dinner_days", "next_mensa_menus",
+            "plan_needs_regeneration"
+        }:
+            st.session_state[key] = copy.deepcopy(value)
+    ok = _db_save_plan_state()
+    if ok:
+        st.session_state["_db_plan_status"] = "piano locale recuperato e salvato su PostgreSQL"
+    return ok
 
 
 # Pull background Health data when an API transport is configured.
@@ -1244,14 +1326,13 @@ _ingest_remote_health_sync()
 # changes and navigation survive a recreated Streamlit session.
 def _mydiet_rerun():
     _persist_app_state()
-    # V86.3: persist durable meal-plan changes before every rerun.
-    # This covers current-week meal edits, additions/removals and other
-    # plan mutations that previously only reached the /tmp snapshot.
-    if st.session_state.get("_db_plan_loaded", False):
-        try:
-            _db_save_plan_state()
-        except Exception:
-            pass
+    # V86.4.1: write to PostgreSQL only when the durable plan domain changed.
+    # Navigation, meal registration, water, pantry and other reruns must never
+    # overwrite the plan accidentally.
+    try:
+        _db_maybe_save_plan_state()
+    except Exception:
+        pass
     st.rerun()
 
 # Mobile navigation: the main app navigation is rendered as a fixed bottom tab bar.
@@ -3991,6 +4072,10 @@ else:
                 st.write(f"Database: `{diag.get('database')}` · Utente: `{diag.get('user')}` · Schema: `{diag.get('schema')}`")
                 st.write(f"Tabella `public.profiles`: `{diag.get('table')}` · Righe: `{diag.get('rows')}`")
                 st.write(f"Tabella `public.meal_plans`: `{diag.get('plan_table')}` · Righe: `{diag.get('plan_rows')}`")
+                if st.session_state.get("_db_plan_incomplete"):
+                    st.error(f"⚠️ Il Piano salvato su PostgreSQL è incompleto ({st.session_state.get('_db_plan_db_days', 0)}/7 giorni). Non è stato caricato.")
+                elif st.session_state.get("_db_plan_status") == "vecchio piano locale recuperato e salvato su PostgreSQL":
+                    st.success("♻️ Il vecchio Piano completo è stato recuperato dallo snapshot locale e risalvato su PostgreSQL.")
             else:
                 st.error("Test PostgreSQL fallito: " + str(diag.get("status", "errore sconosciuto")))
 
