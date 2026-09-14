@@ -1,23 +1,7 @@
-# MyDietApp v87 — PostgreSQL meal logs
+# MyDietApp V87.1 — PostgreSQL meal logs (safe import)
 
-V87 adds durable meal registration persistence on top of the working v86.x profile + meal-plan persistence.
+Based on the verified V86.6 build. Adds durable meal registration while making the new meal-log DB API safe against a stale db.py deployment: the app no longer crashes at import time if an old db.py is temporarily present.
 
-## What is persisted
-- meal registration state for the active weekly plan
-- partially checked/eaten ingredient IDs
-- registration timestamp
+Deploy all files together. Keep the existing DATABASE_URL secret unchanged.
 
-## Migration
-No manual SQL is required: the app creates `public.meal_logs` automatically after the profile exists.
-The included `schema.sql` also contains the table definition for reference/manual setup.
-
-## Test
-1. Deploy V87.
-2. Open Home.
-3. Register one planned meal.
-4. Confirm the meal shows `✓ Registrato` and calories update.
-5. Reboot/reload Streamlit.
-6. Confirm the same meal is still registered and the calorie total is preserved.
-7. Press undo registration, reboot, and confirm it is no longer registered.
-
-PostgreSQL remains the durable source for profile, plan and meal registrations. The existing /tmp snapshot remains only as a transition fallback.
+After deployment, first verify Home/Piano still show the current plan. Then register one meal and reboot to test persistence.

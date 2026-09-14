@@ -17,18 +17,22 @@ import math
 import os
 
 # V86: durable PostgreSQL/Supabase profile persistence.
+# Import the stable DB API directly. Meal-log functions are resolved dynamically
+# so a stale deployment of db.py cannot crash the whole app at import time.
+import db as _db
 from db import (
     ensure_schema as db_ensure_schema, load_profile as db_load_profile, save_profile as db_save_profile,
     ensure_plan_schema as db_ensure_plan_schema, load_meal_plan_state as db_load_meal_plan_state,
     save_meal_plan_state as db_save_meal_plan_state,
-    ensure_meal_logs_schema as db_ensure_meal_logs_schema, load_meal_logs as db_load_meal_logs,
-    save_meal_logs as db_save_meal_logs,
 )
+db_ensure_meal_logs_schema = getattr(_db, "ensure_meal_logs_schema", None)
+db_load_meal_logs = getattr(_db, "load_meal_logs", None)
+db_save_meal_logs = getattr(_db, "save_meal_logs", None)
 from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v87 · PostgreSQL profile + meal plan + meal logs persistence
+# MyDietApp v87.1 · PostgreSQL profile + meal plan + meal logs persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -1283,6 +1287,8 @@ def _db_load_meal_logs_once():
     if not mdid or not dsn or not start_iso:
         return
     try:
+        if not all((db_ensure_meal_logs_schema, db_load_meal_logs, db_save_meal_logs)):
+            raise RuntimeError("db.py non aggiornato: funzioni meal_logs mancanti")
         db_ensure_meal_logs_schema(dsn)
         rows = db_load_meal_logs(mdid, start_iso, dsn)
         if rows:
@@ -1324,6 +1330,8 @@ def _db_save_meal_logs_state():
     if not dsn or not mdid or not start_iso:
         return False
     try:
+        if not all((db_ensure_meal_logs_schema, db_load_meal_logs, db_save_meal_logs)):
+            raise RuntimeError("db.py non aggiornato: funzioni meal_logs mancanti")
         db_ensure_meal_logs_schema(dsn)
         db_save_meal_logs(mdid, _current_week_meal_log_state(), dsn)
         st.session_state["_db_meal_logs_status"] = "registrazioni pasti salvate"
