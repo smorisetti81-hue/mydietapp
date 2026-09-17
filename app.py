@@ -4019,57 +4019,91 @@ elif st.session_state.page=="Attività":
     st.title("🏃 Attività")
     st.markdown("""
     <style>
-    body:has(.activity-ui-marker) div[data-testid="stMetric"] {
-        background: linear-gradient(145deg, rgba(255,255,255,.055), rgba(255,255,255,.025));
-        border: 1px solid rgba(255,255,255,.08);
-        border-radius: 18px;
-        padding: 12px 14px;
-        min-height: 92px;
-        box-shadow: 0 8px 24px rgba(0,0,0,.12);
+    body:has(.activity-ui-v88) .activity-top {
+        background:linear-gradient(135deg,rgba(255,84,84,.18),rgba(116,78,255,.10) 52%,rgba(255,255,255,.035));
+        border:1px solid rgba(255,255,255,.09); border-radius:26px; padding:22px 22px 20px;
+        margin:2px 0 16px; box-shadow:0 14px 34px rgba(0,0,0,.16);
     }
-    body:has(.activity-ui-marker) div[data-testid="stMetricLabel"] {
-        font-size: .78rem; opacity: .72;
+    body:has(.activity-ui-v88) .activity-top-title {font-size:1.25rem;font-weight:800;margin-bottom:5px;}
+    body:has(.activity-ui-v88) .activity-top-sub {font-size:.88rem;opacity:.70;line-height:1.45;}
+    body:has(.activity-ui-v88) .activity-status {
+        display:flex;align-items:center;gap:8px;margin-top:15px;padding:9px 12px;border-radius:14px;
+        background:rgba(0,0,0,.16);border:1px solid rgba(255,255,255,.07);font-size:.82rem;
     }
-    body:has(.activity-ui-marker) div[data-testid="stMetricValue"] {
-        font-size: 1.45rem; font-weight: 750;
+    body:has(.activity-ui-v88) .activity-dot {width:9px;height:9px;border-radius:50%;display:inline-block;background:#8b8b8b;}
+    body:has(.activity-ui-v88) .activity-dot.ok {background:#35c77a;box-shadow:0 0 10px rgba(53,199,122,.55);}
+    body:has(.activity-ui-v88) .activity-dot.warn {background:#e5b83f;box-shadow:0 0 10px rgba(229,184,63,.35);}
+    body:has(.activity-ui-v88) .activity-section {
+        display:flex;align-items:center;justify-content:space-between;gap:12px;
+        font-size:1.03rem;font-weight:800;margin:22px 0 10px;
     }
-    body:has(.activity-ui-marker) .activity-hero {
-        background: linear-gradient(135deg, rgba(185,35,45,.18), rgba(255,255,255,.035));
-        border: 1px solid rgba(255,255,255,.08);
-        border-radius: 24px; padding: 18px 20px; margin: 4px 0 18px;
+    body:has(.activity-ui-v88) .activity-section-sub {font-size:.78rem;font-weight:500;opacity:.55;}
+    body:has(.activity-ui-v88) .activity-source-card {
+        border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:16px 17px;
+        background:rgba(255,255,255,.025);margin:8px 0 14px;
     }
-    body:has(.activity-ui-marker) .activity-hero-title { font-size: 1.15rem; font-weight: 750; margin-bottom: 4px; }
-    body:has(.activity-ui-marker) .activity-hero-sub { font-size: .86rem; opacity: .72; }
-    body:has(.activity-ui-marker) .activity-section {
-        font-size: 1.02rem; font-weight: 750; margin: 20px 0 10px;
+    body:has(.activity-ui-v88) .activity-source-title {font-weight:800;font-size:.98rem;}
+    body:has(.activity-ui-v88) .activity-source-sub {font-size:.78rem;opacity:.62;margin-top:3px;}
+    body:has(.activity-ui-v88) .activity-chip {
+        display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;
+        font-size:.75rem;font-weight:700;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.07);margin-top:10px;
     }
-    body:has(.activity-ui-marker) .activity-source {
-        display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border-radius:999px;
-        background:rgba(255,255,255,.055); border:1px solid rgba(255,255,255,.07);
-        font-size:.76rem; opacity:.82; margin-top:6px;
+    body:has(.activity-ui-v88) div[data-testid="stMetric"] {
+        background:linear-gradient(145deg,rgba(255,255,255,.055),rgba(255,255,255,.018));
+        border:1px solid rgba(255,255,255,.075);border-radius:18px;padding:12px 14px;min-height:92px;
+        box-shadow:0 8px 24px rgba(0,0,0,.11);
     }
-    @media (max-width: 700px) {
-        body:has(.activity-ui-marker) .activity-hero { padding: 15px 16px; border-radius: 20px; }
-        body:has(.activity-ui-marker) div[data-testid="stMetric"] { min-height: 82px; padding: 10px 11px; border-radius: 16px; }
-        body:has(.activity-ui-marker) div[data-testid="stMetricValue"] { font-size: 1.22rem; }
+    body:has(.activity-ui-v88) div[data-testid="stMetricLabel"] {font-size:.76rem;opacity:.70;}
+    body:has(.activity-ui-v88) div[data-testid="stMetricValue"] {font-size:1.42rem;font-weight:800;}
+    body:has(.activity-ui-v88) .activity-empty {
+        border:1px dashed rgba(255,255,255,.13);border-radius:20px;padding:18px;text-align:center;
+        background:rgba(255,255,255,.018);margin-top:8px;
+    }
+    body:has(.activity-ui-v88) .activity-empty-title {font-weight:800;margin-bottom:4px;}
+    body:has(.activity-ui-v88) .activity-empty-sub {font-size:.8rem;opacity:.60;line-height:1.45;}
+    @media (max-width:700px) {
+        body:has(.activity-ui-v88) .activity-top {padding:17px 16px;border-radius:21px;}
+        body:has(.activity-ui-v88) div[data-testid="stMetric"] {min-height:82px;padding:10px 11px;border-radius:16px;}
+        body:has(.activity-ui-v88) div[data-testid="stMetricValue"] {font-size:1.20rem;}
     }
     </style>
-    <div class="activity-ui-marker"></div>
-    <div class="activity-hero">
-      <div class="activity-hero-title">Movimento di oggi</div>
-      <div class="activity-hero-sub">Qui trovi attività, passi e consumo energetico senza modificare automaticamente il tuo piano alimentare.</div>
-    </div>
-    """, unsafe_allow_html=True)
+    <div class="activity-ui-v88"></div>
+    """,unsafe_allow_html=True)
+
     mode=st.session_state.get("p_activity_tracking_mode","🚫 Solo dieta — non monitorare attività")
-    # Always initialize Health variables before the mode-specific branches.
-    # Manual/solo-diet modes do not enter the native Health branch, but the
-    # rendering below may still reference these variables.
     h=st.session_state.get("health",{})
     native=bool(h.get("native_health_snapshot")) if isinstance(h,dict) else False
+
+    if native:
+        p=h.get("provider",{})
+        bridge_version=p.get("bridge_version") or h.get("native_health_payload",{}).get("bridge_version") or "—"
+        last_sync=st.session_state.get("last_sync") or p.get("received_at") or "—"
+        st.markdown(f"""
+        <div class="activity-top">
+          <div class="activity-top-title">⌚ Il tuo smartwatch è collegato</div>
+          <div class="activity-top-sub">MyDiet riceve automaticamente i dati attraverso Health Connect. Non devi inviarli manualmente.</div>
+          <div class="activity-status"><span class="activity-dot ok"></span><b>Sincronizzazione attiva</b><span style="opacity:.55">· ultimo aggiornamento {last_sync}</span></div>
+        </div>
+        <div class="activity-source-card">
+          <div class="activity-source-title">Samsung Health → Health Connect → MyDiet</div>
+          <div class="activity-source-sub">Fonte produttiva dei dati attività</div>
+          <span class="activity-chip">🟢 Health Connect nativo</span>
+          <span class="activity-chip">Bridge Android {bridge_version}</span>
+        </div>
+        """,unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div class="activity-top">
+          <div class="activity-top-title">⌚ Collega i dati del tuo smartwatch</div>
+          <div class="activity-top-sub">Il percorso produttivo è <b>Samsung Health → Health Connect → MyDiet</b>. Una volta attivo, il Bridge Android sincronizza i dati automaticamente.</div>
+          <div class="activity-status"><span class="activity-dot warn"></span><b>In attesa di dati dal Bridge</b><span style="opacity:.55">· nessuno snapshot ricevuto</span></div>
+        </div>
+        """,unsafe_allow_html=True)
+
     if mode.startswith("🚫"):
         st.info("🥗 Modalità solo dieta: MyDiet non monitora l'attività. Il piano alimentare resta indipendente dagli allenamenti.")
     elif mode.startswith("✍️"):
-        st.caption("Inserimento manuale · questi valori descrivono la giornata ma non cambiano automaticamente il piano alimentare.")
+        st.markdown('<div class="activity-section">✍️ Attività inserita manualmente <span class="activity-section-sub">non modifica automaticamente il piano</span></div>',unsafe_allow_html=True)
         manual=st.session_state.setdefault("manual_activity_today",{})
         c1,c2,c3=st.columns(3)
         with c1: msteps=st.number_input("👣 Passi",0,100000,int(manual.get("steps",0)),500)
@@ -4081,65 +4115,42 @@ elif st.session_state.page=="Attività":
             _mydiet_rerun()
         if manual:
             st.success(f"✓ Attività manuale salvata · {int(manual.get('steps',0)):,} passi · {int(manual.get('active_calories',0)):,} kcal attive".replace(",","."))
-    else:
-        # Health variables are already initialized above.
-        pass
 
-    if mode.startswith("⌚") and native:
-        p=h.get("provider",{})
-        st.success(f"✓ Health Connect nativo attivo · snapshot ricevuto {st.session_state.get('last_sync') or '—'}")
-        st.caption(f"Bridge Android {p.get('bridge_version') or '—'} · Samsung Health → Health Connect → MyDietApp")
-        trust=h.get("native_health_payload",{}).get("trust",{})
-        st.write("**Fonte produttiva:** Health Connect nativo")
-        c1,c2,c3=st.columns(3)
-        c1.metric("Passi verificati", "Sì" if trust.get("steps") else "No")
-        c2.metric("Calorie totali verificate", "Sì" if trust.get("total_calories") else "No")
-        c3.metric("Snapshot", h.get("date") or "—")
-    elif mode.startswith("⌚"):
-        st.caption("Dati reali separati dal target alimentare. Health Connect nativo è la fonte produttiva; Google Fit resta solo diagnostica.")
-
-        cid=st.secrets.get("GOOGLE_CLIENT_ID"); cs=st.secrets.get("GOOGLE_CLIENT_SECRET"); ru=st.secrets.get("REDIRECT_URI")
-        if not cid or not cs or not ru:
-            st.error("Mancano GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET o REDIRECT_URI nei secrets.")
-        else:
-            if "code" in st.query_params:
-                r=requests.post("https://oauth2.googleapis.com/token",data={"client_id":cid,"client_secret":cs,"code":st.query_params["code"],"grant_type":"authorization_code","redirect_uri":ru},timeout=20)
-                if r.status_code==200:
-                    x=r.json(); st.session_state.access_token=x["access_token"]
-                    if x.get("refresh_token"): st.session_state.refresh_token=x["refresh_token"]
-                    _mdid = _state_token()
-                    st.query_params.clear()
-                    if _mdid: st.query_params["mdid"] = _mdid
-                    _mydiet_rerun()
-                else: st.error("Autorizzazione Google non riuscita: "+r.text[:500])
-            if "access_token" not in st.session_state:
-                url="https://accounts.google.com/o/oauth2/v2/auth?client_id="+urllib.parse.quote(cid.strip())+"&redirect_uri="+urllib.parse.quote(ru.strip(),safe="")+"&response_type=code&scope="+urllib.parse.quote(FIT_SCOPES,safe="")+"&access_type=offline&prompt=consent"
-                st.warning("🔗 Google non è collegato in questa sessione. Dopo l'autorizzazione, torna qui.")
-                st.link_button("🔗 Collega Google Health / Fit",url,use_container_width=True)
+    # Google Fit is retained only as legacy diagnostics; it is not the productive path.
+    if mode.startswith("⌚") and not native:
+        with st.expander("🧪 Diagnostica Google Fit (legacy)",expanded=False):
+            st.caption("Google Fit resta disponibile solo per diagnosi. Per il funzionamento normale di MyDiet usa il Bridge Android + Health Connect.")
+            cid=st.secrets.get("GOOGLE_CLIENT_ID"); cs=st.secrets.get("GOOGLE_CLIENT_SECRET"); ru=st.secrets.get("REDIRECT_URI")
+            if not cid or not cs or not ru:
+                st.caption("Credenziali Google Fit non configurate: non necessarie per il percorso Health Connect.")
             else:
-                st.success("Account Google collegato in questa sessione")
-                if st.button("🔄 Sincronizza dati reali",type="primary",use_container_width=True):
-                    try:
-                        provider=get_health_provider()
-                        data,hist,diag=provider.sync()
-                        data["provider"]=provider.info()
-                        st.session_state.health=data; st.session_state.health_history=hist; st.session_state.diagnostics=diag
-                        st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+                if "code" in st.query_params:
+                    r=requests.post("https://oauth2.googleapis.com/token",data={"client_id":cid,"client_secret":cs,"code":st.query_params["code"],"grant_type":"authorization_code","redirect_uri":ru},timeout=20)
+                    if r.status_code==200:
+                        x=r.json(); st.session_state.access_token=x["access_token"]
+                        if x.get("refresh_token"): st.session_state.refresh_token=x["refresh_token"]
+                        _mdid=_state_token(); st.query_params.clear()
+                        if _mdid: st.query_params["mdid"]=_mdid
                         _mydiet_rerun()
-                    except Exception as e: st.error(f"Sincronizzazione fallita: {e}")
+                    else: st.error("Autorizzazione Google non riuscita: "+r.text[:500])
+                if "access_token" not in st.session_state:
+                    url="https://accounts.google.com/o/oauth2/v2/auth?client_id="+urllib.parse.quote(cid.strip())+"&redirect_uri="+urllib.parse.quote(ru.strip(),safe="")+"&response_type=code&scope="+urllib.parse.quote(FIT_SCOPES,safe="")+"&access_type=offline&prompt=consent"
+                    st.link_button("🔗 Apri collegamento Google Fit",url,use_container_width=True)
+                else:
+                    st.success("Account Google collegato in questa sessione")
+                    if st.button("🔄 Leggi dati Google Fit",type="secondary",use_container_width=True):
+                        try:
+                            provider=GoogleFitProvider(); data,hist,diag=provider.sync()
+                            data["provider"]=provider.info(); st.session_state.health=data; st.session_state.health_history=hist; st.session_state.diagnostics=diag
+                            st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M"); _mydiet_rerun()
+                        except Exception as e: st.error(f"Sincronizzazione fallita: {e}")
 
-    # IMPORTANT: Native bridge data is rendered outside the Google-auth branch.
-    # This keeps Health Connect values visible when the app is opened directly
-    # from the Android bridge.
     h=st.session_state.get("health",{})
     provider_info=h.get("provider",{}) if isinstance(h,dict) else {}
-    if provider_info:
-        st.caption(f"Provider Health attivo: **{provider_info.get('name','—')}** · stato: **{provider_info.get('status','—')}**")
-
     if h:
-        st.markdown('<div class="activity-section">📊 Dati di oggi</div>',unsafe_allow_html=True)
+        st.markdown('<div class="activity-section">📊 Dati di oggi <span class="activity-section-sub">ricevuti da Health Connect</span></div>',unsafe_allow_html=True)
         cards=[
-            ("👣 Passi oggi",h.get("steps_today"),"passi"),
+            ("👣 Passi",h.get("steps_today"),"passi"),
             ("🔥 Calorie totali",h.get("calories_today"),"kcal"),
             ("⚡ Calorie attive",h.get("active_calories_today"),"kcal"),
             ("⚖️ Peso",h.get("weight"),"kg"),
@@ -4153,7 +4164,7 @@ elif st.session_state.page=="Attività":
         for i,(lab,val,unit) in enumerate(cards):
             with cc[i%3]:
                 if val is None:
-                    st.metric(lab,"Non disponibile")
+                    st.metric(lab,"—")
                 else:
                     try:
                         if unit in ("passi","kcal","min"): display=f"{float(val):,.0f} {unit}".replace(",",".")
@@ -4163,27 +4174,27 @@ elif st.session_state.page=="Attività":
                     st.metric(lab,display)
 
         a=activity_summary()
-        st.markdown('<div class="activity-section">🏃 Attività di oggi</div>',unsafe_allow_html=True)
+        st.markdown('<div class="activity-section">🏃 Movimento <span class="activity-section-sub">oggi</span></div>',unsafe_allow_html=True)
         ac1,ac2,ac3=st.columns(3)
-        ac1.metric("👣 Passi", f"{a['steps']:,}".replace(",","."))
-        ac2.metric("⚡ Calorie attive" if a["active_source"] != "stima" else "⚡ Calorie attive stimate", f"{a['active_calories']:,} kcal".replace(",","."))
-        ac3.metric("📏 Distanza", f"{a['distance_km']:.2f} km")
+        ac1.metric("👣 Passi",f"{a['steps']:,}".replace(",","."))
+        ac2.metric("⚡ Calorie attive" if a["active_source"]!="stima" else "⚡ Calorie attive stimate",f"{a['active_calories']:,} kcal".replace(",","."))
+        ac3.metric("📏 Distanza",f"{a['distance_km']:.2f} km")
         if a["details"]:
-            for w in a["details"]:
-                st.write(f"🏃 **{w['name']}** · {w['duration_minutes']} min")
+            for w in a["details"]: st.write(f"🏃 **{w['name']}** · {w['duration_minutes']} min")
         else:
-            st.caption("Nessuna sessione ExerciseSessionRecord registrata oggi.")
-        st.caption("Le calorie attive descrivono l'attività già inclusa nel consumo totale Health Connect; non vengono aggiunte nuovamente al bilancio.")
+            st.caption("Nessuna sessione di allenamento registrata oggi.")
+        st.caption("Le calorie attive sono già comprese nel consumo totale Health Connect e non vengono aggiunte due volte al bilancio.")
 
         if native:
-            st.info("I dati mostrati sopra arrivano direttamente dal bridge Android tramite Health Connect. Google Fit non viene interrogato per il bilancio.")
             if h.get("calories_today") is not None and h.get("calories_source_verified"):
                 b=balance()
-                st.info(f"🔥 Consumo osservato **{b['observed_burn']:,} kcal**. Stima fine giornata **{b['projected_burn']:,} kcal**. Budget alimentare dinamico **{b['live_target']:,} kcal**.".replace(",","."))
+                st.markdown('<div class="activity-section">🔥 Impatto energetico <span class="activity-section-sub">senza cambiare il target base</span></div>',unsafe_allow_html=True)
+                bc1,bc2,bc3=st.columns(3)
+                bc1.metric("Consumo osservato",f"{b['observed_burn']:,} kcal".replace(",","."))
+                bc2.metric("Stima fine giornata",f"{b['projected_burn']:,} kcal".replace(",","."))
+                bc3.metric("Budget alimentare",f"{b['live_target']:,} kcal".replace(",","."))
             elif h.get("calories_today") is not None:
-                st.warning("⚠️ Le calorie totali Health Connect sono ricevute, ma non sono ancora considerate verificate per il calcolo del budget. Prima validiamo la provenienza Galaxy Watch.")
-        else:
-            st.info("Google Fit legacy è usato solo come diagnostica; i valori non verificati non entrano nel bilancio produttivo.")
+                st.warning("⚠️ Le calorie totali Health Connect sono ricevute, ma la loro provenienza non è ancora verificata per il bilancio produttivo.")
 
         if h.get("weight") is not None and h.get("body_fat") is not None:
             fat=float(h["weight"])*float(h["body_fat"])/100; lean=float(h["weight"])-fat
@@ -4191,43 +4202,33 @@ elif st.session_state.page=="Attività":
 
         if native:
             payload=h.get("native_health_payload",{})
-            with st.expander("🔎 Dettagli snapshot Health Connect"):
+            with st.expander("🔎 Dettagli tecnici della sincronizzazione",expanded=False):
                 st.write("**Schema:**",payload.get("schema","—"))
                 st.write("**Bridge:**",payload.get("bridge_version","—"))
                 st.write("**Data:**",payload.get("date","—"))
                 st.write("**Trust:**",payload.get("trust",{}))
-                st.caption("Il payload compatto contiene solo metriche normalizzate e informazioni di trust; le sorgenti dettagliate restano nel bridge Android.")
+                st.caption("I dettagli tecnici servono per diagnostica; il percorso produttivo resta Samsung Health → Health Connect → MyDiet.")
         else:
-            st.markdown('<div class="activity-section">🧪 Diagnostica</div>',unsafe_allow_html=True)
-            st.info("Google Fit legacy resta disponibile solo come diagnostica. I passi derivati e le calorie legacy non vengono usati nel bilancio perché non possiamo dimostrare che rappresentino correttamente il Galaxy Watch Ultra 2.")
-
             diag_view=st.session_state.get("diagnostics",{})
-            comp_steps=diag_view.get("_source_compare_steps",[])
-            comp_cal=diag_view.get("_source_compare_calories",[])
-            if comp_steps:
-                with st.expander("📱 Confronto sorgenti — PASSI",expanded=True): st.dataframe(pd.DataFrame(comp_steps),use_container_width=True,hide_index=True)
-            if comp_cal:
-                with st.expander("🔥 Confronto sorgenti — CALORIE"): st.dataframe(pd.DataFrame(comp_cal),use_container_width=True,hide_index=True)
-            if diag_view.get("_source_compare_error"):
-                st.warning(f"⚠️ Errore confronto sorgenti: {diag_view['_source_compare_error']}")
-
-            for k,x in st.session_state.diagnostics.items():
-                if k.startswith("_source_compare_"): continue
-                if not isinstance(x,dict) or "status" not in x: continue
-                if x["status"]=="available":
-                    if x.get("source_id"):
-                        st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
-                        st.caption(f"Sorgente usata: `{x.get('source_label',x['source_id'])}` · {x.get('source_reason','')}")
-                    else: st.success(f"✓ {k}: dati trovati · {x['type']} · {x.get('points',0)} punti")
-                elif x["status"]=="no_data": st.warning(f"○ {k}: nessun dato restituito · {x['type']}")
-                elif x["status"]=="source_error": st.error(f"✕ {k}: impossibile leggere l'elenco delle sorgenti · HTTP {x.get('http','')} · {x.get('detail','')}")
-                else: st.error(f"✕ {k}: HTTP {x.get('http','')} · {x.get('detail','')}")
-
+            if diag_view:
+                with st.expander("🔎 Diagnostica tecnica",expanded=False):
+                    comp_steps=diag_view.get("_source_compare_steps",[]); comp_cal=diag_view.get("_source_compare_calories",[])
+                    if comp_steps: st.dataframe(pd.DataFrame(comp_steps),use_container_width=True,hide_index=True)
+                    if comp_cal: st.dataframe(pd.DataFrame(comp_cal),use_container_width=True,hide_index=True)
+                    if diag_view.get("_source_compare_error"): st.warning(f"⚠️ Errore confronto sorgenti: {diag_view['_source_compare_error']}")
+                    for k,x in diag_view.items():
+                        if k.startswith("_source_compare_"): continue
+                        if not isinstance(x,dict) or "status" not in x: continue
+                        if x["status"]=="available": st.success(f"✓ {k}: dati trovati · {x.get('type','')}")
+                        elif x["status"]=="no_data": st.warning(f"○ {k}: nessun dato restituito · {x.get('type','')}")
+                        else: st.error(f"✕ {k}: HTTP {x.get('http','')} · {x.get('detail','')}")
     else:
-        if native:
-            st.warning("Il bridge è stato rilevato ma non contiene metriche leggibili. Ritorna al bridge Android, premi 'Leggi dati di oggi' e poi 'Invia dati'.")
-        else:
-            st.info("Nessun dato Health disponibile in questa sessione.")
+        st.markdown("""
+        <div class="activity-empty">
+          <div class="activity-empty-title">📡 In attesa del primo dato</div>
+          <div class="activity-empty-sub">Quando il Bridge Android invierà uno snapshot, qui compariranno passi, calorie, distanza, allenamenti e gli altri dati disponibili.</div>
+        </div>
+        """,unsafe_allow_html=True)
 
 # ---------------- Profilo ----------------
 
