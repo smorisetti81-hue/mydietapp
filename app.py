@@ -3314,6 +3314,47 @@ if st.session_state.page=="Home":
     date_label=f"{weekdays[datetime.now(ROME).weekday()]} {datetime.now(ROME).day:02d}/{datetime.now(ROME).month:02d}"
     st.markdown(f"""<div class="mydiet-kcal-card"><div class="mydiet-kcal-label">OGGI · {d.upper()} · {date_label}</div><div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:12px;"><div><div class="mydiet-kcal-number">{eaten:,} <span style="font-size:.98rem;font-weight:700;color:#9da4b0;letter-spacing:-.02em;">/ {target:,} kcal</span></div><div class="mydiet-kcal-sub">{'Ti restano' if rem>=0 else 'Sei sopra il target di'} <b>{abs(rem):,} kcal</b></div><div class="mydiet-kcal-target">Target alimentare di oggi</div></div><div style="font-size:2.15rem;filter:drop-shadow(0 5px 12px rgba(215,25,32,.25));">🎯</div></div></div>""".replace(",","."),unsafe_allow_html=True)
     st.progress(pct)
+
+    # Temporary calorie-source diagnostic. This is read-only: it does not
+    # write to PostgreSQL or modify any meal state. It exists to identify
+    # legacy/local test data that may be inflating today's Home total.
+    with st.expander("🧪 Diagnostica calorie (temporanea)", expanded=False):
+        lookup_diag = {i["id"]: i for _, _, m0 in meals() for i in m0.get("ingredients", [])}
+        planned_eaten_kcal = 0.0
+        eaten_item_count = 0
+        for iid, flag in (st.session_state.get("eaten", {}) or {}).items():
+            if not flag or iid not in lookup_diag:
+                continue
+            item0 = lookup_diag[iid]
+            ov0 = st.session_state.get("overrides", {}).get(iid, {}) or {}
+            if ov0.get("removed"):
+                continue
+            mult0 = float(ov0.get("multiplier", 1) or 1)
+            planned_eaten_kcal += float(item0.get("kcal", 0) or 0) * mult0
+            eaten_item_count += 1
+        manual_today = [
+            x for x in (st.session_state.get("manual_foods", []) or [])
+            if x.get("date") == today()
+        ]
+        manual_kcal = sum(float(x.get("kcal", 0) or 0) for x in manual_today)
+        diag_total = round(planned_eaten_kcal + manual_kcal)
+        diag_registered_meals = [
+            k for k, v in (st.session_state.get("registered_meals", {}) or {}).items()
+            if v and k.startswith(d + "::")
+        ]
+        st.caption("Solo lettura · nessun dato viene modificato")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("🍽️ Pasti registrati", f"{round(planned_eaten_kcal):,} kcal".replace(",", "."))
+        c2.metric("➕ Alimenti manuali", f"{round(manual_kcal):,} kcal".replace(",", "."))
+        c3.metric("Σ Totale", f"{diag_total:,} kcal".replace(",", "."))
+        st.caption(f"Ingredienti registrati: {eaten_item_count} · Pasti segnati come registrati oggi: {len(diag_registered_meals)}")
+        if manual_today:
+            st.markdown("**Alimenti manuali di oggi:**")
+            for x in manual_today:
+                st.write(f"• {x.get('name', 'Alimento')} — {round(float(x.get('kcal', 0) or 0))} kcal")
+        else:
+            st.caption("Nessun alimento manuale registrato oggi.")
+
     if next_meal:
         mn=next_meal.get("_meal_name"); meal=st.session_state.meal_plan.get(d,{}).get(mn)
         if meal:

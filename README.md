@@ -1,13 +1,17 @@
-# MyDietApp V87.3 — PostgreSQL meal logs + performance fix
+# MyDietApp V88.2 — Diagnostica calorie Home
 
-Based on V87.1. Meal-log persistence is now fingerprint-gated: PostgreSQL is not contacted on ordinary Streamlit reruns/navigation unless the durable meal-registration state actually changed.
+Aggiunge alla Home un pannello diagnostico temporaneo e in sola lettura per distinguere:
+- kcal degli ingredienti effettivamente registrati;
+- kcal degli alimenti inseriti manualmente oggi;
+- totale che MyDiet sta usando per la card calorie.
 
-This reduces the delay when switching Home/Piano/Dispensa/Attività/Profilo and avoids the transient dim/duplicate-looking render that can appear while Streamlit is waiting for an unnecessary DB write.
+Non modifica PostgreSQL, non cancella dati e non cambia la logica di registrazione.
 
-No Secrets changes are required. Existing DATABASE_URL remains valid.
+## Test
+1. Deploy di questa versione.
+2. Apri Home.
+3. Apri `🧪 Diagnostica calorie (temporanea)`.
+4. Inviami lo screenshot del pannello.
 
-
-## V87.3 — fix legacy Thursday out-of-home flags
-- Default `out_lunch_days` / `out_dinner_days` is now empty.
-- On first load, if PostgreSQL still contains the exact legacy pair `Giovedì` for both lunch and dinner, the app clears them only when the stored Thursday meals are normal planned meals (not `FUORI CASA`) and immediately persists the correction.
-- No other meal-log or plan persistence behavior is changed.
+## Nota
+Il codice applicativo è derivato da V87.3; questa release aggiunge esclusivamente la diagnostica calorie.
