@@ -1413,7 +1413,14 @@ def _ingest_remote_health_sync():
             pass
     api_url=str(st.secrets.get("HEALTH_SYNC_API_URL","") or "").strip().rstrip("/")
     token=str(st.secrets.get("HEALTH_SYNC_TOKEN","") or "").strip()
-    profile_id=_state_token()
+    # Health Bridge has its own stable profile id. Keep the app mdid separate
+    # from the transport identity so an existing Bridge configuration continues
+    # to work even if the MyDiet URL/session id changes. A secret can override
+    # this default later for a different Bridge installation.
+    bridge_profile_id=str(st.secrets.get("HEALTH_BRIDGE_PROFILE_ID", "") or "").strip()
+    if not bridge_profile_id:
+        bridge_profile_id="c475e5a10b9144b6bb6cde887e06caee"
+    profile_id=bridge_profile_id or _state_token()
     st.session_state["_remote_health_checked_at"]=datetime.now(ROME).isoformat()
     if not api_url or not token or not profile_id:
         return False
