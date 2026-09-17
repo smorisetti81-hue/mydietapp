@@ -936,7 +936,7 @@ def init_plan():
 _defaults = {
     "page":"Home", "meal_plan":init_plan(), "overrides":{}, "eaten":{}, "manual_foods":[],
     "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None, "water_history":{},
-    "plan_week_start":None, "plan_history":{}, "out_lunch_days":["Giovedì"], "out_dinner_days":["Giovedì"],
+    "plan_week_start":None, "plan_history":{}, "out_lunch_days":[], "out_dinner_days":[],
     "next_meal_plan":None, "next_overrides":{}, "next_week_start":None,
     "next_out_lunch_days":[], "next_out_dinner_days":[],
     "mensa_menus":{}, "next_mensa_menus":{},
@@ -1729,6 +1729,29 @@ def historical_food_library(limit=None):
 
 ensure_plan_metadata()
 _db_load_plan_once()
+
+# V87.3 — remove the legacy Thursday out-of-home default. Older builds used
+# Giovedì as a hard-coded default and that value was persisted into PostgreSQL.
+# Only migrate when both lunch and dinner still contain that exact legacy pair
+# AND the loaded Thursday meals are ordinary planned meals (not FUORI CASA).
+def _db_migrate_legacy_thursday_out_flags():
+    if st.session_state.get("_v873_legacy_thursday_migrated", False):
+        return
+    st.session_state["_v873_legacy_thursday_migrated"] = True
+    lunch = list(st.session_state.get("out_lunch_days", []) or [])
+    dinner = list(st.session_state.get("out_dinner_days", []) or [])
+    if lunch != ["Giovedì"] or dinner != ["Giovedì"]:
+        return
+    thu = st.session_state.get("meal_plan", {}).get("Giovedì", {}) or {}
+    lunch_name = str((thu.get("🍽️ Pranzo") or {}).get("name", ""))
+    dinner_name = str((thu.get("🌙 Cena") or {}).get("name", ""))
+    if "FUORI CASA" in lunch_name.upper() or "FUORI CASA" in dinner_name.upper():
+        return
+    st.session_state.out_lunch_days = []
+    st.session_state.out_dinner_days = []
+    _db_save_plan_state()
+
+_db_migrate_legacy_thursday_out_flags()
 # A freshly loaded DB plan may contain a next-week draft whose start date has arrived.
 if maybe_activate_next_plan():
     _db_save_plan_state()
