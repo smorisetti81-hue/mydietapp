@@ -2630,7 +2630,7 @@ def balance():
     remaining_seconds=max(0.0,(midnight-now).total_seconds())
     remaining_rest=round(bmr_for_projection*(remaining_seconds/86400.0))
     projected_burn=round(observed+remaining_rest) if observed > 0 else 0
-    live_target=round(max(1200, projected_burn+e["adjustment"])) if projected_burn > 0 else e["target"]
+    live_target=e["target"]
     native_active=float(h.get("active_calories_today") or 0)
     active_verified=bool(h.get("active_calories_source_verified")) and native_active > 0
     estimated_active=max(0,round(observed-bmr_for_projection*(elapsed/86400.0))) if observed > 0 else 0
@@ -3326,7 +3326,7 @@ if not _profile_complete():
 if st.session_state.page=="Home":
     h=st.session_state.get("health",{})
     b=balance(); d=current_day_name(); next_meal=_next_meal_for_today(d)
-    rem=b["remaining"]; target=int(b["live_target"] or 0); eaten=int(b["eaten"] or 0)
+    rem=b["remaining"]; target=int(b["target"] or 0); eaten=int(b["eaten"] or 0)
     pct=min(max(eaten/max(target,1),0),1)
     weekdays=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
     date_label=f"{weekdays[datetime.now(ROME).weekday()]} {datetime.now(ROME).day:02d}/{datetime.now(ROME).month:02d}"
@@ -4261,7 +4261,7 @@ elif st.session_state.page=="Attività":
                 bc1,bc2,bc3=st.columns(3)
                 bc1.metric("Consumo osservato",f"{b['observed_burn']:,} kcal".replace(",","."))
                 bc2.metric("Stima fine giornata",f"{b['projected_burn']:,} kcal".replace(",","."))
-                bc3.metric("Budget alimentare",f"{b['live_target']:,} kcal".replace(",","."))
+                bc3.metric("Target alimentare",f"{b['target']:,} kcal".replace(",","."))
             elif h.get("calories_today") is not None:
                 st.warning("⚠️ Le calorie totali Health Connect sono ricevute, ma la loro provenienza non è ancora verificata per il bilancio produttivo.")
 
