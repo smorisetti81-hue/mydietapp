@@ -1,17 +1,7 @@
-# MyDietApp V88.2 — Diagnostica calorie Home
+# MyDietApp V88.3 — Calorie total fix
 
-Aggiunge alla Home un pannello diagnostico temporaneo e in sola lettura per distinguere:
-- kcal degli ingredienti effettivamente registrati;
-- kcal degli alimenti inseriti manualmente oggi;
-- totale che MyDiet sta usando per la card calorie.
+Fixes the Home calorie calculation so weekly-plan `eaten` flags from previous days/test sessions are no longer summed into today's total.
 
-Non modifica PostgreSQL, non cancella dati e non cambia la logica di registrazione.
+Today's total now considers only ingredient states belonging to today's planned meals, plus today's manual foods.
 
-## Test
-1. Deploy di questa versione.
-2. Apri Home.
-3. Apri `🧪 Diagnostica calorie (temporanea)`.
-4. Inviami lo screenshot del pannello.
-
-## Nota
-Il codice applicativo è derivato da V87.3; questa release aggiunge esclusivamente la diagnostica calorie.
+The temporary calorie diagnostic was aligned with the same day-scoped logic.

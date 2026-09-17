@@ -1826,15 +1826,33 @@ def active_items(meal):
     return out
 
 def eaten_kcal():
-    lookup={i["id"]:i for _,_,m in meals() for i in m.get("ingredients",[])}
-    total=0
-    for iid,v in st.session_state.eaten.items():
-        if v and iid in lookup:
-            item=lookup[iid]
-            mult=float(st.session_state.overrides.get(iid,{}).get("multiplier",1))
-            if not st.session_state.overrides.get(iid,{}).get("removed"):
-                total += float(item["kcal"])*mult
-    total += sum(float(x["kcal"]) for x in st.session_state.manual_foods if x["date"]==today())
+    """Return calories actually registered/eaten for TODAY only.
+
+    ``st.session_state.eaten`` is a legacy ingredient-level map that can contain
+    flags for several days of the weekly plan. Summing that map globally would
+    incorrectly add calories from previous test days to today's Home total.
+    Restrict the calculation to the current day's meal ingredients, while still
+    respecting ingredient-level checkboxes and quantity overrides.
+    """
+    day=current_day_name()
+    total=0.0
+    plan=st.session_state.get("meal_plan",{}) or {}
+    day_meals=plan.get(day,{}) or {}
+    eaten_map=st.session_state.get("eaten",{}) or {}
+    overrides=st.session_state.get("overrides",{}) or {}
+
+    for meal in day_meals.values():
+        for item in meal.get("ingredients",[]):
+            iid=item.get("id")
+            if not iid or not eaten_map.get(iid,False):
+                continue
+            ov=overrides.get(iid,{}) or {}
+            if ov.get("removed"):
+                continue
+            mult=float(ov.get("multiplier",1) or 1)
+            total += float(item.get("kcal",0) or 0)*mult
+
+    total += sum(float(x.get("kcal",0) or 0) for x in (st.session_state.get("manual_foods",[]) or []) if x.get("date")==today())
     return round(total)
 
 def plan_food_suggestions(current_day=None, current_meal=None, limit=8):
@@ -3319,19 +3337,22 @@ if st.session_state.page=="Home":
     # write to PostgreSQL or modify any meal state. It exists to identify
     # legacy/local test data that may be inflating today's Home total.
     with st.expander("🧪 Diagnostica calorie (temporanea)", expanded=False):
-        lookup_diag = {i["id"]: i for _, _, m0 in meals() for i in m0.get("ingredients", [])}
         planned_eaten_kcal = 0.0
         eaten_item_count = 0
-        for iid, flag in (st.session_state.get("eaten", {}) or {}).items():
-            if not flag or iid not in lookup_diag:
-                continue
-            item0 = lookup_diag[iid]
-            ov0 = st.session_state.get("overrides", {}).get(iid, {}) or {}
-            if ov0.get("removed"):
-                continue
-            mult0 = float(ov0.get("multiplier", 1) or 1)
-            planned_eaten_kcal += float(item0.get("kcal", 0) or 0) * mult0
-            eaten_item_count += 1
+        day_plan_diag = (st.session_state.get("meal_plan", {}) or {}).get(d, {}) or {}
+        eaten_map_diag = st.session_state.get("eaten", {}) or {}
+        overrides_diag = st.session_state.get("overrides", {}) or {}
+        for meal0 in day_plan_diag.values():
+            for item0 in meal0.get("ingredients", []):
+                iid0 = item0.get("id")
+                if not iid0 or not eaten_map_diag.get(iid0, False):
+                    continue
+                ov0 = overrides_diag.get(iid0, {}) or {}
+                if ov0.get("removed"):
+                    continue
+                mult0 = float(ov0.get("multiplier", 1) or 1)
+                planned_eaten_kcal += float(item0.get("kcal", 0) or 0) * mult0
+                eaten_item_count += 1
         manual_today = [
             x for x in (st.session_state.get("manual_foods", []) or [])
             if x.get("date") == today()
