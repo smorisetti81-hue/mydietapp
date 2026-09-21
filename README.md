@@ -15,3 +15,9 @@
 - Added deterministic Personal Trainer preview card (no new AI calls).
 - Compact activity and shopping previews.
 - Technical calorie diagnostics moved below the primary Home content.
+
+
+## V90.1 – Preparazione settimana
+- Promemoria guida: giovedì/venerdì è il momento consigliato per preparare la settimana successiva.
+- Nel weekend viene mostrato un promemoria più urgente se la bozza non è ancora pronta.
+- Nessuna scadenza bloccante: il piano può essere preparato in qualsiasi momento.

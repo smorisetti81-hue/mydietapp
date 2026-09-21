@@ -3619,6 +3619,16 @@ elif st.session_state.page=="Piano":
         # Generation/preparation is deliberately compact. Editing starts only after
         # the user explicitly chooses a week, then a single meal.
         if not editing_next:
+            # Planning window: encourage users to prepare the following week on Thursday/Friday,
+            # so the meal plan and shopping list are ready before the weekend. This is guidance,
+            # not a hard deadline: the user can prepare the week at any time.
+            today_local = datetime.now(ROME).date()
+            prep_weekday = today_local.weekday()  # Monday=0 ... Sunday=6
+            if not has_next:
+                if prep_weekday in (3, 4):
+                    st.info("💡 **È il momento giusto per preparare la prossima settimana.** Imposta il piano giovedì o venerdì: avrai più tempo per organizzare pasti e spesa.")
+                elif prep_weekday in (5, 6):
+                    st.warning("⏰ **La prossima settimana non è ancora pronta.** Preparala ora per arrivare organizzato alla spesa.")
             with st.expander(f"✨ Prossima settimana · {week_label(next_start)}",expanded=False):
                 if has_next:
                     st.success("Bozza pronta · il piano attuale è al sicuro")
