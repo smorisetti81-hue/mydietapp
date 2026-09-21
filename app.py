@@ -1655,6 +1655,25 @@ def maybe_activate_next_plan():
             st.session_state.pop(key,None)
     return True
 
+def maybe_rollover_to_current_week():
+    """Promote an arrived next-week draft when the calendar has moved on.
+    Never invents a new plan: if no prepared draft exists, it only leaves the
+    current plan untouched so the user can explicitly prepare one.
+    """
+    current_week=week_start(datetime.now(ROME).date())
+    active_start=st.session_state.get("plan_week_start")
+    next_start=st.session_state.get("next_week_start")
+    next_plan=st.session_state.get("next_meal_plan")
+    if not active_start or not next_start or not next_plan:
+        return False
+    try:
+        if date.fromisoformat(active_start) < date.fromisoformat(current_week) and date.fromisoformat(next_start) <= date.fromisoformat(current_week):
+            return bool(maybe_activate_next_plan())
+    except Exception:
+        return False
+    return False
+
+
 def archive_current_plan(reason="Nuovo piano"):
     ensure_plan_metadata()
     start=st.session_state.plan_week_start
@@ -1813,8 +1832,8 @@ def _db_migrate_legacy_thursday_out_flags():
     _db_save_plan_state()
 
 _db_migrate_legacy_thursday_out_flags()
-# A freshly loaded DB plan may contain a next-week draft whose start date has arrived.
-if maybe_activate_next_plan():
+# V90: a freshly loaded DB plan may contain a next-week draft whose start date has arrived.
+if maybe_rollover_to_current_week():
     _db_save_plan_state()
 
 def item_multiplier(item):
@@ -1857,9 +1876,16 @@ def quantity_caption(item):
     return label
 
 def qty_step(unit, qty):
-    unit=str(unit).lower()
-    if unit == "pz": return 1.0
-    if unit in ("ml", "g"): return 10.0 if float(qty) >= 20 else 1.0
+    """Return a human-friendly increment for the selected unit.
+    Pieces/confezioni are always whole numbers; kg/l use 0.1; g/ml stay fine-grained.
+    """
+    unit=str(unit).strip().lower()
+    if unit in ("pz", "confezioni"):
+        return 1.0
+    if unit in ("kg", "l"):
+        return 0.1
+    if unit in ("ml", "g"):
+        return 10.0 if float(qty) >= 20 else 1.0
     return 1.0
 
 def set_item_qty(item, new_qty):
@@ -2013,6 +2039,13 @@ Regole:
 def _meal_kcal_for_day(day, meal_name):
     ms=st.session_state.meal_plan.get(day,{})
     meal=ms.get(meal_name)
+    if not meal:
+        return 0
+    return round(sum(item_kcal(i) for i in active_items(meal)))
+
+
+def meal_kcal_total(meal):
+    """Single display-level calorie calculation used by Home and Piano."""
     if not meal:
         return 0
     return round(sum(item_kcal(i) for i in active_items(meal)))
@@ -2465,18 +2498,30 @@ def _normalized_food_name(name):
     return " ".join(str(name).strip().lower().split())
 
 def _convert_qty(name, qty, from_unit, to_unit):
-    """Convert only known household equivalents; return None when unknown."""
+    """Convert compatible pantry units; return None when the conversion is unknown."""
     f=str(from_unit).strip().lower(); t=str(to_unit).strip().lower()
     q=float(qty or 0)
     if f==t:
         return q
+
+    # Pure metric conversions are always safe.
+    if f=="kg" and t=="g":
+        return q*1000.0
+    if f=="g" and t=="kg":
+        return q/1000.0
+    if f=="l" and t=="ml":
+        return q*1000.0
+    if f=="ml" and t=="l":
+        return q/1000.0
+
     conv=PANTRY_UNIT_CONVERSIONS.get(_normalized_food_name(name), {})
     # Known pz -> grams.
     if f=="pz" and t=="g" and "pz" in conv:
         return q*float(conv["pz"])
-    # Known pz -> ml is intentionally unsupported.
+    # Known grams -> pieces.
     if f=="g" and t=="pz" and "pz" in conv and conv["pz"]>0:
         return q/float(conv["pz"])
+    # Never infer pz <-> ml, or confezioni <-> weight/volume, without a pack size.
     return None
 
 def _pantry_stock_in_unit(name, target_unit):
@@ -3415,7 +3460,7 @@ if st.session_state.page=="Home":
     if next_meal:
         mn=next_meal.get("_meal_name"); meal=st.session_state.meal_plan.get(d,{}).get(mn)
         if meal:
-            items=active_items(meal); kcal=round(sum(item_kcal(i) for i in items)); registered=_meal_is_registered(d,mn)
+            items=active_items(meal); kcal=meal_kcal_total(meal); registered=_meal_is_registered(d,mn)
             meal_icon=mn.split(" ",1)[0] if " " in mn else "🍽️"
             meal_label=mn.split(" ",1)[1] if " " in mn else mn
             st.markdown(f'''<div class="mydiet-home-section"><div class="mydiet-home-section-title">🍽️ Prossimo pasto</div><div class="mydiet-home-section-sub">{'✓ già registrato' if registered else 'da registrare'}</div></div><div class="mydiet-next-card"><div class="mydiet-next-top"><span>{meal_icon}</span><span>{meal_label}</span></div><div class="mydiet-next-name">{meal.get('name','Pasto')}</div><div class="mydiet-next-kcal">{kcal} kcal · {'✓ Registrato' if registered else 'Pronto da registrare'}</div></div>''',unsafe_allow_html=True)
@@ -3433,7 +3478,7 @@ if st.session_state.page=="Home":
     meal_order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
     ordered_meals=[(mn,ms[mn]) for mn in meal_order if mn in ms]
     for idx,(mn,m) in enumerate(ordered_meals):
-        items=active_items(m); kcal=round(sum(item_kcal(i) for i in items)); registered=_meal_is_registered(d,mn)
+        items=active_items(m); kcal=meal_kcal_total(m); registered=_meal_is_registered(d,mn)
         meal_icon=mn.split(" ",1)[0] if " " in mn else "🍽️"
         meal_label=mn.split(" ",1)[1] if " " in mn else mn
         status_class="done" if registered else ""
@@ -3656,7 +3701,7 @@ elif st.session_state.page=="Piano":
             if selected_day not in active_days: selected_day=active_days[0]
             day=st.selectbox("Giorno",active_days,index=active_days.index(selected_day),key="plan_day_selector")
             day_meals=st.session_state.meal_plan.get(day,{})
-            day_total=round(sum(item_kcal(i) for m in day_meals.values() for i in active_items(m)))
+            day_total=round(sum(meal_kcal_total(m) for m in day_meals.values()))
             registered_count=sum(1 for mn in day_meals if _meal_is_registered(day,mn)) if not editing_next else 0
             day_status = 'BOZZA · non attiva' if editing_next else f'{registered_count}/{len(day_meals)} pasti registrati'
             st.markdown(
@@ -3675,7 +3720,7 @@ elif st.session_state.page=="Piano":
             for mn,m in ordered_day_meals:
                 out_of_home=out_of_home_meal_configured(day,mn)
                 items=active_items(m)
-                kcal=round(sum(item_kcal(i) for i in items))
+                kcal=meal_kcal_total(m)
                 meal_registered=False if editing_next else _meal_is_registered(day,mn)
                 status="📍 Fuori casa" if out_of_home else ("✓ Registrato" if meal_registered else "Da registrare")
                 with st.container(border=True):
@@ -3808,6 +3853,7 @@ elif st.session_state.page=="Piano":
         if editing_next:
             save_next_editor_context()
 
+# V90: stabilization — weekly rollover, canonical meal kcal rendering, pantry units/steps.
 # ---------------- Dispensa ----------------
 elif st.session_state.page=="Dispensa":
     st.markdown("<div class=\"md-section-head\"><div><div class=\"md-eyebrow\">MYDIET · ORGANIZZA</div><div class=\"md-page-title\">Spesa & Dispensa</div><div class=\"md-page-sub\">Tieni sotto controllo quello che hai in casa e quello che manca per il tuo piano.</div></div><div class=\"md-section-icon\">🛒</div></div>", unsafe_allow_html=True)
@@ -3856,11 +3902,13 @@ elif st.session_state.page=="Dispensa":
                         else:
                             st.markdown("**Quanto hai comprato?**")
                             default_qty=max(0.1,float(r["need"]))
+                            buy_step=qty_step(r["unit"], default_qty)
+                            buy_min=1.0 if r["unit"] in ("pz","confezioni") else (0.1 if r["unit"] in ("g","ml","kg","l") else 0.1)
                             qty=st.number_input(
                                 f"Quantità ({r['unit']})",
-                                min_value=0.1,
-                                value=default_qty,
-                                step=0.1 if float(r["need"]) < 10 else 50.0,
+                                min_value=buy_min,
+                                value=max(buy_min, default_qty),
+                                step=buy_step,
                                 key="shopping_qty_"+key.replace("|","_"),
                                 label_visibility="collapsed"
                             )
@@ -4130,11 +4178,11 @@ elif st.session_state.page=="Dispensa":
                     with c2: st.markdown(f"**{item['qty']:g} {item['unit']}**")
                     with c3:
                         if st.button("−",key="pantry_minus_"+item["key"].replace("|","_"),use_container_width=True):
-                            step=1 if item["unit"]=="pz" else 50
+                            step=qty_step(item["unit"], item["qty"])
                             add_pantry_qty(item["name"],item["unit"],-step); _mydiet_rerun()
                     with c4:
                         if st.button("+",key="pantry_plus_"+item["key"].replace("|","_"),use_container_width=True):
-                            step=1 if item["unit"]=="pz" else 50
+                            step=qty_step(item["unit"], item["qty"])
                             add_pantry_qty(item["name"],item["unit"],step); _mydiet_rerun()
         else:
             st.info("La dispensa è vuota. Puoi aggiungere qui quello che hai già in casa.")
@@ -4145,14 +4193,16 @@ elif st.session_state.page=="Dispensa":
             names=sorted({x["name"] for x in suggestions})
             c1,c2,c3=st.columns([3,1,1])
             with c1: selected=st.selectbox("Alimento",["Nuovo alimento…"]+names,key="pantry_select")
-            with c2: qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=50.0,key="pantry_qty")
-            with c3: unit=st.selectbox("Unità",["g","ml","pz"],key="pantry_unit")
+            with c2: unit=st.selectbox("Unità",["g","kg","ml","l","pz","confezioni"],key="pantry_unit")
+            with c3:
+                qty_step_value=qty_step(unit, 20 if unit in ("g","ml") else 1)
+                qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=qty_step_value,key="pantry_qty")
             if selected=="Nuovo alimento…":
                 custom_name=st.text_input("Nome alimento",placeholder="es. Pasta")
             else:
                 custom_name=selected
                 suggested_unit=next((x["unit"] for x in suggestions if x["name"]==selected),None)
-                if suggested_unit in ("g","ml","pz"): st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
+                if suggested_unit in ("g","kg","ml","l","pz","confezioni"): st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
             if st.button("Salva in dispensa",type="primary") and custom_name.strip() and qty>0:
                 add_pantry_qty(custom_name.strip(),unit,qty); _mydiet_rerun()
 
