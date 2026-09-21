@@ -1,3 +1,16 @@
+# MyDietApp V90.2 — Piano e preparazione settimana
+
+## V90.2
+- Non mostra più il menu della settimana corrente dentro "Prossima settimana" quando la nuova settimana non è ancora stata generata.
+- Se esisteva un vecchio draft persistito che era una copia esatta del piano attivo, viene riconosciuto come stale e rimosso.
+- La nuova settimana mostra invece uno stato vuoto esplicito e invita a generarla.
+- Mantiene la guida alla preparazione anticipata, idealmente giovedì/venerdì, per organizzare pasti e spesa.
+
+## V90 / V90.1
+- Stabilizzazione settimana, calorie e quantità Dispensa.
+- Promemoria guida per preparare la settimana successiva giovedì/venerdì.
+- Nessuna modifica a Supabase, Health Bridge o Smart Shopping live.
+
 # MyDietApp V90 — Stabilizzazione funzionale
 
 ## V90
