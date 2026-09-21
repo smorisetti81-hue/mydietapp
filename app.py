@@ -3703,7 +3703,14 @@ elif st.session_state.page=="Piano":
         # JSONB does not preserve object key order. Always render the week in
         # the canonical Monday->Sunday order instead of trusting dict insertion order.
         canonical_days=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
-        active_days=[d for d in canonical_days if d in st.session_state.meal_plan]
+        # IMPORTANT: when the user opens "Prossima settimana" before generating it,
+        # never fall back to the active week's meal_plan. Otherwise the current
+        # week's meals would be shown under the next-week heading.
+        if editing_next and not has_next:
+            st.info("✨ La prossima settimana non è ancora stata generata. Usa il pulsante **Genera piano della prossima settimana** qui sopra quando vuoi prepararla.")
+            active_days=[]
+        else:
+            active_days=[d for d in canonical_days if d in st.session_state.meal_plan]
         if not active_days:
             st.info("Nessun piano disponibile.")
         else:
