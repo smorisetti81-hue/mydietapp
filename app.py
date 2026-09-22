@@ -2655,9 +2655,65 @@ def add_pantry_package(name, content_qty, content_unit, count):
     }
 
 def pantry_package_step(item):
-    """Return the quantity change corresponding to one whole package."""
+    """Return one package expressed in the item's stored unit.
+
+    Example: a Pasta entry stored in kg with 500 g packages must use
+    0.5 kg as the +/- step, not 500 kg.
+    """
     pq=float(item.get("pack_qty",0) or 0)
-    return pq if pq>0 else qty_step(item.get("unit","g"),item.get("qty",0))
+    pu=str(item.get("pack_unit",item.get("unit","g"))).strip().lower()
+    iu=str(item.get("unit","g")).strip().lower()
+    if pq>0:
+        converted=_pantry_convert_between_units(pq,pu,iu)
+        if converted is not None:
+            return converted
+    return qty_step(iu,item.get("qty",0))
+
+def _adjust_first_package(item_key, delta_packages):
+    """Add/remove whole packages while keeping total quantity and lot metadata coherent."""
+    pantry=st.session_state.get("pantry",{})
+    item=pantry.get(item_key)
+    if not isinstance(item,dict):
+        return
+    lots=_package_lots(item)
+    if not lots:
+        add_pantry_qty(item.get("name",""),item.get("unit","g"),
+                       float(delta_packages)*qty_step(item.get("unit","g"),item.get("qty",0)))
+        return
+
+    # +/- acts on the first displayed package format. This keeps the behaviour
+    # deterministic when the same food contains multiple package sizes.
+    lot=lots[0]
+    count=float(lot.get("count",0) or 0)
+    if delta_packages<0 and count + delta_packages < 0:
+        return
+
+    lot_qty=float(lot.get("qty",0) or 0)
+    lot_unit=str(lot.get("unit",item.get("unit","g"))).strip().lower()
+    item_unit=str(item.get("unit","g")).strip().lower()
+    delta=_pantry_convert_between_units(lot_qty*float(delta_packages),lot_unit,item_unit)
+    if delta is None:
+        return
+
+    lot["count"]=count+float(delta_packages)
+    if lot["count"]<=0:
+        lots.pop(0)
+
+    item["qty"]=max(0.0,float(item.get("qty",0) or 0)+delta)
+    if item["qty"]<=0:
+        pantry.pop(item_key,None)
+        return
+
+    item["pack_lots"]=lots
+    if lots:
+        item["pack_count"]=sum(float(x.get("count",0) or 0) for x in lots)
+        first=lots[0]
+        item["pack_qty"]=float(first.get("qty",0) or 0)
+        item["pack_unit"]=str(first.get("unit",item_unit))
+    else:
+        item["pack_count"]=0.0
+        item["pack_qty"]=0.0
+        item["pack_unit"]=item_unit
 
 # Approximate household conversions used only when the pantry and the plan use
 # different units. They are intentionally limited to foods where a typical item
@@ -4400,18 +4456,19 @@ elif st.session_state.page=="Dispensa":
                             st.caption(f"{item['pack_count']:g} confezioni × {item['pack_qty']:g} {item['pack_unit']}")
                     with c3:
                         if st.button("−",key="pantry_minus_"+item["key"].replace("|","_"),use_container_width=True):
-                            step=pantry_package_step(item)
-                            add_pantry_qty(item["name"],item["unit"],-step)
+                            key=item["key"]
+                            if item.get("pack_lots") or item.get("pack_qty",0)>0:
+                                _adjust_first_package(key,-1)
+                            else:
+                                add_pantry_qty(item["name"],item["unit"],-pantry_package_step(item))
                             _mydiet_rerun()
                     with c4:
                         if st.button("+",key="pantry_plus_"+item["key"].replace("|","_"),use_container_width=True):
-                            step=pantry_package_step(item)
-                            if item.get("pack_qty",0)>0:
-                                add_pantry_qty(item["name"],item["unit"],step)
-                                key=_pantry_key(item["name"],item["unit"])
-                                st.session_state.pantry[key]["pack_count"]=float(st.session_state.pantry[key].get("pack_count",0) or 0)+1
+                            key=item["key"]
+                            if item.get("pack_lots") or item.get("pack_qty",0)>0:
+                                _adjust_first_package(key,1)
                             else:
-                                add_pantry_qty(item["name"],item["unit"],step)
+                                add_pantry_qty(item["name"],item["unit"],pantry_package_step(item))
                             _mydiet_rerun()
         else:
             st.info("La dispensa è vuota. Puoi aggiungere qui quello che hai già in casa.")
