@@ -2654,6 +2654,57 @@ def add_pantry_package(name, content_qty, content_unit, count):
         "loose_qty":0.0,
     }
 
+def _pantry_loose_qty(item):
+    """Return the quantity not represented by package lots, in the item's stored unit."""
+    item_unit=str(item.get("unit","g")).strip().lower()
+    package_total=0.0
+    for lot in _package_lots(item):
+        converted=_pantry_convert_between_units(
+            float(lot.get("count",0) or 0)*float(lot.get("qty",0) or 0),
+            str(lot.get("unit",item_unit)), item_unit
+        )
+        if converted is not None:
+            package_total += converted
+    # Prefer the explicitly tracked loose quantity, but fall back to the
+    # difference for records created by older V91 versions.
+    if "loose_qty" in item:
+        return max(0.0, float(item.get("loose_qty",0) or 0))
+    return max(0.0, float(item.get("qty",0) or 0)-package_total)
+
+def _delete_pantry_entry(item_key):
+    """Delete one pantry row completely."""
+    st.session_state.get("pantry",{}).pop(item_key,None)
+
+def _replace_pantry_entry(item_key, name, mode, qty=None, unit="g", pack_count=None, pack_qty=None, pack_unit="g", loose_qty=0.0):
+    """Replace a pantry row after an explicit user edit.
+
+    Editing is intentionally a replace operation rather than an additive one,
+    so correcting a typo cannot accidentally double the stock.
+    """
+    pantry=st.session_state.get("pantry",{})
+    pantry.pop(item_key,None)
+    name=str(name).strip()
+    if not name:
+        return False
+    if mode=="Confezione":
+        pack_count=float(pack_count or 0)
+        pack_qty=float(pack_qty or 0)
+        pack_unit=str(pack_unit).strip().lower()
+        loose_qty=max(0.0,float(loose_qty or 0))
+        if pack_count<=0 or pack_qty<=0:
+            return False
+        # Recreate the package lot first, then add the loose quantity without
+        # changing the package metadata.
+        add_pantry_package(name,pack_qty,pack_unit,pack_count)
+        if loose_qty>0:
+            add_pantry_qty(name,pack_unit,loose_qty)
+        return True
+    qty=float(qty or 0)
+    if qty<=0:
+        return False
+    add_pantry_qty(name,str(unit).strip().lower(),qty)
+    return True
+
 def pantry_package_step(item):
     """Return one package expressed in the item's stored unit.
 
@@ -4470,6 +4521,72 @@ elif st.session_state.page=="Dispensa":
                             else:
                                 add_pantry_qty(item["name"],item["unit"],pantry_package_step(item))
                             _mydiet_rerun()
+
+                    # V91.3: every pantry row can now be corrected or removed.
+                    edit_key="pantry_edit_"+item["key"].replace("|","_")
+                    delete_key="pantry_delete_"+item["key"].replace("|","_")
+                    ec1,ec2=st.columns(2)
+                    with ec1:
+                        if st.button("✏️ Modifica",key=edit_key,use_container_width=True):
+                            st.session_state["pantry_edit_open"] = item["key"]
+                            _mydiet_rerun()
+                    with ec2:
+                        if st.button("🗑️ Elimina",key=delete_key,use_container_width=True):
+                            st.session_state["pantry_delete_open"] = item["key"]
+                            _mydiet_rerun()
+
+                    if st.session_state.get("pantry_edit_open")==item["key"]:
+                        with st.container(border=True):
+                            st.markdown("**Modifica alimento**")
+                            edit_mode_default="Confezione" if item.get("pack_lots") or item.get("pack_qty",0)>0 else "Quantità libera"
+                            e_name=st.text_input("Alimento",value=item["name"],key="edit_name_"+item["key"].replace("|","_"))
+                            e_mode=st.radio("Come lo hai?",["Quantità libera","Confezione"],index=0 if edit_mode_default=="Quantità libera" else 1,horizontal=True,key="edit_mode_"+item["key"].replace("|","_"))
+                            if e_mode=="Quantità libera":
+                                e_unit=st.selectbox("Unità",["g","kg","ml","l","pz"],index=( ["g","kg","ml","l","pz"].index(item["unit"]) if item["unit"] in ["g","kg","ml","l","pz"] else 0),key="edit_unit_"+item["key"].replace("|","_"))
+                                e_qty=st.number_input("Quantità totale",min_value=0.0,value=float(item["qty"]),step=qty_step(e_unit,max(1.0,float(item["qty"]))),key="edit_qty_"+item["key"].replace("|","_"))
+                                st.caption("Salvando questa modalità, l'eventuale informazione sulle confezioni viene sostituita dalla quantità libera.")
+                                e_pack_count=e_pack_qty=e_loose=0.0; e_pack_unit=e_unit
+                            else:
+                                lots=item.get("pack_lots",[]) or []
+                                first=lots[0] if lots else {"count":item.get("pack_count",1) or 1,"qty":item.get("pack_qty",0) or 0,"unit":item.get("pack_unit",item["unit"])}
+                                if len(lots)>1:
+                                    st.warning("Questo alimento contiene più formati di confezione. La modifica li riunirà nel formato indicato qui sotto.")
+                                pc1,pc2,pc3=st.columns(3)
+                                with pc1: e_pack_count=st.number_input("Numero confezioni",min_value=0.0,value=float(sum(float(x.get("count",0) or 0) for x in lots) or first.get("count",1) or 1),step=1.0,key="edit_pack_count_"+item["key"].replace("|","_"))
+                                with pc2: e_pack_qty=st.number_input("Contenuto per confezione",min_value=0.0,value=float(first.get("qty",0) or 0),step=0.1,key="edit_pack_qty_"+item["key"].replace("|","_"))
+                                units=["g","kg","ml","l","pz"]
+                                first_unit=str(first.get("unit",item["unit"])).lower()
+                                with pc3: e_pack_unit=st.selectbox("Unità",units,index=(units.index(first_unit) if first_unit in units else 0),key="edit_pack_unit_"+item["key"].replace("|","_"))
+                                loose_unit=e_pack_unit
+                                loose_default=_pantry_loose_qty(item)
+                                e_loose=st.number_input(f"Quantità già sfusa ({loose_unit})",min_value=0.0,value=float(loose_default if item["unit"]==loose_unit else (_pantry_convert_between_units(loose_default,item["unit"],loose_unit) or 0)),step=qty_step(loose_unit,max(1.0,float(loose_default or 1))),key="edit_loose_"+item["key"].replace("|","_"))
+                            b1,b2=st.columns(2)
+                            with b1:
+                                if st.button("💾 Salva modifica",key="save_edit_"+item["key"].replace("|","_"),type="primary",use_container_width=True):
+                                    ok=_replace_pantry_entry(item["key"],e_name,e_mode,e_qty,e_unit,e_pack_count,e_pack_qty,e_pack_unit,e_loose)
+                                    if ok:
+                                        st.session_state["pantry_edit_open"]=None
+                                        _mydiet_rerun()
+                                    else:
+                                        st.error("Controlla i valori inseriti: quantità e confezione devono essere maggiori di zero.")
+                            with b2:
+                                if st.button("Annulla",key="cancel_edit_"+item["key"].replace("|","_"),use_container_width=True):
+                                    st.session_state["pantry_edit_open"]=None
+                                    _mydiet_rerun()
+
+                    if st.session_state.get("pantry_delete_open")==item["key"]:
+                        with st.container(border=True):
+                            st.warning(f"Vuoi eliminare **{item['name']} · {item['qty']:g} {item['unit']}** dalla dispensa?")
+                            d1,d2=st.columns(2)
+                            with d1:
+                                if st.button("🗑️ Conferma eliminazione",key="confirm_delete_"+item["key"].replace("|","_"),type="primary",use_container_width=True):
+                                    _delete_pantry_entry(item["key"])
+                                    st.session_state["pantry_delete_open"]=None
+                                    _mydiet_rerun()
+                            with d2:
+                                if st.button("Annulla",key="cancel_delete_"+item["key"].replace("|","_"),use_container_width=True):
+                                    st.session_state["pantry_delete_open"]=None
+                                    _mydiet_rerun()
         else:
             st.info("La dispensa è vuota. Puoi aggiungere qui quello che hai già in casa.")
 
