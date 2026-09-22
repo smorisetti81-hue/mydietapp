@@ -2445,8 +2445,118 @@ def grocery():
 def _pantry_key(name, unit):
     return f"{str(name).strip().lower()}|{str(unit).strip().lower()}"
 
+def _pantry_unit_family(unit):
+    unit=str(unit).strip().lower()
+    if unit in ("g", "kg"):
+        return "mass"
+    if unit in ("ml", "l"):
+        return "volume"
+    if unit == "pz":
+        return "count"
+    return None
+
+def _pantry_convert_between_units(qty, from_unit, to_unit):
+    """Convert the three directly compatible pantry unit families."""
+    f=str(from_unit).strip().lower(); t=str(to_unit).strip().lower()
+    q=float(qty or 0)
+    if f==t:
+        return q
+    if _pantry_unit_family(f) != _pantry_unit_family(t):
+        return None
+    if f=="kg" and t=="g": return q*1000.0
+    if f=="g" and t=="kg": return q/1000.0
+    if f=="l" and t=="ml": return q*1000.0
+    if f=="ml" and t=="l": return q/1000.0
+    return None
+
+def _find_compatible_pantry_key(name, unit):
+    """Find an existing entry for the same food and compatible unit family."""
+    normalized=_normalized_food_name(name)
+    target=str(unit).strip().lower()
+    for key,item in st.session_state.get("pantry",{}).items():
+        if not isinstance(item,dict):
+            continue
+        if _normalized_food_name(item.get("name","")) != normalized:
+            continue
+        source=str(item.get("unit", "g")).strip().lower()
+        if _pantry_convert_between_units(1, source, target) is not None:
+            return key
+    return None
+
+def _package_lots(item):
+    """Return package metadata as a list, keeping compatibility with V91 fields."""
+    lots=item.get("pack_lots")
+    if isinstance(lots,list) and lots:
+        return [dict(x) for x in lots if isinstance(x,dict) and float(x.get("count",0) or 0)>0]
+    count=float(item.get("pack_count",0) or 0)
+    qty=float(item.get("pack_qty",0) or 0)
+    unit=str(item.get("pack_unit",item.get("unit","g")))
+    if count>0 and qty>0:
+        return [{"count":count,"qty":qty,"unit":unit}]
+    return []
+
+def _merge_pantry_entry_into(target_key, source_key):
+    """Merge compatible inventory entries without losing package information."""
+    if target_key==source_key:
+        return
+    target=st.session_state.get("pantry",{}).get(target_key)
+    source=st.session_state.get("pantry",{}).get(source_key)
+    if not isinstance(target,dict) or not isinstance(source,dict):
+        return
+    target_unit=str(target.get("unit","g")).strip().lower()
+    source_unit=str(source.get("unit","g")).strip().lower()
+    converted=_pantry_convert_between_units(float(source.get("qty",0) or 0),source_unit,target_unit)
+    if converted is None:
+        return
+    target["qty"]=float(target.get("qty",0) or 0)+converted
+
+    # Keep every package format instead of silently overwriting metadata when,
+    # for example, 500 g and 1 kg packs of the same food are both present.
+    lots=_package_lots(target)+_package_lots(source)
+    if lots:
+        target["pack_lots"]=lots
+        # Legacy fields remain populated for older UI/state readers.
+        first=lots[0]
+        target["pack_count"]=sum(float(x.get("count",0) or 0) for x in lots)
+        target["pack_qty"]=float(first.get("qty",0) or 0)
+        target["pack_unit"]=str(first.get("unit",target_unit))
+
+    # Track the portion that was not represented by packages in the merged entry.
+    source_total=converted
+    source_pack_total=0.0
+    for lot in _package_lots(source):
+        lot_total=_pantry_convert_between_units(
+            float(lot.get("count",0) or 0)*float(lot.get("qty",0) or 0),
+            str(lot.get("unit",source_unit)), target_unit
+        )
+        if lot_total is not None:
+            source_pack_total += lot_total
+    if "loose_qty" in target or "loose_qty" in source:
+        target["loose_qty"]=float(target.get("loose_qty",0) or 0)+max(0.0,source_total-source_pack_total)
+
+    st.session_state.pantry.pop(source_key,None)
+
+def _merge_compatible_pantry_entries():
+    """Collapse duplicate same-food entries such as 2.2 kg + 2500 g into one row."""
+    groups={}
+    for key,item in list(st.session_state.get("pantry",{}).items()):
+        if not isinstance(item,dict):
+            continue
+        family=_pantry_unit_family(item.get("unit","g"))
+        if not family:
+            continue
+        group=(_normalized_food_name(item.get("name","")),family)
+        groups.setdefault(group,[]).append(key)
+    for keys in groups.values():
+        if len(keys)<2:
+            continue
+        target=keys[0]
+        for source in keys[1:]:
+            _merge_pantry_entry_into(target,source)
+
 def pantry_items():
     """Return pantry items as a sorted list with display names and quantities."""
+    _merge_compatible_pantry_entries()
     out=[]
     for key,item in st.session_state.get("pantry",{}).items():
         if not isinstance(item,dict):
@@ -2460,6 +2570,7 @@ def pantry_items():
             "pack_count":float(item.get("pack_count", 0) or 0),
             "pack_qty":float(item.get("pack_qty", 0) or 0),
             "pack_unit":str(item.get("pack_unit", item.get("unit", "g"))),
+            "pack_lots":_package_lots(item),
         })
     return sorted(out,key=lambda x:x["name"].lower())
 
@@ -2478,37 +2589,69 @@ def set_pantry_qty(name, unit, qty):
             "pack_count":float(old.get("pack_count",0) or 0),
             "pack_qty":float(old.get("pack_qty",0) or 0),
             "pack_unit":str(old.get("pack_unit",unit)),
+            "pack_lots":_package_lots(old),
+            "loose_qty":float(old.get("loose_qty",0) or 0),
         }
 
 def add_pantry_qty(name, unit, delta):
-    key=_pantry_key(name,unit)
+    """Add loose stock, merging g/kg or ml/l entries for the same food."""
+    target_unit=str(unit).strip().lower()
+    key=_pantry_key(name,target_unit)
+    existing_key=key if key in st.session_state.get("pantry",{}) else _find_compatible_pantry_key(name,target_unit)
+    if existing_key and existing_key!=key:
+        item=st.session_state.pantry[existing_key]
+        existing_unit=str(item.get("unit",target_unit)).strip().lower()
+        converted=_pantry_convert_between_units(float(delta),target_unit,existing_unit)
+        if converted is not None:
+            item["qty"]=max(0.0,float(item.get("qty",0) or 0)+converted)
+            item["loose_qty"]=max(0.0,float(item.get("loose_qty",0) or 0)+converted)
+            if item["qty"]<=0:
+                st.session_state.pantry.pop(existing_key,None)
+            return
     current=float(st.session_state.get("pantry",{}).get(key,{}).get("qty",0) or 0)
-    set_pantry_qty(name,unit,current+float(delta))
+    set_pantry_qty(name,target_unit,current+float(delta))
+    if key in st.session_state.pantry:
+        item=st.session_state.pantry[key]
+        item["loose_qty"]=float(item.get("loose_qty",0) or 0)+float(delta)
 
 def add_pantry_package(name, content_qty, content_unit, count):
-    """Add count identical packages and store both total content and package metadata."""
+    """Add packages and merge them into an existing compatible food entry."""
     name=str(name).strip(); unit=str(content_unit).strip().lower()
     count=float(count or 0); content_qty=float(content_qty or 0)
     if not name or count<=0 or content_qty<=0:
         return
+
     key=_pantry_key(name,unit)
-    current=st.session_state.get("pantry",{}).get(key,{})
-    existing_qty=float(current.get("qty",0) or 0)
-    existing_count=float(current.get("pack_count",0) or 0)
-    # Only merge package metadata when the pack size matches. Otherwise retain the
-    # existing stock and let the caller create/use another unit entry.
-    if current and float(current.get("pack_qty",0) or 0)>0 and (
-        abs(float(current.get("pack_qty",0))-content_qty)>1e-9 or
-        str(current.get("pack_unit",unit)).lower()!=unit
-    ):
-        # Fallback: add the content as loose stock rather than corrupting metadata.
-        add_pantry_qty(name,unit,content_qty*count)
+    existing_key=key if key in st.session_state.get("pantry",{}) else _find_compatible_pantry_key(name,unit)
+
+    if existing_key:
+        current=st.session_state.pantry[existing_key]
+        target_unit=str(current.get("unit",unit)).strip().lower()
+        added_qty=_pantry_convert_between_units(content_qty*count,unit,target_unit)
+        if added_qty is None:
+            return
+        current["qty"]=float(current.get("qty",0) or 0)+added_qty
+        lots=_package_lots(current)
+        lots.append({"count":count,"qty":content_qty,"unit":unit})
+        current["pack_lots"]=lots
+        current["pack_count"]=sum(float(x.get("count",0) or 0) for x in lots)
+        first=lots[0]
+        current["pack_qty"]=float(first.get("qty",0) or 0)
+        current["pack_unit"]=str(first.get("unit",target_unit))
+        # Existing loose stock remains loose; packages are tracked separately.
+        current.setdefault("loose_qty",max(0.0,float(current.get("qty",0) or 0)-sum(
+            (_pantry_convert_between_units(float(x.get("count",0) or 0)*float(x.get("qty",0) or 0),str(x.get("unit",target_unit)),target_unit) or 0)
+            for x in lots[:-1]
+        )))
         return
+
     st.session_state.pantry[key]={
         "name":name, "unit":unit,
-        "qty":existing_qty + content_qty*count,
-        "pack_count":existing_count + count,
+        "qty":content_qty*count,
+        "pack_count":count,
         "pack_qty":content_qty, "pack_unit":unit,
+        "pack_lots":[{"count":count,"qty":content_qty,"unit":unit}],
+        "loose_qty":0.0,
     }
 
 def pantry_package_step(item):
@@ -4236,11 +4379,25 @@ elif st.session_state.page=="Dispensa":
                         else:
                             st.caption("Non richiesto dal piano attuale")
                     with c2:
-                        if item.get("pack_qty",0)>0:
-                            st.markdown(f"**{item['qty']:g} {item['unit']}**")
+                        st.markdown(f"**{item['qty']:g} {item['unit']}**")
+                        lots=item.get("pack_lots",[])
+                        if lots:
+                            lot_labels=[f"{float(x.get('count',0) or 0):g} confezioni × {float(x.get('qty',0) or 0):g} {x.get('unit',item['unit'])}" for x in lots]
+                            st.caption(" · ".join(lot_labels))
+                            package_total=0.0
+                            for lot in lots:
+                                converted=_pantry_convert_between_units(
+                                    float(lot.get("count",0) or 0)*float(lot.get("qty",0) or 0),
+                                    str(lot.get("unit",item["unit"])),
+                                    str(item["unit"])
+                                )
+                                if converted is not None:
+                                    package_total += converted
+                            loose=max(0.0,float(item["qty"])-package_total)
+                            if loose>1e-9:
+                                st.caption(f"+ {loose:g} {item['unit']} già sfusi")
+                        elif item.get("pack_qty",0)>0:
                             st.caption(f"{item['pack_count']:g} confezioni × {item['pack_qty']:g} {item['pack_unit']}")
-                        else:
-                            st.markdown(f"**{item['qty']:g} {item['unit']}**")
                     with c3:
                         if st.button("−",key="pantry_minus_"+item["key"].replace("|","_"),use_container_width=True):
                             step=pantry_package_step(item)
