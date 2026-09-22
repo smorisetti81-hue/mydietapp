@@ -2043,10 +2043,40 @@ def _replacement_unit_compatible(unit_a, unit_b):
     return families.get(a)==families.get(b)
 
 
-def _replacement_suggestions(item, limit=6):
-    """Return known foods that can replace the current item while keeping a
-    similar calorie density and unit family. Current item is excluded.
-    """
+def _food_category(name):
+    """Lightweight deterministic food-family classifier used before suggesting replacements.
+    It deliberately favors practical substitutions over mere calorie similarity."""
+    n=_food_name_key(name)
+    groups={
+        "cereali_carboidrati": ["riso","pasta","cous cous","couscous","farro","orzo","bulgur","quinoa","avena","pane","toast","cracker","fette biscottate","gnocchi","patate","mais","polenta"],
+        "proteine": ["pollo","tacchino","manzo","vitello","maiale","carne","tonno","salmone","merluzzo","pesce","sgombro","uova","uovo","prosciutto","bresaola","fesa","legumi","lenticchie","ceci","fagioli","tofu","tempeh"],
+        "latticini": ["yogurt","latte","ricotta","fiocchi di latte","mozzarella","parmigiano","grana","formaggio","skyr"],
+        "frutta": ["mela","banana","pera","arancia","kiwi","fragola","fragole","frutti di bosco","mirtilli","pesca","albicocca","uva","ananas","mango","mandarino"],
+        "verdura": ["zucchine","zucchina","melanzane","melanzana","broccoli","broccolo","spinaci","insalata","pomodori","pomodoro","carote","carota","peperoni","peperone","cetrioli","cetriolo","verdure","verdura","cavolfiore","bietole"],
+        "grassi_frutta_secca": ["mandorle","noci","nocciole","anacardi","pistacchi","burro di arachidi","olio evo","olio","semi","avocado"],
+        "dolci_zuccheri": ["miele","marmellata","cioccolato","biscotti","merendina","dolce","torta","pizza"],
+    }
+    for cat, terms in groups.items():
+        if any(t in n for t in terms):
+            return cat
+    return "altro"
+
+def _meal_allowed_categories(meal_name, current_category):
+    """Return categories that make practical sense for a meal, while always keeping the current family."""
+    if current_category in {"cereali_carboidrati","proteine","latticini","frutta","verdura","grassi_frutta_secca"}:
+        base={current_category}
+    else:
+        base={"altro"}
+    if meal_name=="☕ Colazione":
+        base |= {"cereali_carboidrati","latticini","frutta","grassi_frutta_secca"}
+    elif meal_name=="🍎 Spuntino":
+        base |= {"frutta","latticini","cereali_carboidrati","grassi_frutta_secca"}
+    elif meal_name in {"🍽️ Pranzo","🌙 Cena"}:
+        base |= {"cereali_carboidrati","proteine","verdura","latticini","grassi_frutta_secca"}
+    return base
+
+def _replacement_suggestions(item, meal_name=None, limit=6):
+    """Return known foods that are plausible replacements, not just calorie matches."""
     unit=str(item.get("unit","g"))
     qty=float(item.get("qty",0) or 0)
     kcal=float(item.get("kcal",0) or 0)
@@ -2054,12 +2084,17 @@ def _replacement_suggestions(item, limit=6):
         return []
     density=kcal/qty if qty else 0
     current_name=_food_name_key(item.get("name"))
+    current_category=_food_category(item.get("name"))
+    allowed_categories=_meal_allowed_categories(meal_name,current_category)
     candidates=[]
     for food in historical_food_library():
         if _food_name_key(food.get("name"))==current_name:
             continue
         fu=str(food.get("unit","g"))
         fq=float(food.get("qty",0) or 0)
+        candidate_category=_food_category(food.get("name"))
+        if candidate_category not in allowed_categories:
+            continue
         fk=float(food.get("kcal",0) or 0)
         if fq <= 0 or fk < 0 or not _replacement_unit_compatible(unit,fu):
             continue
@@ -2087,7 +2122,7 @@ def _replacement_suggestions(item, limit=6):
     return candidates[:limit]
 
 
-def _ai_replacement_suggestions(item, limit=5):
+def _ai_replacement_suggestions(item, meal_name=None, limit=5):
     """Ask Gemini for practical food alternatives with approximately the same
     calories as the selected ingredient. The user explicitly triggers this.
     """
@@ -2099,10 +2134,14 @@ def _ai_replacement_suggestions(item, limit=5):
 Alimento attuale: {name}
 Quantità attuale: {qty:g} {unit}
 Calorie attuali: {kcal} kcal
+Contesto del pasto: {meal_name or "pasto non specificato"}
+Famiglia alimentare: {_food_category(name)}
 
 Regole:
 - Mantieni la stessa famiglia di unità: grammi con grammi, millilitri con millilitri, pezzi con pezzi.
-- L'alternativa deve essere un alimento reale e comunemente reperibile in Italia.
+- L'alternativa deve appartenere prima di tutto alla stessa famiglia alimentare dell'originale (es. riso -> pasta/farro/orzo/cous cous/quinoa; pollo -> tacchino/pesce/uova; yogurt -> altri latticini).
+- Considera anche il contesto del pasto: non proporre dolci, miele o pizza come sostituti di un cereale/proteina solo perché hanno calorie simili.
+- Evita alimenti di categoria completamente diversa se esistono alternative pratiche nella stessa famiglia.
 - Calcola una quantità pratica che porti le calorie il più vicino possibile alle {kcal} kcal.
 - Non usare quantità assurde; se necessario usa una porzione realistica e accetta una piccola differenza calorica.
 - Restituisci SOLO JSON valido: {{"alternatives":[{{"name":"...","qty":100,"unit":"g","kcal":250,"reason":"..."}}]}}
@@ -4227,7 +4266,7 @@ elif st.session_state.page=="Piano":
                                         with st.container(border=True):
                                             st.markdown(f"**🔄 Sostituisci {item['name']}**")
                                             st.caption(f"Obiettivo: circa {round(item_kcal(item))} kcal · quantità attuale {item_qty(item):g} {item.get('unit','g')}")
-                                            known_repls=_replacement_suggestions(item,limit=6)
+                                            known_repls=_replacement_suggestions(item,meal_name=mn,limit=6)
                                             if known_repls:
                                                 st.markdown("**Alternative già conosciute da MyDiet**")
                                                 for ridx,rep in enumerate(known_repls):
@@ -4248,7 +4287,7 @@ elif st.session_state.page=="Piano":
                                             if st.button("✨ Cerca alternative intelligenti",key=f"ai_repl_{day}_{mn}_{item['id']}",use_container_width=True,type="primary"):
                                                 try:
                                                     with st.spinner("Cerco alternative con calorie simili…"):
-                                                        st.session_state["replacement_ai_suggestions"]=_ai_replacement_suggestions(item,limit=5)
+                                                        st.session_state["replacement_ai_suggestions"]=_ai_replacement_suggestions(item,meal_name=mn,limit=5)
                                                 except Exception as e:
                                                     st.error(f"Ricerca alternative non riuscita: {e}")
 
