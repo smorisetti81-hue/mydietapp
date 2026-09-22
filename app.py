@@ -32,7 +32,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp V92 · Sostituzione alimenti + V91.3 Dispensa
+# MyDietApp v87.2.1 · PostgreSQL profile + meal plan + meal logs persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -997,7 +997,7 @@ _defaults = {
     "plan_generation_status":"idle", "plan_generation_message":"", "plan_generation_time":None,
     "plan_editor_selection":"current", "_plan_editor_next":False, "plan_edit_meal":None,
     "pantry":{}, "shopping_checked":{}, "pantry_consumed_by_meal":{}, "smart_food_advice":None, "registered_meals":{}, "shopping_source":"Tutte", "shopping_strategy":"⚖️ Qualità / prezzo", "shopping_radius":5,
-    "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None, "food_kcal_cache":{}, "profile_setup_complete":False, "profile_change_summary":[], "plan_needs_regeneration":False, "manual_activity_today":{}, "profile_change_time":None
+    "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None, "food_kcal_cache":{}, "profile_setup_complete":False, "profile_change_summary":[], "plan_needs_regeneration":False, "manual_activity_today":{}, "profile_change_time":None, "pantry_onboarding_complete":True
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
@@ -1032,7 +1032,7 @@ _PERSIST_KEYS = [
     "smart_food_advice", "registered_meals", "shopping_source",
     "shopping_strategy", "shopping_radius", "shopping_cart_mode",
     "shopping_cart_summary", "shopping_cart_time", "food_kcal_cache",
-    "profile_setup_complete", "profile_change_summary", "plan_needs_regeneration", "manual_activity_today", "profile_change_time",
+    "profile_setup_complete", "profile_change_summary", "plan_needs_regeneration", "manual_activity_today", "profile_change_time", "pantry_onboarding_complete",
     # Profile values
     "p_name", "p_weight", "p_goal_weight", "p_height", "p_age", "p_sex",
     "p_activity_level", "p_deficit", "p_water_goal_ml", "p_quantity_mode",
@@ -2034,155 +2034,6 @@ Regole:
         raise ValueError(f"MyDiet non è riuscita a stimare le calorie per '{name}'. Puoi inserirle manualmente modificando il pasto.")
     st.session_state.setdefault("food_kcal_cache",{})[cache_key]=result
     return result
-
-
-def _replacement_unit_compatible(unit_a, unit_b):
-    """Replacement quantities must stay in the same practical unit family."""
-    a=str(unit_a or "g").strip().lower(); b=str(unit_b or "g").strip().lower()
-    families={"g":"mass","kg":"mass","ml":"volume","l":"volume","pz":"piece"}
-    return families.get(a)==families.get(b)
-
-
-def _food_category(name):
-    """Lightweight deterministic food-family classifier used before suggesting replacements.
-    It deliberately favors practical substitutions over mere calorie similarity."""
-    n=_food_name_key(name)
-    groups={
-        "cereali_carboidrati": ["riso","pasta","cous cous","couscous","farro","orzo","bulgur","quinoa","avena","pane","toast","cracker","fette biscottate","gnocchi","patate","mais","polenta"],
-        "proteine": ["pollo","tacchino","manzo","vitello","maiale","carne","tonno","salmone","merluzzo","pesce","sgombro","uova","uovo","prosciutto","bresaola","fesa","legumi","lenticchie","ceci","fagioli","tofu","tempeh"],
-        "latticini": ["yogurt","latte","ricotta","fiocchi di latte","mozzarella","parmigiano","grana","formaggio","skyr"],
-        "frutta": ["mela","banana","pera","arancia","kiwi","fragola","fragole","frutti di bosco","mirtilli","pesca","albicocca","uva","ananas","mango","mandarino"],
-        "verdura": ["zucchine","zucchina","melanzane","melanzana","broccoli","broccolo","spinaci","insalata","pomodori","pomodoro","carote","carota","peperoni","peperone","cetrioli","cetriolo","verdure","verdura","cavolfiore","bietole"],
-        "grassi_frutta_secca": ["mandorle","noci","nocciole","anacardi","pistacchi","burro di arachidi","olio evo","olio","semi","avocado"],
-        "dolci_zuccheri": ["miele","marmellata","cioccolato","biscotti","merendina","dolce","torta","pizza"],
-    }
-    for cat, terms in groups.items():
-        if any(t in n for t in terms):
-            return cat
-    return "altro"
-
-def _meal_allowed_categories(meal_name, current_category):
-    """Return categories that make practical sense for a meal, while always keeping the current family."""
-    if current_category in {"cereali_carboidrati","proteine","latticini","frutta","verdura","grassi_frutta_secca"}:
-        base={current_category}
-    else:
-        base={"altro"}
-    if meal_name=="☕ Colazione":
-        base |= {"cereali_carboidrati","latticini","frutta","grassi_frutta_secca"}
-    elif meal_name=="🍎 Spuntino":
-        base |= {"frutta","latticini","cereali_carboidrati","grassi_frutta_secca"}
-    elif meal_name in {"🍽️ Pranzo","🌙 Cena"}:
-        base |= {"cereali_carboidrati","proteine","verdura","latticini","grassi_frutta_secca"}
-    return base
-
-def _replacement_suggestions(item, meal_name=None, limit=6):
-    """Return known foods that are plausible replacements, not just calorie matches."""
-    unit=str(item.get("unit","g"))
-    qty=float(item.get("qty",0) or 0)
-    kcal=float(item.get("kcal",0) or 0)
-    if qty <= 0 or kcal < 0:
-        return []
-    density=kcal/qty if qty else 0
-    current_name=_food_name_key(item.get("name"))
-    current_category=_food_category(item.get("name"))
-    allowed_categories=_meal_allowed_categories(meal_name,current_category)
-    candidates=[]
-    for food in historical_food_library():
-        if _food_name_key(food.get("name"))==current_name:
-            continue
-        fu=str(food.get("unit","g"))
-        fq=float(food.get("qty",0) or 0)
-        candidate_category=_food_category(food.get("name"))
-        if candidate_category not in allowed_categories:
-            continue
-        fk=float(food.get("kcal",0) or 0)
-        if fq <= 0 or fk < 0 or not _replacement_unit_compatible(unit,fu):
-            continue
-        fd=fk/fq
-        if density > 0 and fd <= 0:
-            continue
-        ratio=abs(math.log(max(fd,0.0001)/max(density,0.0001))) if density and fd else 10
-        # Prefer foods already used often, then calorie-density proximity.
-        score=ratio - min(int(food.get("uses",0)),10)*0.025
-        suggested_qty=qty
-        if fd > 0:
-            suggested_qty=kcal/fd
-        step=qty_step(fu,suggested_qty)
-        if step > 0:
-            suggested_qty=round(suggested_qty/step)*step
-        minimum=1.0 if fu=="pz" else step
-        suggested_qty=max(minimum,float(suggested_qty))
-        suggested_kcal=round(fk*suggested_qty/fq)
-        candidates.append({
-            "name":food["name"], "qty":suggested_qty, "unit":fu,
-            "kcal":suggested_kcal, "uses":food.get("uses",0), "score":score,
-            "source":"Storico MyDiet"
-        })
-    candidates.sort(key=lambda x:(x["score"],-x["uses"],x["name"].lower()))
-    return candidates[:limit]
-
-
-def _ai_replacement_suggestions(item, meal_name=None, limit=5):
-    """Ask Gemini for practical food alternatives with approximately the same
-    calories as the selected ingredient. The user explicitly triggers this.
-    """
-    name=str(item.get("name","Alimento")).strip()
-    qty=float(item.get("qty",1) or 1)
-    unit=str(item.get("unit","g"))
-    kcal=round(float(item.get("kcal",0) or 0))
-    prompt=f"""Proponi {limit} alternative alimentari italiane per sostituire un alimento in un piano.
-Alimento attuale: {name}
-Quantità attuale: {qty:g} {unit}
-Calorie attuali: {kcal} kcal
-Contesto del pasto: {meal_name or "pasto non specificato"}
-Famiglia alimentare: {_food_category(name)}
-
-Regole:
-- Mantieni la stessa famiglia di unità: grammi con grammi, millilitri con millilitri, pezzi con pezzi.
-- L'alternativa deve appartenere prima di tutto alla stessa famiglia alimentare dell'originale (es. riso -> pasta/farro/orzo/cous cous/quinoa; pollo -> tacchino/pesce/uova; yogurt -> altri latticini).
-- Considera anche il contesto del pasto: non proporre dolci, miele o pizza come sostituti di un cereale/proteina solo perché hanno calorie simili.
-- Evita alimenti di categoria completamente diversa se esistono alternative pratiche nella stessa famiglia.
-- Calcola una quantità pratica che porti le calorie il più vicino possibile alle {kcal} kcal.
-- Non usare quantità assurde; se necessario usa una porzione realistica e accetta una piccola differenza calorica.
-- Restituisci SOLO JSON valido: {{"alternatives":[{{"name":"...","qty":100,"unit":"g","kcal":250,"reason":"..."}}]}}
-- kcal è il totale per la quantità proposta, non kcal per 100 g.
-"""
-    raw=gemini_interaction(prompt, thinking_level="low")
-    match=re.search(r"\{.*\}",str(raw),re.S)
-    data=json.loads(match.group(0) if match else raw)
-    out=[]
-    for x in data.get("alternatives",[]) if isinstance(data,dict) else []:
-        if not isinstance(x,dict):
-            continue
-        n=str(x.get("name","")).strip()
-        u=str(x.get("unit",unit)).strip().lower()
-        try:
-            q=float(x.get("qty",0)); k=round(float(x.get("kcal",0)))
-        except Exception:
-            continue
-        if not n or q<=0 or k<0 or not _replacement_unit_compatible(unit,u):
-            continue
-        out.append({"name":n,"qty":q,"unit":u,"kcal":k,"reason":str(x.get("reason") or "Alternativa con calorie simili"),"source":"AI"})
-    return out[:limit]
-
-
-def _replace_plan_item(item, replacement, day, meal_name, editing_next=False):
-    """Replace one ingredient in-place, preserving its id so existing plan
-    references remain stable. Quantity/calories are reset to the replacement
-    and the meal registration is invalidated because its contents changed.
-    """
-    item["name"]=str(replacement["name"]).strip()
-    item["qty"]=float(replacement["qty"])
-    item["unit"]=str(replacement["unit"])
-    item["kcal"]=round(float(replacement["kcal"]))
-    item["kcal_source"]=str(replacement.get("source") or "Sostituzione alimento")
-    item["kcal_assumption"]=str(replacement.get("reason") or "Quantità ricalcolata per mantenere calorie simili.")
-    target_overrides=st.session_state.next_overrides if editing_next else st.session_state.overrides
-    target_overrides[item["id"]]={"multiplier":1}
-    st.session_state.eaten[item["id"]]=False
-    st.session_state.registered_meals[_meal_key(day,meal_name)]=False
-    if editing_next:
-        save_next_editor_context()
 
 
 def _meal_kcal_for_day(day, meal_name):
@@ -3678,6 +3529,8 @@ def _profile_complete():
 
 def _save_profile_values(values):
     # Profile is the control center of MyDiet: compare the previous state first,
+    # and on the very first profile creation start the guided pantry inventory.
+    _was_profile_complete = bool(st.session_state.get("profile_setup_complete", False))
     # then save the new one and record the consequences explicitly.
     tracked = [
         ("name", "Nome"), ("weight", "Peso attuale"), ("goal_weight", "Peso desiderato"),
@@ -3716,6 +3569,8 @@ def _save_profile_values(values):
         chosen_target = max(1500, round(bmr_save * (1 + bmr_factor)))
     st.session_state.p_deficit = max(0, maintenance_for_save - chosen_target)
     st.session_state.profile_setup_complete = True
+    if not _was_profile_complete:
+        st.session_state.pantry_onboarding_complete = False
 
     # Changes that affect the generated menu make the existing plan stale, but
     # never overwrite it silently. The user gets an explicit regeneration action.
@@ -3856,12 +3711,96 @@ if not _profile_complete():
             "water_goal_ml":water_goal, "quantity_mode":quantity_mode
         })
         st.success("Profilo creato. Ora possiamo costruire il tuo primo piano.")
-        st.session_state.page = "Home"
+        st.session_state.page = "PantryOnboarding" if not st.session_state.get("pantry_onboarding_complete", True) else "Home"
         _mydiet_rerun()
 
     st.stop()
 
 # Main navigation is now rendered as a fixed bottom tab bar after page content.
+
+# ---------------- First-run pantry onboarding ----------------
+elif st.session_state.page=="PantryOnboarding":
+    st.markdown("""
+    <div class="hero" style="margin-top:10px;padding:24px 20px;">
+      <div class="small">BENVENUTO IN MYDIET</div>
+      <div style="font-size:1.85rem;font-weight:850;margin:4px 0 6px;">🏠 Cosa hai già in casa?</div>
+      <div class="muted">Prima di creare la tua prima settimana, facciamo un rapido inventario. Il piano continuerà a essere costruito sul tuo profilo e sui tuoi obiettivi: useremo quello che hai già per ottimizzare la settimana e ridurre gli acquisti.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    pantry_catalog={
+        "🍝 Pasta, riso e cereali":["Pasta","Riso basmati","Riso integrale","Farro","Orzo","Cous cous","Avena"],
+        "🥩 Carne e proteine":["Petto di pollo","Fesa di tacchino","Carne macinata magra","Tonno al naturale","Salmone","Merluzzo"],
+        "🥚 Uova e latticini":["Uova","Yogurt greco","Yogurt","Latte","Ricotta","Formaggio"],
+        "🥦 Frutta e verdura":["Mela","Banana","Pera","Frutta","Zucchine","Broccoli","Spinaci","Insalata mista","Verdure miste","Patate"],
+        "🫒 Oli e condimenti":["Olio EVO","Miele","Passata di pomodoro"],
+        "🥫 Dispensa e altro":["Pane integrale","Mandorle","Noci","Legumi in scatola","Crackers"]
+    }
+    unit_defaults={
+        "Uova":"pz","Pasta":"g","Riso basmati":"g","Riso integrale":"g","Farro":"g","Orzo":"g","Cous cous":"g","Avena":"g",
+        "Olio EVO":"ml","Latte":"ml","Yogurt":"pz","Yogurt greco":"pz","Pane integrale":"g","Patate":"g"
+    }
+    all_items=[x for vals in pantry_catalog.values() for x in vals]
+    selected=st.multiselect("Seleziona gli alimenti che hai già in casa", all_items, key="pantry_onboarding_selected", placeholder="Cerca e seleziona gli alimenti...")
+    if not selected:
+        st.info("Puoi selezionare anche solo gli alimenti che vuoi utilizzare nella prima settimana. Non serve inserire tutta la casa.")
+    else:
+        st.markdown("### 📦 Inserisci quantità e confezioni")
+        st.caption("Per ogni alimento puoi indicare una quantità libera oppure il numero di confezioni. La stessa logica verrà usata dalla Dispensa.")
+        for idx,name in enumerate(selected):
+            safe="".join(c if c.isalnum() else "_" for c in name.lower())
+            with st.container(border=True):
+                st.markdown(f"**{name}**")
+                mode=st.radio("Come lo hai?",["Quantità libera","Confezione"],horizontal=True,key=f"ob_mode_{safe}")
+                if mode=="Quantità libera":
+                    units=["g","kg","ml","l","pz"]
+                    default=unit_defaults.get(name,"g")
+                    c1,c2=st.columns(2)
+                    with c1:
+                        unit=st.selectbox("Unità",units,index=units.index(default) if default in units else 0,key=f"ob_unit_{safe}")
+                    with c2:
+                        qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=qty_step(unit,20 if unit in ("g","ml") else 1),key=f"ob_qty_{safe}")
+                else:
+                    c1,c2,c3=st.columns(3)
+                    with c1: pc=st.number_input("Confezioni",min_value=1.0,value=1.0,step=1.0,key=f"ob_pc_{safe}")
+                    with c2: pq=st.number_input("Contenuto",min_value=0.0,value=0.0,step=0.1,key=f"ob_pq_{safe}")
+                    with c3:
+                        units=["g","kg","ml","l","pz"]
+                        default=unit_defaults.get(name,"g")
+                        pu=st.selectbox("Unità",units,index=units.index(default) if default in units else 0,key=f"ob_pu_{safe}")
+                    if pq>0: st.caption(f"📦 {pc:g} × {pq:g} {pu} = **{pc*pq:g} {pu}**")
+
+    c1,c2=st.columns(2)
+    with c1:
+        if st.button("⏭️ Salta per ora",use_container_width=True):
+            st.session_state.pantry_onboarding_complete=True
+            st.session_state.page="Home"
+            _persist_app_state(); _mydiet_rerun()
+    with c2:
+        if st.button("🏠 Salva inventario e continua",type="primary",use_container_width=True):
+            saved=0
+            for name in selected:
+                safe="".join(c if c.isalnum() else "_" for c in name.lower())
+                mode=st.session_state.get(f"ob_mode_{safe}","Quantità libera")
+                if mode=="Quantità libera":
+                    qty=float(st.session_state.get(f"ob_qty_{safe}",0) or 0)
+                    unit=st.session_state.get(f"ob_unit_{safe}",unit_defaults.get(name,"g"))
+                    if qty>0:
+                        add_pantry_qty(name,unit,qty); saved+=1
+                else:
+                    pc=float(st.session_state.get(f"ob_pc_{safe}",1) or 0)
+                    pq=float(st.session_state.get(f"ob_pq_{safe}",0) or 0)
+                    pu=st.session_state.get(f"ob_pu_{safe}",unit_defaults.get(name,"g"))
+                    if pc>0 and pq>0:
+                        add_pantry_package(name,pq,pu,pc); saved+=1
+            st.session_state.pantry_onboarding_complete=True
+            st.session_state.page="Home"
+            _persist_app_state()
+            st.success(f"Inventario iniziale salvato: {saved} alimenti.")
+            _mydiet_rerun()
+
+    st.caption("Potrai modificare, aggiungere o eliminare qualsiasi alimento dalla Dispensa in qualsiasi momento.")
+    st.stop()
 
 # ---------------- Home ----------------
 if st.session_state.page=="Home":
@@ -4256,56 +4195,6 @@ elif st.session_state.page=="Piano":
                                                     st.session_state.overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}
                                                 st.session_state.eaten[item['id']]=False; st.session_state.registered_meals[_meal_key(day,mn)]=False
                                                 st.session_state.plan_edit_meal=None; _mydiet_rerun()
-                                    # V92 — smart food replacement.
-                                    repl_key=f"replace_{day}_{mn}_{item['id']}"
-                                    if st.button("🔄 Sostituisci",key=repl_key,use_container_width=True):
-                                        st.session_state["replacement_open_item"] = None if st.session_state.get("replacement_open_item")==item["id"] else item["id"]
-                                        st.session_state["replacement_ai_suggestions"] = []
-                                        _mydiet_rerun()
-                                    if st.session_state.get("replacement_open_item")==item["id"]:
-                                        with st.container(border=True):
-                                            st.markdown(f"**🔄 Sostituisci {item['name']}**")
-                                            st.caption(f"Obiettivo: circa {round(item_kcal(item))} kcal · quantità attuale {item_qty(item):g} {item.get('unit','g')}")
-                                            known_repls=_replacement_suggestions(item,meal_name=mn,limit=6)
-                                            if known_repls:
-                                                st.markdown("**Alternative già conosciute da MyDiet**")
-                                                for ridx,rep in enumerate(known_repls):
-                                                    ca,cb=st.columns([5,1.5])
-                                                    with ca:
-                                                        delta=rep["kcal"]-round(item_kcal(item))
-                                                        delta_txt=f"{delta:+d} kcal"
-                                                        st.markdown(f"**{rep['name']}** · {rep['qty']:g} {rep['unit']} · {rep['kcal']} kcal")
-                                                        st.caption(f"{delta_txt} · usato {rep['uses']} volte nello storico")
-                                                    with cb:
-                                                        if st.button("Usa",key=f"use_repl_{day}_{mn}_{item['id']}_{ridx}",use_container_width=True):
-                                                            _replace_plan_item(item,rep,day,mn,editing_next)
-                                                            st.session_state["replacement_open_item"]=None
-                                                            _mydiet_rerun()
-                                            else:
-                                                st.info("Non ho ancora alternative compatibili nello storico MyDiet.")
-
-                                            if st.button("✨ Cerca alternative intelligenti",key=f"ai_repl_{day}_{mn}_{item['id']}",use_container_width=True,type="primary"):
-                                                try:
-                                                    with st.spinner("Cerco alternative con calorie simili…"):
-                                                        st.session_state["replacement_ai_suggestions"]=_ai_replacement_suggestions(item,meal_name=mn,limit=5)
-                                                except Exception as e:
-                                                    st.error(f"Ricerca alternative non riuscita: {e}")
-
-                                            ai_repls=st.session_state.get("replacement_ai_suggestions",[]) or []
-                                            if ai_repls:
-                                                st.markdown("**Alternative intelligenti**")
-                                                for ridx,rep in enumerate(ai_repls):
-                                                    ca,cb=st.columns([5,1.5])
-                                                    with ca:
-                                                        delta=rep["kcal"]-round(item_kcal(item))
-                                                        st.markdown(f"**{rep['name']}** · {rep['qty']:g} {rep['unit']} · {rep['kcal']} kcal")
-                                                        st.caption(f"{delta:+d} kcal · {rep.get('reason','')}")
-                                                    with cb:
-                                                        if st.button("Usa",key=f"use_ai_repl_{day}_{mn}_{item['id']}_{ridx}",use_container_width=True):
-                                                            _replace_plan_item(item,rep,day,mn,editing_next)
-                                                            st.session_state["replacement_open_item"]=None
-                                                            st.session_state["replacement_ai_suggestions"]=[]
-                                                            _mydiet_rerun()
                             else:
                                 st.info("Questo pasto non contiene ancora alimenti.")
 
