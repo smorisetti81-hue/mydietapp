@@ -1,4 +1,13 @@
-# MyDietApp V91 — Gestione confezioni
+# MyDietApp V92 — Sostituzione alimenti + V91.3 Dispensa
+
+
+## V92
+- Aggiunta **Sostituzione alimenti** direttamente nell'editor del Piano.
+- Ogni ingrediente può essere sostituito senza cambiare il pasto nel suo complesso.
+- MyDiet propone prima alternative già conosciute nello storico, mantenendo la stessa famiglia di unità e ricalcolando la quantità per restare vicino alle calorie originali.
+- È disponibile anche **Cerca alternative intelligenti**, che usa Gemini solo quando richiesto dall'utente.
+- La sostituzione mantiene l'ID dell'ingrediente, resetta la registrazione del pasto e salva la modifica nel piano corrente o nella bozza della prossima settimana.
+- Le calorie dell'alternativa sono esplicitate prima dell'applicazione.
 
 ## V91
 - Aggiunta modalità **Confezione** nella Dispensa.

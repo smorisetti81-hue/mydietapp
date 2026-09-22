@@ -32,7 +32,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v87.2.1 · PostgreSQL profile + meal plan + meal logs persistence
+# MyDietApp V92 · Sostituzione alimenti + V91.3 Dispensa
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -2034,6 +2034,116 @@ Regole:
         raise ValueError(f"MyDiet non è riuscita a stimare le calorie per '{name}'. Puoi inserirle manualmente modificando il pasto.")
     st.session_state.setdefault("food_kcal_cache",{})[cache_key]=result
     return result
+
+
+def _replacement_unit_compatible(unit_a, unit_b):
+    """Replacement quantities must stay in the same practical unit family."""
+    a=str(unit_a or "g").strip().lower(); b=str(unit_b or "g").strip().lower()
+    families={"g":"mass","kg":"mass","ml":"volume","l":"volume","pz":"piece"}
+    return families.get(a)==families.get(b)
+
+
+def _replacement_suggestions(item, limit=6):
+    """Return known foods that can replace the current item while keeping a
+    similar calorie density and unit family. Current item is excluded.
+    """
+    unit=str(item.get("unit","g"))
+    qty=float(item.get("qty",0) or 0)
+    kcal=float(item.get("kcal",0) or 0)
+    if qty <= 0 or kcal < 0:
+        return []
+    density=kcal/qty if qty else 0
+    current_name=_food_name_key(item.get("name"))
+    candidates=[]
+    for food in historical_food_library():
+        if _food_name_key(food.get("name"))==current_name:
+            continue
+        fu=str(food.get("unit","g"))
+        fq=float(food.get("qty",0) or 0)
+        fk=float(food.get("kcal",0) or 0)
+        if fq <= 0 or fk < 0 or not _replacement_unit_compatible(unit,fu):
+            continue
+        fd=fk/fq
+        if density > 0 and fd <= 0:
+            continue
+        ratio=abs(math.log(max(fd,0.0001)/max(density,0.0001))) if density and fd else 10
+        # Prefer foods already used often, then calorie-density proximity.
+        score=ratio - min(int(food.get("uses",0)),10)*0.025
+        suggested_qty=qty
+        if fd > 0:
+            suggested_qty=kcal/fd
+        step=qty_step(fu,suggested_qty)
+        if step > 0:
+            suggested_qty=round(suggested_qty/step)*step
+        minimum=1.0 if fu=="pz" else step
+        suggested_qty=max(minimum,float(suggested_qty))
+        suggested_kcal=round(fk*suggested_qty/fq)
+        candidates.append({
+            "name":food["name"], "qty":suggested_qty, "unit":fu,
+            "kcal":suggested_kcal, "uses":food.get("uses",0), "score":score,
+            "source":"Storico MyDiet"
+        })
+    candidates.sort(key=lambda x:(x["score"],-x["uses"],x["name"].lower()))
+    return candidates[:limit]
+
+
+def _ai_replacement_suggestions(item, limit=5):
+    """Ask Gemini for practical food alternatives with approximately the same
+    calories as the selected ingredient. The user explicitly triggers this.
+    """
+    name=str(item.get("name","Alimento")).strip()
+    qty=float(item.get("qty",1) or 1)
+    unit=str(item.get("unit","g"))
+    kcal=round(float(item.get("kcal",0) or 0))
+    prompt=f"""Proponi {limit} alternative alimentari italiane per sostituire un alimento in un piano.
+Alimento attuale: {name}
+Quantità attuale: {qty:g} {unit}
+Calorie attuali: {kcal} kcal
+
+Regole:
+- Mantieni la stessa famiglia di unità: grammi con grammi, millilitri con millilitri, pezzi con pezzi.
+- L'alternativa deve essere un alimento reale e comunemente reperibile in Italia.
+- Calcola una quantità pratica che porti le calorie il più vicino possibile alle {kcal} kcal.
+- Non usare quantità assurde; se necessario usa una porzione realistica e accetta una piccola differenza calorica.
+- Restituisci SOLO JSON valido: {{"alternatives":[{{"name":"...","qty":100,"unit":"g","kcal":250,"reason":"..."}}]}}
+- kcal è il totale per la quantità proposta, non kcal per 100 g.
+"""
+    raw=gemini_interaction(prompt, thinking_level="low")
+    match=re.search(r"\{.*\}",str(raw),re.S)
+    data=json.loads(match.group(0) if match else raw)
+    out=[]
+    for x in data.get("alternatives",[]) if isinstance(data,dict) else []:
+        if not isinstance(x,dict):
+            continue
+        n=str(x.get("name","")).strip()
+        u=str(x.get("unit",unit)).strip().lower()
+        try:
+            q=float(x.get("qty",0)); k=round(float(x.get("kcal",0)))
+        except Exception:
+            continue
+        if not n or q<=0 or k<0 or not _replacement_unit_compatible(unit,u):
+            continue
+        out.append({"name":n,"qty":q,"unit":u,"kcal":k,"reason":str(x.get("reason") or "Alternativa con calorie simili"),"source":"AI"})
+    return out[:limit]
+
+
+def _replace_plan_item(item, replacement, day, meal_name, editing_next=False):
+    """Replace one ingredient in-place, preserving its id so existing plan
+    references remain stable. Quantity/calories are reset to the replacement
+    and the meal registration is invalidated because its contents changed.
+    """
+    item["name"]=str(replacement["name"]).strip()
+    item["qty"]=float(replacement["qty"])
+    item["unit"]=str(replacement["unit"])
+    item["kcal"]=round(float(replacement["kcal"]))
+    item["kcal_source"]=str(replacement.get("source") or "Sostituzione alimento")
+    item["kcal_assumption"]=str(replacement.get("reason") or "Quantità ricalcolata per mantenere calorie simili.")
+    target_overrides=st.session_state.next_overrides if editing_next else st.session_state.overrides
+    target_overrides[item["id"]]={"multiplier":1}
+    st.session_state.eaten[item["id"]]=False
+    st.session_state.registered_meals[_meal_key(day,meal_name)]=False
+    if editing_next:
+        save_next_editor_context()
 
 
 def _meal_kcal_for_day(day, meal_name):
@@ -4107,6 +4217,56 @@ elif st.session_state.page=="Piano":
                                                     st.session_state.overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}
                                                 st.session_state.eaten[item['id']]=False; st.session_state.registered_meals[_meal_key(day,mn)]=False
                                                 st.session_state.plan_edit_meal=None; _mydiet_rerun()
+                                    # V92 — smart food replacement.
+                                    repl_key=f"replace_{day}_{mn}_{item['id']}"
+                                    if st.button("🔄 Sostituisci",key=repl_key,use_container_width=True):
+                                        st.session_state["replacement_open_item"] = None if st.session_state.get("replacement_open_item")==item["id"] else item["id"]
+                                        st.session_state["replacement_ai_suggestions"] = []
+                                        _mydiet_rerun()
+                                    if st.session_state.get("replacement_open_item")==item["id"]:
+                                        with st.container(border=True):
+                                            st.markdown(f"**🔄 Sostituisci {item['name']}**")
+                                            st.caption(f"Obiettivo: circa {round(item_kcal(item))} kcal · quantità attuale {item_qty(item):g} {item.get('unit','g')}")
+                                            known_repls=_replacement_suggestions(item,limit=6)
+                                            if known_repls:
+                                                st.markdown("**Alternative già conosciute da MyDiet**")
+                                                for ridx,rep in enumerate(known_repls):
+                                                    ca,cb=st.columns([5,1.5])
+                                                    with ca:
+                                                        delta=rep["kcal"]-round(item_kcal(item))
+                                                        delta_txt=f"{delta:+d} kcal"
+                                                        st.markdown(f"**{rep['name']}** · {rep['qty']:g} {rep['unit']} · {rep['kcal']} kcal")
+                                                        st.caption(f"{delta_txt} · usato {rep['uses']} volte nello storico")
+                                                    with cb:
+                                                        if st.button("Usa",key=f"use_repl_{day}_{mn}_{item['id']}_{ridx}",use_container_width=True):
+                                                            _replace_plan_item(item,rep,day,mn,editing_next)
+                                                            st.session_state["replacement_open_item"]=None
+                                                            _mydiet_rerun()
+                                            else:
+                                                st.info("Non ho ancora alternative compatibili nello storico MyDiet.")
+
+                                            if st.button("✨ Cerca alternative intelligenti",key=f"ai_repl_{day}_{mn}_{item['id']}",use_container_width=True,type="primary"):
+                                                try:
+                                                    with st.spinner("Cerco alternative con calorie simili…"):
+                                                        st.session_state["replacement_ai_suggestions"]=_ai_replacement_suggestions(item,limit=5)
+                                                except Exception as e:
+                                                    st.error(f"Ricerca alternative non riuscita: {e}")
+
+                                            ai_repls=st.session_state.get("replacement_ai_suggestions",[]) or []
+                                            if ai_repls:
+                                                st.markdown("**Alternative intelligenti**")
+                                                for ridx,rep in enumerate(ai_repls):
+                                                    ca,cb=st.columns([5,1.5])
+                                                    with ca:
+                                                        delta=rep["kcal"]-round(item_kcal(item))
+                                                        st.markdown(f"**{rep['name']}** · {rep['qty']:g} {rep['unit']} · {rep['kcal']} kcal")
+                                                        st.caption(f"{delta:+d} kcal · {rep.get('reason','')}")
+                                                    with cb:
+                                                        if st.button("Usa",key=f"use_ai_repl_{day}_{mn}_{item['id']}_{ridx}",use_container_width=True):
+                                                            _replace_plan_item(item,rep,day,mn,editing_next)
+                                                            st.session_state["replacement_open_item"]=None
+                                                            st.session_state["replacement_ai_suggestions"]=[]
+                                                            _mydiet_rerun()
                             else:
                                 st.info("Questo pasto non contiene ancora alimenti.")
 
