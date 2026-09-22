@@ -1,15 +1,36 @@
-# MyDietApp V91 — Gestione confezioni
+# MyDietApp V90.2 — Piano e preparazione settimana
 
-## V91
-- Aggiunta modalità **Confezione** nella Dispensa.
-- Un prodotto confezionato può essere registrato come `N confezioni × contenuto per confezione`.
-- MyDiet calcola automaticamente il totale disponibile.
-- Esempi supportati: `2 × 500 g = 1 kg`, `2 × 1 l = 2 l`, `6 × 1 pz = 6 pz`.
-- Il formato della confezione viene conservato anche quando il consumo riduce la quantità disponibile.
-- Le quantità libere già esistenti restano compatibili.
-- Nessuna modifica a Supabase, Health Bridge, Smart Shopping o al Piano.
-
-## V90.3
+## V90.2
 - Non mostra più il menu della settimana corrente dentro "Prossima settimana" quando la nuova settimana non è ancora stata generata.
-- La nuova settimana mostra uno stato vuoto esplicito e invita a generarla.
+- Se esisteva un vecchio draft persistito che era una copia esatta del piano attivo, viene riconosciuto come stale e rimosso.
+- La nuova settimana mostra invece uno stato vuoto esplicito e invita a generarla.
 - Mantiene la guida alla preparazione anticipata, idealmente giovedì/venerdì, per organizzare pasti e spesa.
+
+## V90 / V90.1
+- Stabilizzazione settimana, calorie e quantità Dispensa.
+- Promemoria guida per preparare la settimana successiva giovedì/venerdì.
+- Nessuna modifica a Supabase, Health Bridge o Smart Shopping live.
+
+# MyDietApp V90 — Stabilizzazione funzionale
+
+## V90
+- Passaggio automatico alla settimana corrente quando esiste già una bozza della settimana arrivata.
+- Calcolo calorie visualizzate di pasto reso coerente tra Home e Piano tramite una funzione comune.
+- Dispensa: unità più adatte alla quantità reale (`g`, `kg`, `ml`, `l`, `pz`, `confezioni`).
+- Dispensa: incrementi/decrementi coerenti con l'unità; i pezzi e le confezioni non avanzano più a multipli di 50.
+- Acquisto dalla lista: incremento quantità dipendente dall'unità.
+- Conversioni sicure `kg↔g` e `l↔ml`; restano attive solo le conversioni domestiche già note per alimenti come la banana.
+- Nessuna modifica allo schema Supabase, Health Bridge o logica Smart Shopping live.
+
+## V89 — Home UX redesign
+- Home mobile-first redesign with softer graphite background.
+- Compact calorie card and next-meal flow.
+- Added deterministic Personal Trainer preview card (no new AI calls).
+- Compact activity and shopping previews.
+- Technical calorie diagnostics moved below the primary Home content.
+
+
+## V90.1 – Preparazione settimana
+- Promemoria guida: giovedì/venerdì è il momento consigliato per preparare la settimana successiva.
+- Nel weekend viene mostrato un promemoria più urgente se la bozza non è ancora pronta.
+- Nessuna scadenza bloccante: il piano può essere preparato in qualsiasi momento.

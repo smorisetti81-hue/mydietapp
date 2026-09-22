@@ -997,7 +997,7 @@ _defaults = {
     "plan_generation_status":"idle", "plan_generation_message":"", "plan_generation_time":None,
     "plan_editor_selection":"current", "_plan_editor_next":False, "plan_edit_meal":None,
     "pantry":{}, "shopping_checked":{}, "pantry_consumed_by_meal":{}, "smart_food_advice":None, "registered_meals":{}, "shopping_source":"Tutte", "shopping_strategy":"⚖️ Qualità / prezzo", "shopping_radius":5,
-    "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None, "food_kcal_cache":{}, "profile_setup_complete":False, "profile_change_summary":[], "plan_needs_regeneration":False, "manual_activity_today":{}, "profile_change_time":None, "pantry_onboarding_complete":True
+    "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None, "food_kcal_cache":{}, "profile_setup_complete":False, "profile_change_summary":[], "plan_needs_regeneration":False, "manual_activity_today":{}, "profile_change_time":None
 }
 for k,v in _defaults.items(): st.session_state.setdefault(k,v)
 for k,v in {
@@ -1032,7 +1032,7 @@ _PERSIST_KEYS = [
     "smart_food_advice", "registered_meals", "shopping_source",
     "shopping_strategy", "shopping_radius", "shopping_cart_mode",
     "shopping_cart_summary", "shopping_cart_time", "food_kcal_cache",
-    "profile_setup_complete", "profile_change_summary", "plan_needs_regeneration", "manual_activity_today", "profile_change_time", "pantry_onboarding_complete",
+    "profile_setup_complete", "profile_change_summary", "plan_needs_regeneration", "manual_activity_today", "profile_change_time",
     # Profile values
     "p_name", "p_weight", "p_goal_weight", "p_height", "p_age", "p_sex",
     "p_activity_level", "p_deficit", "p_water_goal_ml", "p_quantity_mode",
@@ -2445,118 +2445,8 @@ def grocery():
 def _pantry_key(name, unit):
     return f"{str(name).strip().lower()}|{str(unit).strip().lower()}"
 
-def _pantry_unit_family(unit):
-    unit=str(unit).strip().lower()
-    if unit in ("g", "kg"):
-        return "mass"
-    if unit in ("ml", "l"):
-        return "volume"
-    if unit == "pz":
-        return "count"
-    return None
-
-def _pantry_convert_between_units(qty, from_unit, to_unit):
-    """Convert the three directly compatible pantry unit families."""
-    f=str(from_unit).strip().lower(); t=str(to_unit).strip().lower()
-    q=float(qty or 0)
-    if f==t:
-        return q
-    if _pantry_unit_family(f) != _pantry_unit_family(t):
-        return None
-    if f=="kg" and t=="g": return q*1000.0
-    if f=="g" and t=="kg": return q/1000.0
-    if f=="l" and t=="ml": return q*1000.0
-    if f=="ml" and t=="l": return q/1000.0
-    return None
-
-def _find_compatible_pantry_key(name, unit):
-    """Find an existing entry for the same food and compatible unit family."""
-    normalized=_normalized_food_name(name)
-    target=str(unit).strip().lower()
-    for key,item in st.session_state.get("pantry",{}).items():
-        if not isinstance(item,dict):
-            continue
-        if _normalized_food_name(item.get("name","")) != normalized:
-            continue
-        source=str(item.get("unit", "g")).strip().lower()
-        if _pantry_convert_between_units(1, source, target) is not None:
-            return key
-    return None
-
-def _package_lots(item):
-    """Return package metadata as a list, keeping compatibility with V91 fields."""
-    lots=item.get("pack_lots")
-    if isinstance(lots,list) and lots:
-        return [dict(x) for x in lots if isinstance(x,dict) and float(x.get("count",0) or 0)>0]
-    count=float(item.get("pack_count",0) or 0)
-    qty=float(item.get("pack_qty",0) or 0)
-    unit=str(item.get("pack_unit",item.get("unit","g")))
-    if count>0 and qty>0:
-        return [{"count":count,"qty":qty,"unit":unit}]
-    return []
-
-def _merge_pantry_entry_into(target_key, source_key):
-    """Merge compatible inventory entries without losing package information."""
-    if target_key==source_key:
-        return
-    target=st.session_state.get("pantry",{}).get(target_key)
-    source=st.session_state.get("pantry",{}).get(source_key)
-    if not isinstance(target,dict) or not isinstance(source,dict):
-        return
-    target_unit=str(target.get("unit","g")).strip().lower()
-    source_unit=str(source.get("unit","g")).strip().lower()
-    converted=_pantry_convert_between_units(float(source.get("qty",0) or 0),source_unit,target_unit)
-    if converted is None:
-        return
-    target["qty"]=float(target.get("qty",0) or 0)+converted
-
-    # Keep every package format instead of silently overwriting metadata when,
-    # for example, 500 g and 1 kg packs of the same food are both present.
-    lots=_package_lots(target)+_package_lots(source)
-    if lots:
-        target["pack_lots"]=lots
-        # Legacy fields remain populated for older UI/state readers.
-        first=lots[0]
-        target["pack_count"]=sum(float(x.get("count",0) or 0) for x in lots)
-        target["pack_qty"]=float(first.get("qty",0) or 0)
-        target["pack_unit"]=str(first.get("unit",target_unit))
-
-    # Track the portion that was not represented by packages in the merged entry.
-    source_total=converted
-    source_pack_total=0.0
-    for lot in _package_lots(source):
-        lot_total=_pantry_convert_between_units(
-            float(lot.get("count",0) or 0)*float(lot.get("qty",0) or 0),
-            str(lot.get("unit",source_unit)), target_unit
-        )
-        if lot_total is not None:
-            source_pack_total += lot_total
-    if "loose_qty" in target or "loose_qty" in source:
-        target["loose_qty"]=float(target.get("loose_qty",0) or 0)+max(0.0,source_total-source_pack_total)
-
-    st.session_state.pantry.pop(source_key,None)
-
-def _merge_compatible_pantry_entries():
-    """Collapse duplicate same-food entries such as 2.2 kg + 2500 g into one row."""
-    groups={}
-    for key,item in list(st.session_state.get("pantry",{}).items()):
-        if not isinstance(item,dict):
-            continue
-        family=_pantry_unit_family(item.get("unit","g"))
-        if not family:
-            continue
-        group=(_normalized_food_name(item.get("name","")),family)
-        groups.setdefault(group,[]).append(key)
-    for keys in groups.values():
-        if len(keys)<2:
-            continue
-        target=keys[0]
-        for source in keys[1:]:
-            _merge_pantry_entry_into(target,source)
-
 def pantry_items():
     """Return pantry items as a sorted list with display names and quantities."""
-    _merge_compatible_pantry_entries()
     out=[]
     for key,item in st.session_state.get("pantry",{}).items():
         if not isinstance(item,dict):
@@ -2567,10 +2457,6 @@ def pantry_items():
         out.append({
             "key":key, "name":str(item.get("name", "Alimento")),
             "qty":q, "unit":str(item.get("unit", "g")),
-            "pack_count":float(item.get("pack_count", 0) or 0),
-            "pack_qty":float(item.get("pack_qty", 0) or 0),
-            "pack_unit":str(item.get("pack_unit", item.get("unit", "g"))),
-            "pack_lots":_package_lots(item),
         })
     return sorted(out,key=lambda x:x["name"].lower())
 
@@ -2580,191 +2466,12 @@ def set_pantry_qty(name, unit, qty):
     if q <= 0:
         st.session_state.pantry.pop(key,None)
     else:
-        old=st.session_state.get("pantry",{}).get(key,{})
-        st.session_state.pantry[key]={
-            "name":str(name).strip(),
-            "unit":str(unit).strip(),
-            "qty":q,
-            # Preserve package metadata when a meal consumes part of a packaged product.
-            "pack_count":float(old.get("pack_count",0) or 0),
-            "pack_qty":float(old.get("pack_qty",0) or 0),
-            "pack_unit":str(old.get("pack_unit",unit)),
-            "pack_lots":_package_lots(old),
-            "loose_qty":float(old.get("loose_qty",0) or 0),
-        }
+        st.session_state.pantry[key]={"name":str(name).strip(),"unit":str(unit).strip(),"qty":q}
 
 def add_pantry_qty(name, unit, delta):
-    """Add loose stock, merging g/kg or ml/l entries for the same food."""
-    target_unit=str(unit).strip().lower()
-    key=_pantry_key(name,target_unit)
-    existing_key=key if key in st.session_state.get("pantry",{}) else _find_compatible_pantry_key(name,target_unit)
-    if existing_key and existing_key!=key:
-        item=st.session_state.pantry[existing_key]
-        existing_unit=str(item.get("unit",target_unit)).strip().lower()
-        converted=_pantry_convert_between_units(float(delta),target_unit,existing_unit)
-        if converted is not None:
-            item["qty"]=max(0.0,float(item.get("qty",0) or 0)+converted)
-            item["loose_qty"]=max(0.0,float(item.get("loose_qty",0) or 0)+converted)
-            if item["qty"]<=0:
-                st.session_state.pantry.pop(existing_key,None)
-            return
-    current=float(st.session_state.get("pantry",{}).get(key,{}).get("qty",0) or 0)
-    set_pantry_qty(name,target_unit,current+float(delta))
-    if key in st.session_state.pantry:
-        item=st.session_state.pantry[key]
-        item["loose_qty"]=float(item.get("loose_qty",0) or 0)+float(delta)
-
-def add_pantry_package(name, content_qty, content_unit, count):
-    """Add packages and merge them into an existing compatible food entry."""
-    name=str(name).strip(); unit=str(content_unit).strip().lower()
-    count=float(count or 0); content_qty=float(content_qty or 0)
-    if not name or count<=0 or content_qty<=0:
-        return
-
     key=_pantry_key(name,unit)
-    existing_key=key if key in st.session_state.get("pantry",{}) else _find_compatible_pantry_key(name,unit)
-
-    if existing_key:
-        current=st.session_state.pantry[existing_key]
-        target_unit=str(current.get("unit",unit)).strip().lower()
-        added_qty=_pantry_convert_between_units(content_qty*count,unit,target_unit)
-        if added_qty is None:
-            return
-        current["qty"]=float(current.get("qty",0) or 0)+added_qty
-        lots=_package_lots(current)
-        lots.append({"count":count,"qty":content_qty,"unit":unit})
-        current["pack_lots"]=lots
-        current["pack_count"]=sum(float(x.get("count",0) or 0) for x in lots)
-        first=lots[0]
-        current["pack_qty"]=float(first.get("qty",0) or 0)
-        current["pack_unit"]=str(first.get("unit",target_unit))
-        # Existing loose stock remains loose; packages are tracked separately.
-        current.setdefault("loose_qty",max(0.0,float(current.get("qty",0) or 0)-sum(
-            (_pantry_convert_between_units(float(x.get("count",0) or 0)*float(x.get("qty",0) or 0),str(x.get("unit",target_unit)),target_unit) or 0)
-            for x in lots[:-1]
-        )))
-        return
-
-    st.session_state.pantry[key]={
-        "name":name, "unit":unit,
-        "qty":content_qty*count,
-        "pack_count":count,
-        "pack_qty":content_qty, "pack_unit":unit,
-        "pack_lots":[{"count":count,"qty":content_qty,"unit":unit}],
-        "loose_qty":0.0,
-    }
-
-def _pantry_loose_qty(item):
-    """Return the quantity not represented by package lots, in the item's stored unit."""
-    item_unit=str(item.get("unit","g")).strip().lower()
-    package_total=0.0
-    for lot in _package_lots(item):
-        converted=_pantry_convert_between_units(
-            float(lot.get("count",0) or 0)*float(lot.get("qty",0) or 0),
-            str(lot.get("unit",item_unit)), item_unit
-        )
-        if converted is not None:
-            package_total += converted
-    # Prefer the explicitly tracked loose quantity, but fall back to the
-    # difference for records created by older V91 versions.
-    if "loose_qty" in item:
-        return max(0.0, float(item.get("loose_qty",0) or 0))
-    return max(0.0, float(item.get("qty",0) or 0)-package_total)
-
-def _delete_pantry_entry(item_key):
-    """Delete one pantry row completely."""
-    st.session_state.get("pantry",{}).pop(item_key,None)
-
-def _replace_pantry_entry(item_key, name, mode, qty=None, unit="g", pack_count=None, pack_qty=None, pack_unit="g", loose_qty=0.0):
-    """Replace a pantry row after an explicit user edit.
-
-    Editing is intentionally a replace operation rather than an additive one,
-    so correcting a typo cannot accidentally double the stock.
-    """
-    pantry=st.session_state.get("pantry",{})
-    pantry.pop(item_key,None)
-    name=str(name).strip()
-    if not name:
-        return False
-    if mode=="Confezione":
-        pack_count=float(pack_count or 0)
-        pack_qty=float(pack_qty or 0)
-        pack_unit=str(pack_unit).strip().lower()
-        loose_qty=max(0.0,float(loose_qty or 0))
-        if pack_count<=0 or pack_qty<=0:
-            return False
-        # Recreate the package lot first, then add the loose quantity without
-        # changing the package metadata.
-        add_pantry_package(name,pack_qty,pack_unit,pack_count)
-        if loose_qty>0:
-            add_pantry_qty(name,pack_unit,loose_qty)
-        return True
-    qty=float(qty or 0)
-    if qty<=0:
-        return False
-    add_pantry_qty(name,str(unit).strip().lower(),qty)
-    return True
-
-def pantry_package_step(item):
-    """Return one package expressed in the item's stored unit.
-
-    Example: a Pasta entry stored in kg with 500 g packages must use
-    0.5 kg as the +/- step, not 500 kg.
-    """
-    pq=float(item.get("pack_qty",0) or 0)
-    pu=str(item.get("pack_unit",item.get("unit","g"))).strip().lower()
-    iu=str(item.get("unit","g")).strip().lower()
-    if pq>0:
-        converted=_pantry_convert_between_units(pq,pu,iu)
-        if converted is not None:
-            return converted
-    return qty_step(iu,item.get("qty",0))
-
-def _adjust_first_package(item_key, delta_packages):
-    """Add/remove whole packages while keeping total quantity and lot metadata coherent."""
-    pantry=st.session_state.get("pantry",{})
-    item=pantry.get(item_key)
-    if not isinstance(item,dict):
-        return
-    lots=_package_lots(item)
-    if not lots:
-        add_pantry_qty(item.get("name",""),item.get("unit","g"),
-                       float(delta_packages)*qty_step(item.get("unit","g"),item.get("qty",0)))
-        return
-
-    # +/- acts on the first displayed package format. This keeps the behaviour
-    # deterministic when the same food contains multiple package sizes.
-    lot=lots[0]
-    count=float(lot.get("count",0) or 0)
-    if delta_packages<0 and count + delta_packages < 0:
-        return
-
-    lot_qty=float(lot.get("qty",0) or 0)
-    lot_unit=str(lot.get("unit",item.get("unit","g"))).strip().lower()
-    item_unit=str(item.get("unit","g")).strip().lower()
-    delta=_pantry_convert_between_units(lot_qty*float(delta_packages),lot_unit,item_unit)
-    if delta is None:
-        return
-
-    lot["count"]=count+float(delta_packages)
-    if lot["count"]<=0:
-        lots.pop(0)
-
-    item["qty"]=max(0.0,float(item.get("qty",0) or 0)+delta)
-    if item["qty"]<=0:
-        pantry.pop(item_key,None)
-        return
-
-    item["pack_lots"]=lots
-    if lots:
-        item["pack_count"]=sum(float(x.get("count",0) or 0) for x in lots)
-        first=lots[0]
-        item["pack_qty"]=float(first.get("qty",0) or 0)
-        item["pack_unit"]=str(first.get("unit",item_unit))
-    else:
-        item["pack_count"]=0.0
-        item["pack_qty"]=0.0
-        item["pack_unit"]=item_unit
+    current=float(st.session_state.get("pantry",{}).get(key,{}).get("qty",0) or 0)
+    set_pantry_qty(name,unit,current+float(delta))
 
 # Approximate household conversions used only when the pantry and the plan use
 # different units. They are intentionally limited to foods where a typical item
@@ -3529,8 +3236,6 @@ def _profile_complete():
 
 def _save_profile_values(values):
     # Profile is the control center of MyDiet: compare the previous state first,
-    # and on the very first profile creation start the guided pantry inventory.
-    _was_profile_complete = bool(st.session_state.get("profile_setup_complete", False))
     # then save the new one and record the consequences explicitly.
     tracked = [
         ("name", "Nome"), ("weight", "Peso attuale"), ("goal_weight", "Peso desiderato"),
@@ -3569,8 +3274,6 @@ def _save_profile_values(values):
         chosen_target = max(1500, round(bmr_save * (1 + bmr_factor)))
     st.session_state.p_deficit = max(0, maintenance_for_save - chosen_target)
     st.session_state.profile_setup_complete = True
-    if not _was_profile_complete:
-        st.session_state.pantry_onboarding_complete = False
 
     # Changes that affect the generated menu make the existing plan stale, but
     # never overwrite it silently. The user gets an explicit regeneration action.
@@ -3711,96 +3414,12 @@ if not _profile_complete():
             "water_goal_ml":water_goal, "quantity_mode":quantity_mode
         })
         st.success("Profilo creato. Ora possiamo costruire il tuo primo piano.")
-        st.session_state.page = "PantryOnboarding" if not st.session_state.get("pantry_onboarding_complete", True) else "Home"
+        st.session_state.page = "Home"
         _mydiet_rerun()
 
     st.stop()
 
 # Main navigation is now rendered as a fixed bottom tab bar after page content.
-
-# ---------------- First-run pantry onboarding ----------------
-elif st.session_state.page=="PantryOnboarding":
-    st.markdown("""
-    <div class="hero" style="margin-top:10px;padding:24px 20px;">
-      <div class="small">BENVENUTO IN MYDIET</div>
-      <div style="font-size:1.85rem;font-weight:850;margin:4px 0 6px;">🏠 Cosa hai già in casa?</div>
-      <div class="muted">Prima di creare la tua prima settimana, facciamo un rapido inventario. Il piano continuerà a essere costruito sul tuo profilo e sui tuoi obiettivi: useremo quello che hai già per ottimizzare la settimana e ridurre gli acquisti.</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    pantry_catalog={
-        "🍝 Pasta, riso e cereali":["Pasta","Riso basmati","Riso integrale","Farro","Orzo","Cous cous","Avena"],
-        "🥩 Carne e proteine":["Petto di pollo","Fesa di tacchino","Carne macinata magra","Tonno al naturale","Salmone","Merluzzo"],
-        "🥚 Uova e latticini":["Uova","Yogurt greco","Yogurt","Latte","Ricotta","Formaggio"],
-        "🥦 Frutta e verdura":["Mela","Banana","Pera","Frutta","Zucchine","Broccoli","Spinaci","Insalata mista","Verdure miste","Patate"],
-        "🫒 Oli e condimenti":["Olio EVO","Miele","Passata di pomodoro"],
-        "🥫 Dispensa e altro":["Pane integrale","Mandorle","Noci","Legumi in scatola","Crackers"]
-    }
-    unit_defaults={
-        "Uova":"pz","Pasta":"g","Riso basmati":"g","Riso integrale":"g","Farro":"g","Orzo":"g","Cous cous":"g","Avena":"g",
-        "Olio EVO":"ml","Latte":"ml","Yogurt":"pz","Yogurt greco":"pz","Pane integrale":"g","Patate":"g"
-    }
-    all_items=[x for vals in pantry_catalog.values() for x in vals]
-    selected=st.multiselect("Seleziona gli alimenti che hai già in casa", all_items, key="pantry_onboarding_selected", placeholder="Cerca e seleziona gli alimenti...")
-    if not selected:
-        st.info("Puoi selezionare anche solo gli alimenti che vuoi utilizzare nella prima settimana. Non serve inserire tutta la casa.")
-    else:
-        st.markdown("### 📦 Inserisci quantità e confezioni")
-        st.caption("Per ogni alimento puoi indicare una quantità libera oppure il numero di confezioni. La stessa logica verrà usata dalla Dispensa.")
-        for idx,name in enumerate(selected):
-            safe="".join(c if c.isalnum() else "_" for c in name.lower())
-            with st.container(border=True):
-                st.markdown(f"**{name}**")
-                mode=st.radio("Come lo hai?",["Quantità libera","Confezione"],horizontal=True,key=f"ob_mode_{safe}")
-                if mode=="Quantità libera":
-                    units=["g","kg","ml","l","pz"]
-                    default=unit_defaults.get(name,"g")
-                    c1,c2=st.columns(2)
-                    with c1:
-                        unit=st.selectbox("Unità",units,index=units.index(default) if default in units else 0,key=f"ob_unit_{safe}")
-                    with c2:
-                        qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=qty_step(unit,20 if unit in ("g","ml") else 1),key=f"ob_qty_{safe}")
-                else:
-                    c1,c2,c3=st.columns(3)
-                    with c1: pc=st.number_input("Confezioni",min_value=1.0,value=1.0,step=1.0,key=f"ob_pc_{safe}")
-                    with c2: pq=st.number_input("Contenuto",min_value=0.0,value=0.0,step=0.1,key=f"ob_pq_{safe}")
-                    with c3:
-                        units=["g","kg","ml","l","pz"]
-                        default=unit_defaults.get(name,"g")
-                        pu=st.selectbox("Unità",units,index=units.index(default) if default in units else 0,key=f"ob_pu_{safe}")
-                    if pq>0: st.caption(f"📦 {pc:g} × {pq:g} {pu} = **{pc*pq:g} {pu}**")
-
-    c1,c2=st.columns(2)
-    with c1:
-        if st.button("⏭️ Salta per ora",use_container_width=True):
-            st.session_state.pantry_onboarding_complete=True
-            st.session_state.page="Home"
-            _persist_app_state(); _mydiet_rerun()
-    with c2:
-        if st.button("🏠 Salva inventario e continua",type="primary",use_container_width=True):
-            saved=0
-            for name in selected:
-                safe="".join(c if c.isalnum() else "_" for c in name.lower())
-                mode=st.session_state.get(f"ob_mode_{safe}","Quantità libera")
-                if mode=="Quantità libera":
-                    qty=float(st.session_state.get(f"ob_qty_{safe}",0) or 0)
-                    unit=st.session_state.get(f"ob_unit_{safe}",unit_defaults.get(name,"g"))
-                    if qty>0:
-                        add_pantry_qty(name,unit,qty); saved+=1
-                else:
-                    pc=float(st.session_state.get(f"ob_pc_{safe}",1) or 0)
-                    pq=float(st.session_state.get(f"ob_pq_{safe}",0) or 0)
-                    pu=st.session_state.get(f"ob_pu_{safe}",unit_defaults.get(name,"g"))
-                    if pc>0 and pq>0:
-                        add_pantry_package(name,pq,pu,pc); saved+=1
-            st.session_state.pantry_onboarding_complete=True
-            st.session_state.page="Home"
-            _persist_app_state()
-            st.success(f"Inventario iniziale salvato: {saved} alimenti.")
-            _mydiet_rerun()
-
-    st.caption("Potrai modificare, aggiungere o eliminare qualsiasi alimento dalla Dispensa in qualsiasi momento.")
-    st.stop()
 
 # ---------------- Home ----------------
 if st.session_state.page=="Home":
@@ -4573,108 +4192,15 @@ elif st.session_state.page=="Dispensa":
                                 st.caption(f"🟡 Per il piano ne servono ancora {missing:g} {matching['unit']}")
                         else:
                             st.caption("Non richiesto dal piano attuale")
-                    with c2:
-                        st.markdown(f"**{item['qty']:g} {item['unit']}**")
-                        lots=item.get("pack_lots",[])
-                        if lots:
-                            lot_labels=[f"{float(x.get('count',0) or 0):g} confezioni × {float(x.get('qty',0) or 0):g} {x.get('unit',item['unit'])}" for x in lots]
-                            st.caption(" · ".join(lot_labels))
-                            package_total=0.0
-                            for lot in lots:
-                                converted=_pantry_convert_between_units(
-                                    float(lot.get("count",0) or 0)*float(lot.get("qty",0) or 0),
-                                    str(lot.get("unit",item["unit"])),
-                                    str(item["unit"])
-                                )
-                                if converted is not None:
-                                    package_total += converted
-                            loose=max(0.0,float(item["qty"])-package_total)
-                            if loose>1e-9:
-                                st.caption(f"+ {loose:g} {item['unit']} già sfusi")
-                        elif item.get("pack_qty",0)>0:
-                            st.caption(f"{item['pack_count']:g} confezioni × {item['pack_qty']:g} {item['pack_unit']}")
+                    with c2: st.markdown(f"**{item['qty']:g} {item['unit']}**")
                     with c3:
                         if st.button("−",key="pantry_minus_"+item["key"].replace("|","_"),use_container_width=True):
-                            key=item["key"]
-                            if item.get("pack_lots") or item.get("pack_qty",0)>0:
-                                _adjust_first_package(key,-1)
-                            else:
-                                add_pantry_qty(item["name"],item["unit"],-pantry_package_step(item))
-                            _mydiet_rerun()
+                            step=qty_step(item["unit"], item["qty"])
+                            add_pantry_qty(item["name"],item["unit"],-step); _mydiet_rerun()
                     with c4:
                         if st.button("+",key="pantry_plus_"+item["key"].replace("|","_"),use_container_width=True):
-                            key=item["key"]
-                            if item.get("pack_lots") or item.get("pack_qty",0)>0:
-                                _adjust_first_package(key,1)
-                            else:
-                                add_pantry_qty(item["name"],item["unit"],pantry_package_step(item))
-                            _mydiet_rerun()
-
-                    # V91.3: every pantry row can now be corrected or removed.
-                    edit_key="pantry_edit_"+item["key"].replace("|","_")
-                    delete_key="pantry_delete_"+item["key"].replace("|","_")
-                    ec1,ec2=st.columns(2)
-                    with ec1:
-                        if st.button("✏️ Modifica",key=edit_key,use_container_width=True):
-                            st.session_state["pantry_edit_open"] = item["key"]
-                            _mydiet_rerun()
-                    with ec2:
-                        if st.button("🗑️ Elimina",key=delete_key,use_container_width=True):
-                            st.session_state["pantry_delete_open"] = item["key"]
-                            _mydiet_rerun()
-
-                    if st.session_state.get("pantry_edit_open")==item["key"]:
-                        with st.container(border=True):
-                            st.markdown("**Modifica alimento**")
-                            edit_mode_default="Confezione" if item.get("pack_lots") or item.get("pack_qty",0)>0 else "Quantità libera"
-                            e_name=st.text_input("Alimento",value=item["name"],key="edit_name_"+item["key"].replace("|","_"))
-                            e_mode=st.radio("Come lo hai?",["Quantità libera","Confezione"],index=0 if edit_mode_default=="Quantità libera" else 1,horizontal=True,key="edit_mode_"+item["key"].replace("|","_"))
-                            if e_mode=="Quantità libera":
-                                e_unit=st.selectbox("Unità",["g","kg","ml","l","pz"],index=( ["g","kg","ml","l","pz"].index(item["unit"]) if item["unit"] in ["g","kg","ml","l","pz"] else 0),key="edit_unit_"+item["key"].replace("|","_"))
-                                e_qty=st.number_input("Quantità totale",min_value=0.0,value=float(item["qty"]),step=qty_step(e_unit,max(1.0,float(item["qty"]))),key="edit_qty_"+item["key"].replace("|","_"))
-                                st.caption("Salvando questa modalità, l'eventuale informazione sulle confezioni viene sostituita dalla quantità libera.")
-                                e_pack_count=e_pack_qty=e_loose=0.0; e_pack_unit=e_unit
-                            else:
-                                lots=item.get("pack_lots",[]) or []
-                                first=lots[0] if lots else {"count":item.get("pack_count",1) or 1,"qty":item.get("pack_qty",0) or 0,"unit":item.get("pack_unit",item["unit"])}
-                                if len(lots)>1:
-                                    st.warning("Questo alimento contiene più formati di confezione. La modifica li riunirà nel formato indicato qui sotto.")
-                                pc1,pc2,pc3=st.columns(3)
-                                with pc1: e_pack_count=st.number_input("Numero confezioni",min_value=0.0,value=float(sum(float(x.get("count",0) or 0) for x in lots) or first.get("count",1) or 1),step=1.0,key="edit_pack_count_"+item["key"].replace("|","_"))
-                                with pc2: e_pack_qty=st.number_input("Contenuto per confezione",min_value=0.0,value=float(first.get("qty",0) or 0),step=0.1,key="edit_pack_qty_"+item["key"].replace("|","_"))
-                                units=["g","kg","ml","l","pz"]
-                                first_unit=str(first.get("unit",item["unit"])).lower()
-                                with pc3: e_pack_unit=st.selectbox("Unità",units,index=(units.index(first_unit) if first_unit in units else 0),key="edit_pack_unit_"+item["key"].replace("|","_"))
-                                loose_unit=e_pack_unit
-                                loose_default=_pantry_loose_qty(item)
-                                e_loose=st.number_input(f"Quantità già sfusa ({loose_unit})",min_value=0.0,value=float(loose_default if item["unit"]==loose_unit else (_pantry_convert_between_units(loose_default,item["unit"],loose_unit) or 0)),step=qty_step(loose_unit,max(1.0,float(loose_default or 1))),key="edit_loose_"+item["key"].replace("|","_"))
-                            b1,b2=st.columns(2)
-                            with b1:
-                                if st.button("💾 Salva modifica",key="save_edit_"+item["key"].replace("|","_"),type="primary",use_container_width=True):
-                                    ok=_replace_pantry_entry(item["key"],e_name,e_mode,e_qty,e_unit,e_pack_count,e_pack_qty,e_pack_unit,e_loose)
-                                    if ok:
-                                        st.session_state["pantry_edit_open"]=None
-                                        _mydiet_rerun()
-                                    else:
-                                        st.error("Controlla i valori inseriti: quantità e confezione devono essere maggiori di zero.")
-                            with b2:
-                                if st.button("Annulla",key="cancel_edit_"+item["key"].replace("|","_"),use_container_width=True):
-                                    st.session_state["pantry_edit_open"]=None
-                                    _mydiet_rerun()
-
-                    if st.session_state.get("pantry_delete_open")==item["key"]:
-                        with st.container(border=True):
-                            st.warning(f"Vuoi eliminare **{item['name']} · {item['qty']:g} {item['unit']}** dalla dispensa?")
-                            d1,d2=st.columns(2)
-                            with d1:
-                                if st.button("🗑️ Conferma eliminazione",key="confirm_delete_"+item["key"].replace("|","_"),type="primary",use_container_width=True):
-                                    _delete_pantry_entry(item["key"])
-                                    st.session_state["pantry_delete_open"]=None
-                                    _mydiet_rerun()
-                            with d2:
-                                if st.button("Annulla",key="cancel_delete_"+item["key"].replace("|","_"),use_container_width=True):
-                                    st.session_state["pantry_delete_open"]=None
-                                    _mydiet_rerun()
+                            step=qty_step(item["unit"], item["qty"])
+                            add_pantry_qty(item["name"],item["unit"],step); _mydiet_rerun()
         else:
             st.info("La dispensa è vuota. Puoi aggiungere qui quello che hai già in casa.")
 
@@ -4682,37 +4208,23 @@ elif st.session_state.page=="Dispensa":
         with st.expander("➕ Aggiungi alimento alla dispensa",expanded=False):
             suggestions=[{"name":r["name"],"unit":r["unit"]} for r in shopping_list()]
             names=sorted({x["name"] for x in suggestions})
-            c1,c2=st.columns([3,2])
+            c1,c2,c3=st.columns([3,1,1])
             with c1: selected=st.selectbox("Alimento",["Nuovo alimento…"]+names,key="pantry_select")
-            with c2: mode=st.selectbox("Come lo hai?",["Quantità libera","Confezione"],key="pantry_add_mode")
+            with c2: unit=st.selectbox("Unità",["g","kg","ml","l","pz","confezioni"],key="pantry_unit")
+            with c3:
+                qty_step_value=qty_step(unit, 20 if unit in ("g","ml") else 1)
+                qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=qty_step_value,key="pantry_qty")
             if selected=="Nuovo alimento…":
                 custom_name=st.text_input("Nome alimento",placeholder="es. Pasta")
             else:
                 custom_name=selected
-            if mode=="Quantità libera":
-                c1,c2=st.columns([1,1])
-                with c1: unit=st.selectbox("Unità",["g","kg","ml","l","pz"],key="pantry_unit")
-                with c2:
-                    qty_step_value=qty_step(unit, 20 if unit in ("g","ml") else 1)
-                    qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=qty_step_value,key="pantry_qty")
-                if selected!="Nuovo alimento…":
-                    suggested_unit=next((x["unit"] for x in suggestions if x["name"]==selected),None)
-                    if suggested_unit in ("g","kg","ml","l","pz"): st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
-                if st.button("Salva in dispensa",type="primary",key="save_pantry_loose") and custom_name.strip() and qty>0:
-                    add_pantry_qty(custom_name.strip(),unit,qty); _mydiet_rerun()
-            else:
-                st.caption("Indica il contenuto di una singola confezione. MyDiet calcolerà automaticamente la quantità totale.")
-                c1,c2,c3=st.columns([1,1,1])
-                with c1: pack_count=st.number_input("Numero confezioni",min_value=1.0,value=1.0,step=1.0,key="pantry_pack_count")
-                with c2: pack_qty=st.number_input("Contenuto per confezione",min_value=0.0,value=0.0,step=0.1,key="pantry_pack_qty")
-                with c3: pack_unit=st.selectbox("Unità",["g","kg","ml","l","pz"],key="pantry_pack_unit")
-                if pack_qty>0:
-                    st.info(f"📦 {pack_count:g} confezioni × {pack_qty:g} {pack_unit} = **{pack_count*pack_qty:g} {pack_unit} totali**")
-                if st.button("📦 Aggiungi confezioni",type="primary",key="save_pantry_pack") and custom_name.strip() and pack_qty>0:
-                    add_pantry_package(custom_name.strip(),pack_qty,pack_unit,pack_count); _mydiet_rerun()
+                suggested_unit=next((x["unit"] for x in suggestions if x["name"]==selected),None)
+                if suggested_unit in ("g","kg","ml","l","pz","confezioni"): st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
+            if st.button("Salva in dispensa",type="primary") and custom_name.strip() and qty>0:
+                add_pantry_qty(custom_name.strip(),unit,qty); _mydiet_rerun()
 
     with st.expander("ℹ️ Come funziona la dispensa",expanded=False):
-        st.write("Quando registri un pasto come mangiato, MyDietApp scala dalla dispensa solo la quantità che era effettivamente presente. Se annulli il pasto, quella quantità viene ripristinata. Per i prodotti confezionati viene conservato anche il formato della confezione, così in futuro il barcode potrà aggiungere automaticamente prodotti come 2 × 500 g.")
+        st.write("Quando registri un pasto come mangiato, MyDietApp scala dalla dispensa solo la quantità che era effettivamente presente. Se annulli il pasto, quella quantità viene ripristinata.")
         st.write("Nella sezione **Risparmio**, MyDiet confronta il paniere intero quando premi il pulsante. Per alcuni alimenti freschi può anche convertire unità domestiche note, ad esempio **5 banane ≈ 600 g**, così la dispensa incide correttamente sulla lista della spesa.")
 
 # ---------------- Attività / Health ----------------
