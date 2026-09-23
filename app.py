@@ -86,60 +86,108 @@ button,[data-testid="stBaseButton-secondary"],[data-testid="stBaseButton-primary
 """
 st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", initial_sidebar_state="collapsed")
 st.markdown(UI_BETA_CSS, unsafe_allow_html=True)
-# MyDiet uses OpenAI only for AI features.
-# No Gemini dependency is required. The model is configurable through secrets,
-# with GPT-5.6 Luna as the default cost/latency-oriented model.
+# ============================================================
+# MyDiet AI Engine v1 (V95)
+# One provider, one gateway, configurable model, usage telemetry and cache.
+# The rest of the app must never call the OpenAI client directly.
+# ============================================================
 OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-5.6-luna")
 _openai_api_key = st.secrets.get("OPENAI_API_KEY")
 openai_client = OpenAI(api_key=_openai_api_key) if _openai_api_key else None
+AI_DEV_MODE = str(st.secrets.get("OPENAI_DEV_MODE", "false")).strip().lower() in {"1", "true", "yes", "on"}
 
-def openai_interaction(prompt, image=None, thinking_level=None):
-    """Call OpenAI Responses API for all MyDiet AI features.
+# USD / 1M tokens. Keep this table isolated so a future model change does not
+# require touching the application logic. These are estimates for telemetry,
+# not billing statements.
+AI_PRICING_USD_PER_MILLION = {
+    "gpt-5.6-luna": {"input": 0.20, "cached_input": 0.02, "output": 1.20},
+}
 
-    The same helper is used for plan generation, food intelligence, meal
-    explanations and image-based menu parsing, so MyDiet has one AI provider.
-    """
+def _ai_usage_init():
+    return st.session_state.setdefault("ai_usage", {
+        "calls": 0, "errors": 0, "by_feature": {}, "input_tokens": 0,
+        "cached_input_tokens": 0, "output_tokens": 0, "estimated_usd": 0.0,
+        "last_call": None,
+    })
+
+def _ai_usage_record(feature, response, elapsed_ms):
+    usage = _ai_usage_init()
+    u = getattr(response, "usage", None)
+    input_tokens = int(getattr(u, "input_tokens", 0) or 0) if u else 0
+    output_tokens = int(getattr(u, "output_tokens", 0) or 0) if u else 0
+    details = getattr(u, "input_tokens_details", None) if u else None
+    cached_tokens = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+    prices = AI_PRICING_USD_PER_MILLION.get(OPENAI_MODEL, {})
+    uncached_input = max(0, input_tokens - cached_tokens)
+    estimated = (uncached_input * prices.get("input", 0) + cached_tokens * prices.get("cached_input", prices.get("input", 0)) + output_tokens * prices.get("output", 0)) / 1_000_000
+    usage["calls"] += 1
+    usage["input_tokens"] += input_tokens
+    usage["cached_input_tokens"] += cached_tokens
+    usage["output_tokens"] += output_tokens
+    usage["estimated_usd"] += estimated
+    usage["last_call"] = {"feature": feature, "model": OPENAI_MODEL, "input_tokens": input_tokens, "cached_input_tokens": cached_tokens, "output_tokens": output_tokens, "estimated_usd": estimated, "elapsed_ms": int(elapsed_ms)}
+    by = usage["by_feature"].setdefault(feature, {"calls": 0, "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "estimated_usd": 0.0})
+    by["calls"] += 1
+    by["input_tokens"] += input_tokens
+    by["cached_input_tokens"] += cached_tokens
+    by["output_tokens"] += output_tokens
+    by["estimated_usd"] += estimated
+
+
+def openai_interaction(prompt, image=None, thinking_level=None, feature="general"):
+    """Single gateway for every MyDiet AI call. Records usage and latency."""
+    import time
+    _ai_usage_init()
     if openai_client is None:
+        st.session_state["ai_usage"]["errors"] += 1
         raise RuntimeError("OPENAI_API_KEY non configurata. Aggiungila nei Secrets di Streamlit.")
 
-    effort_map = {
-        None: None,
-        "minimal": "none",
-        "low": "low",
-        "medium": "medium",
-        "high": "high",
-    }
-    effort = effort_map.get(thinking_level, thinking_level if thinking_level in {"none","low","medium","high"} else None)
-
+    effort_map = {None: None, "minimal": "none", "low": "low", "medium": "medium", "high": "high"}
+    effort = effort_map.get(thinking_level, thinking_level if thinking_level in {"none", "low", "medium", "high"} else None)
     if image is None:
         input_payload = prompt
     else:
         if hasattr(image, "getvalue"):
             image_bytes = image.getvalue()
         else:
-            buf = io.BytesIO()
-            image.save(buf, format="JPEG")
-            image_bytes = buf.getvalue()
+            buf = io.BytesIO(); image.save(buf, format="JPEG"); image_bytes = buf.getvalue()
         mime_type = getattr(image, "type", None) or "image/jpeg"
         if mime_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
             mime_type = "image/jpeg"
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-        input_payload = [{
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": prompt},
-                {"type": "input_image", "image_url": f"data:{mime_type};base64,{image_b64}"},
-            ],
-        }]
+        input_payload = [{"role": "user", "content": [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": f"data:{mime_type};base64,{image_b64}"}]}]
 
     kwargs = {"model": OPENAI_MODEL, "input": input_payload}
     if effort:
         kwargs["reasoning"] = {"effort": effort}
-    response = openai_client.responses.create(**kwargs)
+    started = time.perf_counter()
+    try:
+        response = openai_client.responses.create(**kwargs)
+    except Exception:
+        st.session_state["ai_usage"]["errors"] += 1
+        raise
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    _ai_usage_record(feature, response, elapsed_ms)
     text = getattr(response, "output_text", None)
     if not text:
+        st.session_state["ai_usage"]["errors"] += 1
         raise RuntimeError("OpenAI non ha restituito testo.")
     return text.strip()
+
+
+def ai_cached_text(cache_namespace, cache_key, producer):
+    """Small session cache for expensive AI explanations.
+
+    The cache is intentionally session-scoped in V95; persistence can move to
+    PostgreSQL/backend when MyDiet becomes a multi-user product.
+    """
+    cache = st.session_state.setdefault("ai_response_cache", {})
+    key = f"{cache_namespace}::{cache_key}"
+    if key in cache:
+        return cache[key]
+    value = producer()
+    cache[key] = value
+    return value
 
 
 
@@ -2014,7 +2062,7 @@ def _known_food_kcal(name, unit, qty):
     return round(ik * qty / iq)
 
 def estimate_food_kcal(name, qty, unit):
-    """Estimate total kcal for a newly added food. Prefer known plan data, then Gemini."""
+    """Estimate total kcal for a newly added food. Prefer known plan data, then the AI engine."""
     name=str(name or "").strip()
     unit=str(unit or "g").strip()
     qty=float(qty or 0)
@@ -2043,7 +2091,7 @@ Regole:
 - Non inventare precisione: arrotonda a una stima ragionevole.
 - Nell'assumption indica in poche parole quale porzione/tipologia hai assunto.
 """
-    raw=openai_interaction(prompt, thinking_level="low")
+    raw=openai_interaction(prompt, thinking_level="low", feature="food_kcal")
     try:
         match=re.search(r"\{.*\}",raw,re.S)
         data=json.loads(match.group(0) if match else raw)
@@ -2335,7 +2383,7 @@ def _next_meal_context(day, balance_data):
 
 
 def smart_assistant_context(balance_data=None):
-    """Build factual context. Python determines budget and next meal; Gemini only interprets it."""
+    """Build factual context. Python determines budget and next meal; the AI engine only interprets it."""
     b=balance_data or balance()
     d=current_day_name()
     ms=st.session_state.meal_plan.get(d,{})
@@ -2370,7 +2418,7 @@ def smart_assistant_context(balance_data=None):
 
 
 def run_smart_food_advice(balance_data=None):
-    """Ask Gemini to explain a deterministic next-meal decision; never let it recalculate the budget."""
+    """Ask the AI engine to explain a deterministic next-meal decision; never let it recalculate the budget."""
     ctx=smart_assistant_context(balance_data)
     next_ctx=ctx.get("next_meal", {})
 
@@ -2415,7 +2463,8 @@ Rispondi in massimo 5 righe, in questo formato:
 🔥 BUDGET DINAMICO: ... kcal  (solo se budget_is_dynamic=true)
 🔥 TARGET STIMATO: ... kcal  (solo se budget_is_dynamic=false)
 📌 MOTIVO: ...'''
-    return openai_interaction(prompt, thinking_level="minimal")
+    cache_key=json.dumps(ctx, ensure_ascii=False, sort_keys=True, default=str)
+    return ai_cached_text("next_meal_advice", cache_key, lambda: openai_interaction(prompt, thinking_level="minimal", feature="next_meal_advice"))
 
 def show_daily_meal_recommendation(meal_name, day, balance_data):
     rec=meal_recommendation(day,meal_name,balance_data)
@@ -4318,7 +4367,7 @@ REGOLE DISPENSA: la dispensa NON è un vincolo e NON deve determinare da sola la
 
 Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena". Nei pasti fuori casa usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche reali. Varia ricette e alimenti rispetto a una settimana standard: non copiare gli stessi pasti in giorni equivalenti. Restituisci SOLO JSON. GIORNI PRANZO FUORI CASA: {', '.join(lunch_days) if lunch_days else 'nessuno'}. GIORNI CENA FUORI CASA: {', '.join(dinner_days) if dinner_days else 'nessuno'}."""
                 with st.spinner("🤖 Sto generando il piano…"):
-                    raw=openai_interaction(prompt); out=normalize_ai_plan(raw)
+                    raw=openai_interaction(prompt, thinking_level="low", feature="weekly_plan"); out=normalize_ai_plan(raw)
                 st.session_state.next_meal_plan=out
                 st.session_state.next_overrides={}
                 st.session_state.next_week_start=next_start.isoformat()
@@ -4472,7 +4521,7 @@ Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "�
                                             b=balance(); rec=meal_recommendation(day,mn,b); planned=rec["name"] if rec else "nessun piatto previsto"; planned_kcal=rec["planned_kcal"] if rec else 0
                                             budget_label=f"target alimentare: {energy_profile()['target']} kcal/giorno" if editing_next else f"calorie ancora disponibili oggi: {b['remaining']} kcal"
                                             prompt=f"Analizza questo menu fuori casa per {mn} del giorno {day}. Piano previsto: {planned}; calorie previste: {planned_kcal}; {budget_label}. Confronta solo ciò che compare nella foto. Rispondi con 🟢 COSA ORDINARE, 💡 PERCHÉ, ⚠️ COSA LIMITARE."
-                                            set_mensa_menu(day,mn,openai_interaction(prompt,image=img))
+                                            set_mensa_menu(day,mn,openai_interaction(prompt,image=img,thinking_level="low",feature="menu_image"))
                                             if editing_next: save_next_editor_context()
                                             _mydiet_rerun()
                                         except Exception as e: st.error(f"Errore analisi menu: {e}")
@@ -5334,6 +5383,34 @@ else:
         else:
             st.info("Modalità solo dieta: nessun monitoraggio dell'attività richiesto.")
         st.caption("In ogni modalità, l'attività reale non modifica automaticamente il piano alimentare: contribuisce al bilancio della giornata.")
+
+def _show_ai_dev_panel():
+    if not AI_DEV_MODE:
+        return
+    usage=_ai_usage_init()
+    st.divider()
+    with st.expander("🧪 MyDiet AI Engine · DEV", expanded=False):
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric("Chiamate", usage["calls"])
+        c2.metric("Input token", f"{usage['input_tokens']:,}".replace(",", "."))
+        c3.metric("Output token", f"{usage['output_tokens']:,}".replace(",", "."))
+        c4.metric("Costo stimato", f"${usage['estimated_usd']:.4f}")
+        st.caption(f"Modello: {OPENAI_MODEL} · Errori: {usage['errors']}")
+        rows=[]
+        for feature, data in usage.get("by_feature", {}).items():
+            rows.append({"Funzione":feature,"Chiamate":data["calls"],"Input":data["input_tokens"],"Cached input":data["cached_input_tokens"],"Output":data["output_tokens"],"Costo USD":round(data["estimated_usd"],6)})
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        last=usage.get("last_call")
+        if last:
+            st.caption(f"Ultima: {last['feature']} · {last['elapsed_ms']} ms · {last['input_tokens']} input · {last['output_tokens']} output · ${last['estimated_usd']:.6f}")
+        if st.button("Azzera statistiche AI", key="reset_ai_dev_stats"):
+            st.session_state["ai_usage"]={"calls":0,"errors":0,"by_feature":{},"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"estimated_usd":0.0,"last_call":None}
+            st.session_state["ai_response_cache"]={}
+            _mydiet_rerun()
+
+
+_show_ai_dev_panel()
 
 # Persist the latest state at the end of a normal script run as well.
 _persist_app_state()
