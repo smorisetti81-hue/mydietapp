@@ -2,5 +2,5 @@ streamlit
 pandas
 Pillow
 requests
-google-genai
 psycopg[binary]>=3.2,<4
+openai>=1.0.0

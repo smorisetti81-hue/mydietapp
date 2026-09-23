@@ -1,5 +1,5 @@
 import streamlit as st
-from google import genai
+from openai import OpenAI
 import io
 import json
 import pandas as pd
@@ -86,17 +86,33 @@ button,[data-testid="stBaseButton-secondary"],[data-testid="stBaseButton-primary
 """
 st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", initial_sidebar_state="collapsed")
 st.markdown(UI_BETA_CSS, unsafe_allow_html=True)
-GEMINI_MODEL = "gemini-3.6-flash"
-gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+# MyDiet uses OpenAI only for AI features.
+# No Gemini dependency is required. The model is configurable through secrets,
+# with GPT-5.6 Luna as the default cost/latency-oriented model.
+OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-5.6-luna")
+_openai_api_key = st.secrets.get("OPENAI_API_KEY")
+openai_client = OpenAI(api_key=_openai_api_key) if _openai_api_key else None
 
-def gemini_interaction(prompt, image=None, thinking_level=None):
-    """Call Gemini via the current Interactions API. Supports text and optional image input."""
-    generation_config = {"thinking_level": thinking_level} if thinking_level else None
+def openai_interaction(prompt, image=None, thinking_level=None):
+    """Call OpenAI Responses API for all MyDiet AI features.
+
+    The same helper is used for plan generation, food intelligence, meal
+    explanations and image-based menu parsing, so MyDiet has one AI provider.
+    """
+    if openai_client is None:
+        raise RuntimeError("OPENAI_API_KEY non configurata. Aggiungila nei Secrets di Streamlit.")
+
+    effort_map = {
+        None: None,
+        "minimal": "none",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+    }
+    effort = effort_map.get(thinking_level, thinking_level if thinking_level in {"none","low","medium","high"} else None)
+
     if image is None:
-        kwargs = {"model": GEMINI_MODEL, "input": prompt}
-        if generation_config:
-            kwargs["generation_config"] = generation_config
-        interaction = gemini_client.interactions.create(**kwargs)
+        input_payload = prompt
     else:
         if hasattr(image, "getvalue"):
             image_bytes = image.getvalue()
@@ -108,17 +124,22 @@ def gemini_interaction(prompt, image=None, thinking_level=None):
         if mime_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
             mime_type = "image/jpeg"
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-        kwargs = {
-            "model": GEMINI_MODEL,
-            "input": [
-                {"type": "text", "text": prompt},
-                {"type": "image", "data": image_b64, "mime_type": mime_type},
+        input_payload = [{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {"type": "input_image", "image_url": f"data:{mime_type};base64,{image_b64}"},
             ],
-        }
-        if generation_config:
-            kwargs["generation_config"] = generation_config
-        interaction = gemini_client.interactions.create(**kwargs)
-    return interaction.output_text.strip()
+        }]
+
+    kwargs = {"model": OPENAI_MODEL, "input": input_payload}
+    if effort:
+        kwargs["reasoning"] = {"effort": effort}
+    response = openai_client.responses.create(**kwargs)
+    text = getattr(response, "output_text", None)
+    if not text:
+        raise RuntimeError("OpenAI non ha restituito testo.")
+    return text.strip()
 
 
 
@@ -1693,7 +1714,7 @@ def archive_current_plan(reason="Nuovo piano"):
 
 
 def normalize_ai_plan(raw):
-    """Normalize Gemini's weekly-plan JSON into the internal MyDiet structure."""
+    """Normalize the AI weekly-plan JSON into the internal MyDiet structure."""
     if isinstance(raw, str):
         raw=raw.strip()
         if raw.startswith("```"):
@@ -1771,7 +1792,7 @@ def normalize_ai_plan(raw):
 
     missing=[d for d in day_names if d not in out]
     if missing:
-        raise ValueError("Gemini ha restituito un piano incompleto. Giorni mancanti: "+", ".join(missing))
+        raise ValueError("L'AI ha restituito un piano incompleto. Giorni mancanti: "+", ".join(missing))
 
     meal_order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
     for day in day_names:
@@ -2022,7 +2043,7 @@ Regole:
 - Non inventare precisione: arrotonda a una stima ragionevole.
 - Nell'assumption indica in poche parole quale porzione/tipologia hai assunto.
 """
-    raw=gemini_interaction(prompt, thinking_level="low")
+    raw=openai_interaction(prompt, thinking_level="low")
     try:
         match=re.search(r"\{.*\}",raw,re.S)
         data=json.loads(match.group(0) if match else raw)
@@ -2394,7 +2415,7 @@ Rispondi in massimo 5 righe, in questo formato:
 🔥 BUDGET DINAMICO: ... kcal  (solo se budget_is_dynamic=true)
 🔥 TARGET STIMATO: ... kcal  (solo se budget_is_dynamic=false)
 📌 MOTIVO: ...'''
-    return gemini_interaction(prompt, thinking_level="minimal")
+    return openai_interaction(prompt, thinking_level="minimal")
 
 def show_daily_meal_recommendation(meal_name, day, balance_data):
     rec=meal_recommendation(day,meal_name,balance_data)
@@ -4297,7 +4318,7 @@ REGOLE DISPENSA: la dispensa NON è un vincolo e NON deve determinare da sola la
 
 Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena". Nei pasti fuori casa usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche reali. Varia ricette e alimenti rispetto a una settimana standard: non copiare gli stessi pasti in giorni equivalenti. Restituisci SOLO JSON. GIORNI PRANZO FUORI CASA: {', '.join(lunch_days) if lunch_days else 'nessuno'}. GIORNI CENA FUORI CASA: {', '.join(dinner_days) if dinner_days else 'nessuno'}."""
                 with st.spinner("🤖 Sto generando il piano…"):
-                    raw=gemini_interaction(prompt); out=normalize_ai_plan(raw)
+                    raw=openai_interaction(prompt); out=normalize_ai_plan(raw)
                 st.session_state.next_meal_plan=out
                 st.session_state.next_overrides={}
                 st.session_state.next_week_start=next_start.isoformat()
@@ -4451,7 +4472,7 @@ Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "�
                                             b=balance(); rec=meal_recommendation(day,mn,b); planned=rec["name"] if rec else "nessun piatto previsto"; planned_kcal=rec["planned_kcal"] if rec else 0
                                             budget_label=f"target alimentare: {energy_profile()['target']} kcal/giorno" if editing_next else f"calorie ancora disponibili oggi: {b['remaining']} kcal"
                                             prompt=f"Analizza questo menu fuori casa per {mn} del giorno {day}. Piano previsto: {planned}; calorie previste: {planned_kcal}; {budget_label}. Confronta solo ciò che compare nella foto. Rispondi con 🟢 COSA ORDINARE, 💡 PERCHÉ, ⚠️ COSA LIMITARE."
-                                            set_mensa_menu(day,mn,gemini_interaction(prompt,image=img))
+                                            set_mensa_menu(day,mn,openai_interaction(prompt,image=img))
                                             if editing_next: save_next_editor_context()
                                             _mydiet_rerun()
                                         except Exception as e: st.error(f"Errore analisi menu: {e}")
