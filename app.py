@@ -3741,7 +3741,46 @@ elif st.session_state.page=="PantryOnboarding":
         "Olio EVO":"ml","Latte":"ml","Yogurt":"pz","Yogurt greco":"pz","Pane integrale":"g","Patate":"g"
     }
     all_items=[x for vals in pantry_catalog.values() for x in vals]
-    selected=st.multiselect("Seleziona gli alimenti che hai già in casa", all_items, key="pantry_onboarding_selected", placeholder="Cerca e seleziona gli alimenti...")
+
+    # V93.3: the suggested catalog is only a starting point. The user must be
+    # able to add ANY food they actually have at home, without waiting for a
+    # future barcode/database integration. Custom foods become normal pantry
+    # entries and therefore are immediately available to later planning logic.
+    custom_items=st.session_state.setdefault("pantry_onboarding_custom_items", [])
+    with st.container(border=True):
+        st.markdown("### 🔎 Non trovi qualcosa che hai in casa?")
+        c_search,c_add=st.columns([2.2,1])
+        with c_search:
+            pantry_search=st.text_input("Cerca un alimento", placeholder="Es. ceci, pesto, lasagna...", key="pantry_onboarding_search")
+        with c_add:
+            st.caption("Puoi aggiungere qualsiasi alimento")
+        search_term=pantry_search.strip().lower()
+        filtered_items=[x for x in all_items if not search_term or search_term in x.lower()]
+        filtered_custom=[x for x in custom_items if not search_term or search_term in x.lower()]
+        if search_term and not filtered_items and not filtered_custom:
+            st.warning(f"Non trovo **{pantry_search.strip()}** tra gli alimenti suggeriti.")
+        with st.expander("➕ Aggiungi alimento manualmente", expanded=bool(search_term and not filtered_items and not filtered_custom)):
+            c1,c2=st.columns([3,1])
+            with c1:
+                custom_food_name=st.text_input("Nome alimento", value=pantry_search.strip(), placeholder="Es. Ceci in scatola", key="pantry_onboarding_custom_name")
+            with c2:
+                if st.button("➕ Aggiungi", type="primary", use_container_width=True, key="pantry_onboarding_add_custom"):
+                    new_name=custom_food_name.strip()
+                    existing={x.lower() for x in all_items + custom_items}
+                    if not new_name:
+                        st.warning("Inserisci il nome dell'alimento.")
+                    elif new_name.lower() in existing:
+                        st.info("Questo alimento è già disponibile nella lista.")
+                    else:
+                        custom_items.append(new_name)
+                        st.session_state.pantry_onboarding_custom_items=custom_items
+                        st.session_state.pantry_onboarding_selected=list(st.session_state.get("pantry_onboarding_selected", []))+[new_name]
+                        _mydiet_rerun()
+        if custom_items:
+            st.caption("Alimenti aggiunti da te: " + ", ".join(custom_items))
+
+    selectable_items=filtered_items + filtered_custom if search_term else all_items + custom_items
+    selected=st.multiselect("Seleziona gli alimenti che hai già in casa", selectable_items, key="pantry_onboarding_selected", placeholder="Cerca e seleziona gli alimenti...")
     if not selected:
         st.info("Puoi selezionare anche solo gli alimenti che vuoi utilizzare nella prima settimana. Non serve inserire tutta la casa.")
     else:
