@@ -1,15 +1,23 @@
-# MyDietApp V91 — Gestione confezioni
+# MyDietApp V93.5 — Inventario reale + Dispensa unificata
+
+## V93.5
+- L'inventario iniziale ora legge la **Dispensa reale** e mostra automaticamente gli alimenti già presenti.
+- Gli alimenti già presenti vengono pre-selezionati quando si riapre l'inventario.
+- Il catalogo personale viene alimentato dagli alimenti aggiunti manualmente e dagli alimenti già presenti in Dispensa.
+- La ricerca dell'inventario considera sia il catalogo MyDiet sia il catalogo personale.
+- Salvare nuovamente un alimento è **idempotente**: aggiorna la quantità invece di sommarla una seconda volta.
+- Un alimento può avere contemporaneamente **confezioni + quantità sfusa**.
+- Le confezioni con più formati già presenti vengono preservate quando si riapre e si salva l'inventario senza modificarne i lotti.
+- La lista della spesa confronta le quantità usando lo stesso nome normalizzato della Dispensa, evitando falsi `0 g` dovuti a differenze di maiuscole/spaziatura.
+- La Dispensa resta la **fonte di verità** per ciò che l'utente possiede.
+- Il Piano resta indipendente dalla Dispensa: la disponibilità in casa serve a ottimizzare la settimana e calcolare cosa manca.
+
+## V93.4
+- Ricerca degli alimenti personalizzati già creati dall'utente.
+
+## V93.3
+- Ricerca e aggiunta manuale di qualsiasi alimento durante l'inventario iniziale.
+- Quantità e confezioni salvate nella Dispensa reale.
 
 ## V91
-- Aggiunta modalità **Confezione** nella Dispensa.
-- Un prodotto confezionato può essere registrato come `N confezioni × contenuto per confezione`.
-- MyDiet calcola automaticamente il totale disponibile.
-- Esempi supportati: `2 × 500 g = 1 kg`, `2 × 1 l = 2 l`, `6 × 1 pz = 6 pz`.
-- Il formato della confezione viene conservato anche quando il consumo riduce la quantità disponibile.
-- Le quantità libere già esistenti restano compatibili.
-- Nessuna modifica a Supabase, Health Bridge, Smart Shopping o al Piano.
-
-## V90.3
-- Non mostra più il menu della settimana corrente dentro "Prossima settimana" quando la nuova settimana non è ancora stata generata.
-- La nuova settimana mostra uno stato vuoto esplicito e invita a generarla.
-- Mantiene la guida alla preparazione anticipata, idealmente giovedì/venerdì, per organizzare pasti e spesa.
+- Gestione confezioni nella Dispensa.
