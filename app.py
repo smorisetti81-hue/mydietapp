@@ -2907,6 +2907,76 @@ def shopping_list():
         rows.append({"name":name,"unit":unit,"required":float(required),"pantry":stock,"pantry_parts":stock_parts,"need":need})
     return rows
 
+def grocery_for_plan(plan):
+    """Aggregate ingredient quantities required by an arbitrary weekly plan."""
+    d=defaultdict(lambda:[0,"",""])
+    for day_meals in (plan or {}).values():
+        if not isinstance(day_meals,dict):
+            continue
+        for meal in day_meals.values():
+            for i in active_items(meal):
+                name=str(i.get("name","")).strip()
+                unit=str(i.get("unit","g")).strip()
+                if not name:
+                    continue
+                key=(name.lower(),unit.lower())
+                d[key][0]+=float(i.get("qty",0) or 0)
+                d[key][1]=unit
+                d[key][2]=name
+    return sorted(d.values(),key=lambda x:x[2].lower())
+
+def pantry_week_preview(plan):
+    """Compare a generated week with current pantry stock without changing either one."""
+    rows=[]
+    for required,unit,name in grocery_for_plan(plan):
+        stock,parts=_pantry_stock_in_unit(name,unit)
+        required=float(required or 0)
+        covered=min(required,max(0.0,stock))
+        missing=max(0.0,required-stock)
+        rows.append({"name":name,"unit":unit,"required":required,"stock":stock,"covered":covered,"missing":missing,"parts":parts})
+    fully=sum(1 for r in rows if r["missing"]<=0.000001)
+    partial=sum(1 for r in rows if r["missing"]>0 and r["stock"]>0)
+    missing=sum(1 for r in rows if r["stock"]<=0)
+    covered_qty=sum(r["covered"] for r in rows)
+    required_qty=sum(r["required"] for r in rows)
+    return {"rows":rows,"fully_covered":fully,"partial":partial,"not_in_pantry":missing,"covered_qty":covered_qty,"required_qty":required_qty}
+
+def pantry_prompt_snapshot(limit=80):
+    """Human-readable pantry snapshot for the AI planner; pantry is an input, not a diet constraint."""
+    entries=[]
+    seen=set()
+    for item in st.session_state.get("pantry",{}).values():
+        if not isinstance(item,dict):
+            continue
+        name=str(item.get("name","")).strip()
+        if not name:
+            continue
+        key=_normalized_food_name(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        qty=float(item.get("qty",0) or 0)
+        unit=str(item.get("unit","g")).strip()
+        if qty<=0:
+            continue
+        parts=[]
+        lots=_package_lots(item)
+        for lot in lots:
+            parts.append(f"{float(lot.get('count',0) or 0):g}x{float(lot.get('qty',0) or 0):g}{str(lot.get('unit',unit)).lower()}")
+        loose=_pantry_loose_qty(item)
+        if loose>0.000001:
+            parts.append(f"{loose:g}{unit} sfusi")
+        detail=f"{name}: {qty:g} {unit}"
+        if parts:
+            detail += " (" + " + ".join(parts) + ")"
+        entries.append(detail)
+    entries.sort(key=str.lower)
+    if not entries:
+        return "Nessun alimento attualmente presente in dispensa."
+    if len(entries)>limit:
+        entries=entries[:limit]+[f"... e altri {len(entries)-limit} alimenti"]
+    return "\n".join(f"- {x}" for x in entries)
+
 def shopping_opportunity(required, pantry, unit):
     need=max(0.0,float(required)-float(pantry))
     if need<=0:
@@ -4156,6 +4226,20 @@ elif st.session_state.page=="Piano":
             with st.expander(f"✨ Prossima settimana · {week_label(next_start)}",expanded=False):
                 if has_next:
                     st.success("Bozza pronta · il piano attuale è al sicuro")
+                    preview=st.session_state.get("next_pantry_preview")
+                    if preview:
+                        total=preview.get("fully_covered",0)+preview.get("partial",0)+preview.get("not_in_pantry",0)
+                        st.markdown("### 🏠 Quanto sfrutta quello che hai già")
+                        c1,c2,c3=st.columns(3)
+                        c1.metric("🟢 Già coperti",preview.get("fully_covered",0))
+                        c2.metric("🟡 Parziali",preview.get("partial",0))
+                        c3.metric("🛒 Da comprare",preview.get("not_in_pantry",0))
+                        st.caption("La settimana è stata costruita sul tuo profilo; questi numeri mostrano quanto della spesa può essere coperto dalla Dispensa. Non è un vincolo del piano.")
+                        partials=[r for r in preview.get("rows",[]) if r.get("missing",0)>0 and r.get("stock",0)>0]
+                        if partials:
+                            with st.expander("🔎 Dove la Dispensa copre solo una parte",expanded=False):
+                                for r in partials[:12]:
+                                    st.write(f"• **{r['name']}** · servono {r['required']:g} {r['unit']} · hai {r['stock']:g} {r['unit']} · da comprare {r['missing']:g} {r['unit']}")
                     a,b=st.columns(2)
                     with a:
                         if st.button("✏️ Apri bozza",key="open_next_compact",use_container_width=True,type="primary"):
@@ -4203,7 +4287,15 @@ elif st.session_state.page=="Piano":
                 ep=energy_profile()
                 lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days", st.session_state.get("out_lunch_days",[])))
                 dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days", st.session_state.get("out_dinner_days",[])))
-                prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Deve essere una SETTIMANA NUOVA e variare chiaramente rispetto al piano attuale. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Mantenimento stimato: {ep['maintenance_est']} kcal/giorno. Target: {ep['target']} kcal/giorno. Obiettivo: {ep['diet_goal']}. Stile: {ep['diet_style']}. Frequenza allenamento prevista: {st.session_state.get('p_training_frequency','non specificata')}. Allergie/intolleranze: {st.session_state.get('p_allergies','nessuna') or 'nessuna'}. Alimenti esclusi: {st.session_state.get('p_excluded_foods','nessuno') or 'nessuno'}. Il piano deve rispettare il target calorico giornaliero. Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena". Nei pasti fuori casa usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche reali. Varia ricette e alimenti rispetto a una settimana standard: non copiare gli stessi pasti in giorni equivalenti. Restituisci SOLO JSON. GIORNI PRANZO FUORI CASA: {', '.join(lunch_days) if lunch_days else 'nessuno'}. GIORNI CENA FUORI CASA: {', '.join(dinner_days) if dinner_days else 'nessuno'}."""
+                pantry_snapshot=pantry_prompt_snapshot()
+                prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Deve essere una SETTIMANA NUOVA e variare chiaramente rispetto al piano attuale. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Mantenimento stimato: {ep['maintenance_est']} kcal/giorno. Target: {ep['target']} kcal/giorno. Obiettivo: {ep['diet_goal']}. Stile: {ep['diet_style']}. Frequenza allenamento prevista: {st.session_state.get('p_training_frequency','non specificata')}. Allergie/intolleranze: {st.session_state.get('p_allergies','nessuna') or 'nessuna'}. Alimenti esclusi: {st.session_state.get('p_excluded_foods','nessuno') or 'nessuno'}. Il piano deve rispettare il target calorico giornaliero.
+
+DISPENSA ATTUALE DELL'UTENTE:
+{pantry_snapshot}
+
+REGOLE DISPENSA: la dispensa NON è un vincolo e NON deve determinare da sola la dieta. Costruisci prima una settimana nutrizionalmente coerente con profilo, obiettivo, stile, preferenze ed esclusioni. Poi, quando è sensato e compatibile con il pasto, PRIVILEGIA gli alimenti già presenti in dispensa per ridurre sprechi e acquisti. Non inserire un alimento solo perché è in dispensa se non è adatto al piano. Non eliminare varietà e non trasformare la settimana in una dieta composta solo dagli alimenti già disponibili. Usa i nomi degli alimenti presenti in dispensa in modo il più possibile identico per permettere a MyDiet di riconoscere correttamente le quantità.
+
+Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena". Nei pasti fuori casa usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche reali. Varia ricette e alimenti rispetto a una settimana standard: non copiare gli stessi pasti in giorni equivalenti. Restituisci SOLO JSON. GIORNI PRANZO FUORI CASA: {', '.join(lunch_days) if lunch_days else 'nessuno'}. GIORNI CENA FUORI CASA: {', '.join(dinner_days) if dinner_days else 'nessuno'}."""
                 with st.spinner("🤖 Sto generando il piano…"):
                     raw=gemini_interaction(prompt); out=normalize_ai_plan(raw)
                 st.session_state.next_meal_plan=out
@@ -4213,6 +4305,8 @@ elif st.session_state.page=="Piano":
                 st.session_state.next_out_dinner_days=copy.deepcopy(dinner_days)
                 st.session_state.next_mensa_menus={}
                 st.session_state.plan_view_mode="current"
+                preview=pantry_week_preview(out)
+                st.session_state.next_pantry_preview=preview
                 st.session_state.plan_generation_status="success"
                 st.session_state.plan_generation_message=f"✓ Bozza {week_label(next_start.isoformat())} pronta. Il piano attuale non è stato modificato."
                 st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
