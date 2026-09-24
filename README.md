@@ -1,31 +1,29 @@
-# MyDietApp V94.1 — Prima settimana intelligente (OpenAI only)
+# MyDietApp V95.1 — AI Provider Layer
 
-Base: V93.5 Inventario + Dispensa unificata.
+V95.1 introduces a provider-neutral AI Engine.
 
-## AI
-MyDiet usa esclusivamente l'OpenAI Responses API per le funzioni AI. V95 introduce un unico AI Engine con modello configurabile, telemetry DEV, stima costi e cache delle risposte.
+## AI provider
 
-Secrets Streamlit richiesti:
-- `OPENAI_API_KEY`
-- opzionale `OPENAI_MODEL` (default: `gpt-5.6-luna`)
-
-La generazione della prossima settimana usa la Dispensa come informazione di ottimizzazione, non come vincolo della dieta.
-- Il piano resta guidato da profilo, obiettivo, stile, allergie/esclusioni e target calorico.
-- Gli alimenti già presenti vengono privilegiati quando sensati e compatibili.
-- Dopo la generazione viene mostrata una preview di copertura della Dispensa.
-- La lista della spesa continua a calcolare il fabbisogno meno lo stock reale.
-
-
-## V95 · AI Engine
-
-Secrets opzionali:
+Set `AI_PROVIDER` in Streamlit Secrets:
 
 ```toml
-OPENAI_API_KEY = "sk-..."
-OPENAI_MODEL = "gpt-5.6-luna"
-OPENAI_DEV_MODE = "true"
+AI_PROVIDER = "gemini"
+GEMINI_API_KEY = "..."
+GEMINI_MODEL = "gemini-3.8-flash"
 ```
 
-`OPENAI_DEV_MODE=true` mostra solo in sviluppo un pannello con chiamate, token, latenza e costo stimato della sessione. Non è necessario per l'utente finale.
+For OpenAI:
 
-L'app passa tutte le richieste AI attraverso `openai_interaction()`. La generazione della settimana usa reasoning `low`; le funzioni AI leggere usano `low` o `minimal`. Il consiglio del prossimo pasto è cacheato per contesto nella sessione.
+```toml
+AI_PROVIDER = "openai"
+OPENAI_API_KEY = "..."
+OPENAI_MODEL = "gpt-5.6-luna"
+```
+
+The rest of the app uses one gateway function, so switching provider does not require changing the feature code.
+
+`OPENAI_DEV_MODE = "true"` enables the existing developer telemetry panel.
+
+## Development recommendation
+
+Gemini 3.8 Flash currently has a Free Tier in the Gemini API, so it can be used for development without adding OpenAI API credit. OpenAI remains available as a separate provider for future testing/production decisions.

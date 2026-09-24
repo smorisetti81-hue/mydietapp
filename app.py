@@ -87,21 +87,36 @@ button,[data-testid="stBaseButton-secondary"],[data-testid="stBaseButton-primary
 st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", initial_sidebar_state="collapsed")
 st.markdown(UI_BETA_CSS, unsafe_allow_html=True)
 # ============================================================
-# MyDiet AI Engine v1 (V95)
-# One provider, one gateway, configurable model, usage telemetry and cache.
-# The rest of the app must never call the OpenAI client directly.
+# MyDiet AI Engine v1.1 (V95.1)
+# Provider-neutral gateway: Gemini for DEV/free-tier, OpenAI for future PROD.
+# The rest of the app must never call either provider directly.
 # ============================================================
-OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-5.6-luna")
-_openai_api_key = st.secrets.get("OPENAI_API_KEY")
-openai_client = OpenAI(api_key=_openai_api_key) if _openai_api_key else None
-AI_DEV_MODE = str(st.secrets.get("OPENAI_DEV_MODE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+AI_PROVIDER = str(st.secrets.get("AI_PROVIDER", "gemini")).strip().lower()
+if AI_PROVIDER not in {"gemini", "openai"}:
+    AI_PROVIDER = "gemini"
 
-# USD / 1M tokens. Keep this table isolated so a future model change does not
-# require touching the application logic. These are estimates for telemetry,
-# not billing statements.
+OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-5.6-luna")
+GEMINI_MODEL = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
+_openai_api_key = st.secrets.get("OPENAI_API_KEY")
+_gemini_api_key = st.secrets.get("GEMINI_API_KEY")
+openai_client = OpenAI(api_key=_openai_api_key) if _openai_api_key else None
+_gemini_client = None
+AI_DEV_MODE = str(st.secrets.get("OPENAI_DEV_MODE", st.secrets.get("AI_DEV_MODE", "false"))).strip().lower() in {"1", "true", "yes", "on"}
+
+# USD / 1M tokens. These are telemetry estimates, not billing statements.
+# Gemini 3.8 Flash currently has a free tier; the paid prices below are kept
+# so the same engine can estimate cost if a paid Gemini project is used later.
 AI_PRICING_USD_PER_MILLION = {
-    "gpt-5.6-luna": {"input": 0.20, "cached_input": 0.02, "output": 1.20},
+    "openai": {
+        "gpt-5.6-luna": {"input": 0.20, "cached_input": 0.02, "output": 1.20},
+    },
+    "gemini": {
+        "gemini-3.8-flash": {"input": 0.75, "cached_input": 0.075, "output": 3.75},
+        "gemini-3.7-flash": {"input": 0.75, "cached_input": 0.075, "output": 3.75},
+        "gemini-3.6-flash": {"input": 0.75, "cached_input": 0.075, "output": 3.75},
+    },
 }
+
 
 def _ai_usage_init():
     return st.session_state.setdefault("ai_usage", {
@@ -110,32 +125,99 @@ def _ai_usage_init():
         "last_call": None,
     })
 
-def _ai_usage_record(feature, response, elapsed_ms):
+
+def _ai_usage_record(provider, model, feature, input_tokens=0, cached_tokens=0,
+                     output_tokens=0, elapsed_ms=0):
     usage = _ai_usage_init()
-    u = getattr(response, "usage", None)
-    input_tokens = int(getattr(u, "input_tokens", 0) or 0) if u else 0
-    output_tokens = int(getattr(u, "output_tokens", 0) or 0) if u else 0
-    details = getattr(u, "input_tokens_details", None) if u else None
-    cached_tokens = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
-    prices = AI_PRICING_USD_PER_MILLION.get(OPENAI_MODEL, {})
-    uncached_input = max(0, input_tokens - cached_tokens)
-    estimated = (uncached_input * prices.get("input", 0) + cached_tokens * prices.get("cached_input", prices.get("input", 0)) + output_tokens * prices.get("output", 0)) / 1_000_000
+    prices = AI_PRICING_USD_PER_MILLION.get(provider, {}).get(model, {})
+    uncached_input = max(0, int(input_tokens) - int(cached_tokens))
+    estimated = (
+        uncached_input * prices.get("input", 0)
+        + int(cached_tokens) * prices.get("cached_input", prices.get("input", 0))
+        + int(output_tokens) * prices.get("output", 0)
+    ) / 1_000_000
     usage["calls"] += 1
-    usage["input_tokens"] += input_tokens
-    usage["cached_input_tokens"] += cached_tokens
-    usage["output_tokens"] += output_tokens
+    usage["input_tokens"] += int(input_tokens)
+    usage["cached_input_tokens"] += int(cached_tokens)
+    usage["output_tokens"] += int(output_tokens)
     usage["estimated_usd"] += estimated
-    usage["last_call"] = {"feature": feature, "model": OPENAI_MODEL, "input_tokens": input_tokens, "cached_input_tokens": cached_tokens, "output_tokens": output_tokens, "estimated_usd": estimated, "elapsed_ms": int(elapsed_ms)}
-    by = usage["by_feature"].setdefault(feature, {"calls": 0, "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "estimated_usd": 0.0})
+    usage["last_call"] = {
+        "feature": feature, "provider": provider, "model": model,
+        "input_tokens": int(input_tokens), "cached_input_tokens": int(cached_tokens),
+        "output_tokens": int(output_tokens), "estimated_usd": estimated,
+        "elapsed_ms": int(elapsed_ms),
+    }
+    by = usage["by_feature"].setdefault(feature, {
+        "calls": 0, "input_tokens": 0, "cached_input_tokens": 0,
+        "output_tokens": 0, "estimated_usd": 0.0,
+    })
     by["calls"] += 1
-    by["input_tokens"] += input_tokens
-    by["cached_input_tokens"] += cached_tokens
-    by["output_tokens"] += output_tokens
+    by["input_tokens"] += int(input_tokens)
+    by["cached_input_tokens"] += int(cached_tokens)
+    by["output_tokens"] += int(output_tokens)
     by["estimated_usd"] += estimated
 
 
-def openai_interaction(prompt, image=None, thinking_level=None, feature="general"):
-    """Single gateway for every MyDiet AI call. Records usage and latency."""
+def _gemini_interaction(prompt, image=None, thinking_level=None, feature="general"):
+    """Gemini adapter. Lazy-imports the SDK so OpenAI-only deployments do not need it at runtime."""
+    global _gemini_client
+    import time
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise RuntimeError("Dipendenza Gemini mancante. Installa google-genai oppure usa AI_PROVIDER='openai'.") from exc
+    if not _gemini_api_key:
+        raise RuntimeError("GEMINI_API_KEY non configurata. Aggiungila nei Secrets di Streamlit.")
+    if _gemini_client is None:
+        _gemini_client = genai.Client(api_key=_gemini_api_key)
+
+    # Gemini 3.x supports low/medium/high; minimal is not supported by 3.7/3.8.
+    level = {None: None, "minimal": "low", "low": "low", "medium": "medium", "high": "high"}.get(thinking_level, "low")
+    config_kwargs = {}
+    if level:
+        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=level)
+
+    contents = [prompt]
+    if image is not None:
+        if hasattr(image, "getvalue"):
+            image_bytes = image.getvalue()
+            mime_type = getattr(image, "type", None) or "image/jpeg"
+            try:
+                image_obj = Image.open(io.BytesIO(image_bytes))
+            except Exception:
+                image_obj = image
+        else:
+            image_obj = image
+        contents.append(image_obj)
+
+    started = time.perf_counter()
+    try:
+        response = _gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(**config_kwargs) if config_kwargs else None,
+        )
+    except Exception:
+        st.session_state["ai_usage"]["errors"] += 1
+        raise
+    elapsed_ms = (time.perf_counter() - started) * 1000
+
+    meta = getattr(response, "usage_metadata", None)
+    input_tokens = int(getattr(meta, "prompt_token_count", 0) or 0) if meta else 0
+    output_tokens = int(getattr(meta, "candidates_token_count", 0) or 0) if meta else 0
+    cached_tokens = int(getattr(meta, "cached_content_token_count", 0) or 0) if meta else 0
+    _ai_usage_record("gemini", GEMINI_MODEL, feature, input_tokens, cached_tokens, output_tokens, elapsed_ms)
+
+    text = getattr(response, "text", None)
+    if not text:
+        st.session_state["ai_usage"]["errors"] += 1
+        raise RuntimeError("Gemini non ha restituito testo.")
+    return text.strip()
+
+
+def _openai_interaction(prompt, image=None, thinking_level=None, feature="general"):
+    """OpenAI adapter."""
     import time
     _ai_usage_init()
     if openai_client is None:
@@ -167,7 +249,12 @@ def openai_interaction(prompt, image=None, thinking_level=None, feature="general
         st.session_state["ai_usage"]["errors"] += 1
         raise
     elapsed_ms = (time.perf_counter() - started) * 1000
-    _ai_usage_record(feature, response, elapsed_ms)
+    u = getattr(response, "usage", None)
+    input_tokens = int(getattr(u, "input_tokens", 0) or 0) if u else 0
+    output_tokens = int(getattr(u, "output_tokens", 0) or 0) if u else 0
+    details = getattr(u, "input_tokens_details", None) if u else None
+    cached_tokens = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+    _ai_usage_record("openai", OPENAI_MODEL, feature, input_tokens, cached_tokens, output_tokens, elapsed_ms)
     text = getattr(response, "output_text", None)
     if not text:
         st.session_state["ai_usage"]["errors"] += 1
@@ -175,10 +262,22 @@ def openai_interaction(prompt, image=None, thinking_level=None, feature="general
     return text.strip()
 
 
+def openai_interaction(prompt, image=None, thinking_level=None, feature="general"):
+    """Provider-neutral public gateway kept for backward compatibility.
+
+    Existing MyDiet code continues to call this function; the provider is selected
+    only through AI_PROVIDER, so switching provider does not require changing app features.
+    """
+    _ai_usage_init()
+    if AI_PROVIDER == "gemini":
+        return _gemini_interaction(prompt, image=image, thinking_level=thinking_level, feature=feature)
+    return _openai_interaction(prompt, image=image, thinking_level=thinking_level, feature=feature)
+
+
 def ai_cached_text(cache_namespace, cache_key, producer):
     """Small session cache for expensive AI explanations.
 
-    The cache is intentionally session-scoped in V95; persistence can move to
+    The cache is intentionally session-scoped in V95.1; persistence can move to
     PostgreSQL/backend when MyDiet becomes a multi-user product.
     """
     cache = st.session_state.setdefault("ai_response_cache", {})
@@ -188,8 +287,6 @@ def ai_cached_text(cache_namespace, cache_key, producer):
     value = producer()
     cache[key] = value
     return value
-
-
 
 # ============================================================
 # Smart Shopping live data

@@ -4,3 +4,4 @@ Pillow
 requests
 psycopg[binary]>=3.2,<4
 openai>=1.0.0
+google-genai>=1.0.0
