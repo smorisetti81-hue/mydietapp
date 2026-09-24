@@ -96,7 +96,11 @@ if AI_PROVIDER not in {"gemini", "openai"}:
     AI_PROVIDER = "gemini"
 
 OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-5.6-luna")
-GEMINI_MODEL = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_MODEL = str(st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")).strip()
+# Ordered fallbacks: stable models with Free Tier, configurable via Streamlit Secrets.
+GEMINI_FALLBACK_MODELS = [m.strip() for m in str(st.secrets.get(
+    "GEMINI_FALLBACK_MODELS", "gemini-3.7-flash,gemini-3.6-flash"
+)).split(",") if m.strip() and m.strip() != GEMINI_MODEL]
 _openai_api_key = st.secrets.get("OPENAI_API_KEY")
 _gemini_api_key = st.secrets.get("GEMINI_API_KEY")
 openai_client = OpenAI(api_key=_openai_api_key) if _openai_api_key else None
@@ -191,23 +195,40 @@ def _gemini_interaction(prompt, image=None, thinking_level=None, feature="genera
             image_obj = image
         contents.append(image_obj)
 
+    # The SDK already retries transient failures internally. Only a genuine 503
+    # triggers a switch to another model. Never bypass quota/auth errors (429/401/403).
+    from google.genai import errors as gemini_errors
+    models_to_try = list(dict.fromkeys([GEMINI_MODEL] + GEMINI_FALLBACK_MODELS))
+    response = None
+    used_model = GEMINI_MODEL
     started = time.perf_counter()
-    try:
-        response = _gemini_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(**config_kwargs) if config_kwargs else None,
-        )
-    except Exception:
-        st.session_state["ai_usage"]["errors"] += 1
-        raise
+    for index, model in enumerate(models_to_try):
+        try:
+            response = _gemini_client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(**config_kwargs) if config_kwargs else None,
+            )
+            used_model = model
+            break
+        except gemini_errors.ServerError as exc:
+            st.session_state["ai_usage"]["errors"] += 1
+            code = getattr(exc, "code", None)
+            if str(code) != "503" or index == len(models_to_try) - 1:
+                raise
+            st.session_state.setdefault("ai_fallback_log", []).append(
+                {"from": model, "to": models_to_try[index + 1], "reason": "503 UNAVAILABLE"}
+            )
+        except Exception:
+            st.session_state["ai_usage"]["errors"] += 1
+            raise
     elapsed_ms = (time.perf_counter() - started) * 1000
 
     meta = getattr(response, "usage_metadata", None)
     input_tokens = int(getattr(meta, "prompt_token_count", 0) or 0) if meta else 0
     output_tokens = int(getattr(meta, "candidates_token_count", 0) or 0) if meta else 0
     cached_tokens = int(getattr(meta, "cached_content_token_count", 0) or 0) if meta else 0
-    _ai_usage_record("gemini", GEMINI_MODEL, feature, input_tokens, cached_tokens, output_tokens, elapsed_ms)
+    _ai_usage_record("gemini", used_model, feature, input_tokens, cached_tokens, output_tokens, elapsed_ms)
 
     text = getattr(response, "text", None)
     if not text:
