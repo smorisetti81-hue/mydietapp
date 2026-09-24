@@ -1888,14 +1888,28 @@ def normalize_ai_plan(raw):
         raw=json.loads(raw)
 
     if isinstance(raw, dict):
-        for wrapper in ("piano","plan","days","settimana","weekly_plan"):
-            candidate=raw.get(wrapper)
+        # Accept common top-level wrappers and case variants.
+        wrapper_map={str(k).strip().lower():k for k in raw.keys()}
+        for wrapper in ("piano","plan","days","settimana","weekly_plan","week","meal_plan"):
+            key=wrapper_map.get(wrapper)
+            candidate=raw.get(key) if key is not None else None
             if isinstance(candidate,(dict,list)):
                 raw=candidate
                 break
 
     day_names=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
-    day_aliases={d.lower():d for d in day_names}
+    # AI providers may return Italian, English, accented/unaccented, or
+    # numbered weekday names. Normalize all common variants to MyDiet's
+    # canonical Italian keys before validating completeness.
+    day_aliases={
+        "lunedì":"Lunedì", "lunedi":"Lunedì", "monday":"Lunedì", "mon":"Lunedì", "1":"Lunedì",
+        "martedì":"Martedì", "martedi":"Martedì", "tuesday":"Martedì", "tue":"Martedì", "2":"Martedì",
+        "mercoledì":"Mercoledì", "mercoledi":"Mercoledì", "wednesday":"Mercoledì", "wed":"Mercoledì", "3":"Mercoledì",
+        "giovedì":"Giovedì", "giovedi":"Giovedì", "thursday":"Giovedì", "thu":"Giovedì", "4":"Giovedì",
+        "venerdì":"Venerdì", "venerdi":"Venerdì", "friday":"Venerdì", "fri":"Venerdì", "5":"Venerdì",
+        "sabato":"Sabato", "saturday":"Sabato", "sat":"Sabato", "6":"Sabato",
+        "domenica":"Domenica", "sunday":"Domenica", "sun":"Domenica", "7":"Domenica",
+    }
     out={}
 
     def normalize_meal(meal):
@@ -4483,7 +4497,9 @@ DISPENSA ATTUALE DELL'UTENTE:
 
 REGOLE DISPENSA: la dispensa NON è un vincolo e NON deve determinare da sola la dieta. Costruisci prima una settimana nutrizionalmente coerente con profilo, obiettivo, stile, preferenze ed esclusioni. Poi, quando è sensato e compatibile con il pasto, PRIVILEGIA gli alimenti già presenti in dispensa per ridurre sprechi e acquisti. Non inserire un alimento solo perché è in dispensa se non è adatto al piano. Non eliminare varietà e non trasformare la settimana in una dieta composta solo dagli alimenti già disponibili. Usa i nomi degli alimenti presenti in dispensa in modo il più possibile identico per permettere a MyDiet di riconoscere correttamente le quantità.
 
-Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena". Nei pasti fuori casa usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche reali. Varia ricette e alimenti rispetto a una settimana standard: non copiare gli stessi pasti in giorni equivalenti. Restituisci SOLO JSON. GIORNI PRANZO FUORI CASA: {', '.join(lunch_days) if lunch_days else 'nessuno'}. GIORNI CENA FUORI CASA: {', '.join(dinner_days) if dinner_days else 'nessuno'}."""
+Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena". Nei pasti fuori casa usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche reali. Varia ricette e alimenti rispetto a una settimana standard: non copiare gli stessi pasti in giorni equivalenti.
+
+RESTITUISCI SOLO JSON, senza markdown e senza testo fuori dal JSON. Usa ESATTAMENTE questa struttura concettuale: un oggetto con le 7 chiavi di giorno "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"; ogni giorno deve contenere esattamente le 4 chiavi "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena"; ogni pasto deve avere "name" e "ingredients"; ogni ingrediente deve avere "name", "qty", "unit", "kcal". NON usare chiavi inglesi per i giorni. Devi includere TUTTI E 7 i giorni e TUTTI E 4 i pasti per ciascun giorno. GIORNI PRANZO FUORI CASA: {', '.join(lunch_days) if lunch_days else 'nessuno'}. GIORNI CENA FUORI CASA: {', '.join(dinner_days) if dinner_days else 'nessuno'}."""
                 with st.spinner("🤖 Sto generando il piano…"):
                     raw=openai_interaction(prompt, thinking_level="low", feature="weekly_plan"); out=normalize_ai_plan(raw)
                 st.session_state.next_meal_plan=out
