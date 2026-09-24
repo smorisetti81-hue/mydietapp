@@ -97,9 +97,12 @@ if AI_PROVIDER not in {"gemini", "openai"}:
 
 OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-5.6-luna")
 GEMINI_MODEL = str(st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")).strip()
-# Ordered fallbacks: stable models with Free Tier, configurable via Streamlit Secrets.
+# Ordered fallbacks: stable Gemini models with Free Tier, configurable via Streamlit Secrets.
+# Default chain deliberately spans different model tiers so a capacity spike on
+# the primary 3.8/3.7/3.6 family has additional escape routes.
 GEMINI_FALLBACK_MODELS = [m.strip() for m in str(st.secrets.get(
-    "GEMINI_FALLBACK_MODELS", "gemini-3.7-flash,gemini-3.6-flash"
+    "GEMINI_FALLBACK_MODELS",
+    "gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite"
 )).split(",") if m.strip() and m.strip() != GEMINI_MODEL]
 _openai_api_key = st.secrets.get("OPENAI_API_KEY")
 _gemini_api_key = st.secrets.get("GEMINI_API_KEY")
@@ -197,6 +200,8 @@ def _gemini_interaction(prompt, image=None, thinking_level=None, feature="genera
 
     # The SDK already retries transient failures internally. Only a genuine 503
     # triggers a switch to another model. Never bypass quota/auth errors (429/401/403).
+    # The fallback chain can cross model families/tiers (for example 3.8 -> 3.5 Lite)
+    # to reduce the chance that a capacity spike affects every attempt.
     from google.genai import errors as gemini_errors
     models_to_try = list(dict.fromkeys([GEMINI_MODEL] + GEMINI_FALLBACK_MODELS))
     response = None
