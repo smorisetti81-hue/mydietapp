@@ -1786,10 +1786,11 @@ def set_mensa_menu(day, meal_name, result_text, analyzed_at=None):
     }
 
 def save_next_editor_context():
+    """Persist the currently edited draft without aliasing it to the active plan."""
     if not st.session_state.get("_plan_editor_next"):
         return
-    st.session_state.next_meal_plan=st.session_state.meal_plan
-    st.session_state.next_overrides=st.session_state.overrides
+    st.session_state.next_meal_plan=copy.deepcopy(st.session_state.get("meal_plan", {}))
+    st.session_state.next_overrides=copy.deepcopy(st.session_state.get("overrides", {}))
     st.session_state.next_out_lunch_days=copy.deepcopy(st.session_state.get("out_lunch_days", []))
     st.session_state.next_out_dinner_days=copy.deepcopy(st.session_state.get("out_dinner_days", []))
     st.session_state.next_mensa_menus=copy.deepcopy(st.session_state.get("mensa_menus", {}))
@@ -1816,15 +1817,15 @@ def enter_next_plan_editor():
         return False
     if st.session_state.get("_plan_editor_next"):
         return True
-    st.session_state._editor_current_meal_plan=st.session_state.meal_plan
-    st.session_state._editor_current_overrides=st.session_state.overrides
+    st.session_state._editor_current_meal_plan=copy.deepcopy(st.session_state.get("meal_plan", {}))
+    st.session_state._editor_current_overrides=copy.deepcopy(st.session_state.get("overrides", {}))
     st.session_state._editor_current_out_lunch_days=copy.deepcopy(st.session_state.get("out_lunch_days", []))
     st.session_state._editor_current_out_dinner_days=copy.deepcopy(st.session_state.get("out_dinner_days", []))
     st.session_state._editor_current_mensa_menus=copy.deepcopy(st.session_state.get("mensa_menus", {}))
     st.session_state._editor_current_eaten=st.session_state.eaten
     st.session_state._editor_current_registered_meals=st.session_state.registered_meals
-    st.session_state.meal_plan=st.session_state.next_meal_plan
-    st.session_state.overrides=st.session_state.next_overrides
+    st.session_state.meal_plan=copy.deepcopy(st.session_state.next_meal_plan)
+    st.session_state.overrides=copy.deepcopy(st.session_state.next_overrides)
     st.session_state.out_lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days", []))
     st.session_state.out_dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days", []))
     st.session_state.mensa_menus=copy.deepcopy(st.session_state.get("next_mensa_menus", {}))
@@ -1869,29 +1870,57 @@ def maybe_activate_next_plan():
             st.session_state.pop(key,None)
     return True
 
-def confirm_next_plan_activation():
-    """Confirm the prepared next-week draft and make it the active plan now.
+def _draft_validation_errors(plan):
+    """Return precise, user-facing completeness errors for a weekly draft."""
+    errors=[]
+    if not isinstance(plan, dict):
+        return ["la bozza non contiene un piano valido"]
+    for day in _PLAN_DAYS:
+        day_plan=plan.get(day)
+        if not isinstance(day_plan, dict):
+            errors.append(f"{day}: giornata mancante")
+            continue
+        for meal in _PLAN_MEALS:
+            if meal not in day_plan:
+                errors.append(f"{day} → {meal}")
+    extra_days=[d for d in plan.keys() if d not in _PLAN_DAYS]
+    if extra_days:
+        errors.append("giorni non riconosciuti: " + ", ".join(map(str,extra_days)))
+    return errors
 
-    This is an explicit user action: unlike the automatic rollover, it does not
-    wait for the calendar to reach the draft week. The current plan is archived
-    first and the draft is then promoted without losing its edits.
+def confirm_next_plan_activation():
+    """Promote the edited draft only after a complete, validated draft exists.
+
+    A failed validation MUST leave the draft intact and the active plan untouched.
     """
     next_start=st.session_state.get("next_week_start")
-    next_plan=st.session_state.get("next_meal_plan")
-    if not next_start or not _plan_is_complete(next_plan):
+    if not next_start:
+        st.session_state.plan_generation_status="error"
+        st.session_state.plan_generation_message="✕ Nessuna bozza della prossima settimana disponibile."
+        st.session_state.plan_generation_message_week_start=None
         return False
 
-    # Persist the latest edits made while the next-week editor is open.
-    save_next_editor_context()
-    if not _plan_is_complete(st.session_state.get("next_meal_plan")):
+    # While the editor is open, the authoritative draft is the editor's meal_plan.
+    # Save a deep copy before validating so a failure can never destroy the draft.
+    if st.session_state.get("_plan_editor_next"):
+        save_next_editor_context()
+    draft=copy.deepcopy(st.session_state.get("next_meal_plan") or {})
+    errors=_draft_validation_errors(draft)
+    if errors:
+        preview="; ".join(errors[:8])
+        if len(errors)>8:
+            preview += f"; … e altri {len(errors)-8}"
+        st.session_state.plan_generation_status="error"
+        st.session_state.plan_generation_message=f"✕ Impossibile confermare la bozza: {preview}. La bozza è stata mantenuta e il piano attuale non è stato modificato."
+        st.session_state.plan_generation_message_week_start=next_start
         return False
 
     # Return to the real active-week context before archiving it.
     restore_current_plan_context()
     archive_current_plan(reason="Nuovo piano confermato dall'utente")
 
-    # Promote the edited draft.
-    st.session_state.meal_plan=copy.deepcopy(st.session_state.next_meal_plan)
+    # Promote the validated, edited draft.
+    st.session_state.meal_plan=copy.deepcopy(draft)
     st.session_state.plan_week_start=next_start
     st.session_state.overrides=copy.deepcopy(st.session_state.get("next_overrides", {}) or {})
     st.session_state.out_lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days", []))
@@ -2022,9 +2051,17 @@ def normalize_ai_plan(raw):
             if not canonical or not isinstance(raw_meals,dict):
                 continue
             out[canonical]={}
+            meal_aliases={
+                "☕ colazione":"☕ Colazione", "colazione":"☕ Colazione", "breakfast":"☕ Colazione",
+                "🍎 spuntino":"🍎 Spuntino", "spuntino":"🍎 Spuntino", "snack":"🍎 Spuntino",
+                "🍽️ pranzo":"🍽️ Pranzo", "🍽 pranzo":"🍽️ Pranzo", "pranzo":"🍽️ Pranzo", "lunch":"🍽️ Pranzo",
+                "🌙 cena":"🌙 Cena", "cena":"🌙 Cena", "dinner":"🌙 Cena",
+            }
             for mn,m in raw_meals.items():
                 if isinstance(m,dict):
-                    out[canonical][str(mn)]=normalize_meal(m)
+                    raw_mn=str(mn).strip()
+                    canonical_meal=meal_aliases.get(raw_mn.lower(), raw_mn)
+                    out[canonical][canonical_meal]=normalize_meal(m)
 
     elif isinstance(raw,list):
         for entry in raw:
@@ -2034,7 +2071,13 @@ def normalize_ai_plan(raw):
             canonical=day_aliases.get(str(raw_day).strip().lower()) if raw_day else None
             raw_meals=entry.get("meals") or entry.get("pasti") or entry.get("plan")
             if canonical and isinstance(raw_meals,dict):
-                out[canonical]={str(mn):normalize_meal(m) for mn,m in raw_meals.items() if isinstance(m,dict)}
+                meal_aliases={
+                    "☕ colazione":"☕ Colazione", "colazione":"☕ Colazione", "breakfast":"☕ Colazione",
+                    "🍎 spuntino":"🍎 Spuntino", "spuntino":"🍎 Spuntino", "snack":"🍎 Spuntino",
+                    "🍽️ pranzo":"🍽️ Pranzo", "🍽 pranzo":"🍽️ Pranzo", "pranzo":"🍽️ Pranzo", "lunch":"🍽️ Pranzo",
+                    "🌙 cena":"🌙 Cena", "cena":"🌙 Cena", "dinner":"🌙 Cena",
+                }
+                out[canonical]={meal_aliases.get(str(mn).strip().lower(), str(mn).strip()):normalize_meal(m) for mn,m in raw_meals.items() if isinstance(m,dict)}
             elif canonical:
                 meal_map={}
                 labels={
@@ -2063,8 +2106,9 @@ def normalize_ai_plan(raw):
         for mn,m in out[day].items():
             if mn not in normalized_day:
                 normalized_day[mn]=m
-        if len(normalized_day)<4:
-            raise ValueError(f"Il giorno {day} non contiene tutti i 4 pasti previsti.")
+        missing_meals=[m for m in meal_order if m not in normalized_day]
+        if missing_meals:
+            raise ValueError(f"Il giorno {day} non contiene tutti i 4 pasti previsti. Mancano: {', '.join(missing_meals)}")
         out[day]=normalized_day
 
     return out
@@ -4567,6 +4611,10 @@ elif st.session_state.page=="Piano":
         if st.session_state.pop("_force_plan_next_view",False) and has_next:
             enter_next_plan_editor(); st.session_state.plan_view_mode="next"; st.session_state.plan_edit_meal=None; _mydiet_rerun()
 
+        if not has_next and st.session_state.get("plan_generation_status")=="success" and st.session_state.get("plan_generation_message_week_start") not in (None, current_start):
+            st.session_state.plan_generation_status=None
+            st.session_state.plan_generation_message=None
+            st.session_state.plan_generation_message_week_start=None
         if st.session_state.plan_generation_status=="running":
             st.info("🤖 Sto generando la bozza…")
         elif st.session_state.plan_generation_status=="success" and st.session_state.plan_generation_message:
@@ -4605,7 +4653,10 @@ Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "�
 RESTITUISCI SOLO JSON, senza markdown e senza testo fuori dal JSON. Usa ESATTAMENTE questa struttura concettuale: un oggetto con le 7 chiavi di giorno "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"; ogni giorno deve contenere esattamente le 4 chiavi "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena"; ogni pasto deve avere "name" e "ingredients"; ogni ingrediente deve avere "name", "qty", "unit", "kcal". NON usare chiavi inglesi per i giorni. Devi includere TUTTI E 7 i giorni e TUTTI E 4 i pasti per ciascun giorno. GIORNI PRANZO FUORI CASA: {', '.join(lunch_days) if lunch_days else 'nessuno'}. GIORNI CENA FUORI CASA: {', '.join(dinner_days) if dinner_days else 'nessuno'}."""
                 with st.spinner("🤖 Sto generando il piano…"):
                     raw=openai_interaction(prompt, thinking_level="low", feature="weekly_plan"); out=normalize_ai_plan(raw)
-                st.session_state.next_meal_plan=out
+                draft_errors=_draft_validation_errors(out)
+                if draft_errors:
+                    raise ValueError("L'AI ha restituito una bozza incompleta: " + "; ".join(draft_errors[:8]))
+                st.session_state.next_meal_plan=copy.deepcopy(out)
                 st.session_state.next_overrides={}
                 st.session_state.next_week_start=next_start.isoformat()
                 st.session_state.next_out_lunch_days=copy.deepcopy(lunch_days)
