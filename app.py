@@ -1786,7 +1786,12 @@ def set_mensa_menu(day, meal_name, result_text, analyzed_at=None):
     }
 
 def save_next_editor_context():
-    """Persist the currently edited draft without aliasing it to the active plan."""
+    """Persist the currently edited draft without aliasing it to the active plan.
+
+    The draft is also marked dirty so the durable PostgreSQL state is refreshed
+    at the end of the current render. This prevents a later session restore from
+    replacing a valid draft with an older DB snapshot.
+    """
     if not st.session_state.get("_plan_editor_next"):
         return
     st.session_state.next_meal_plan=copy.deepcopy(st.session_state.get("meal_plan", {}))
@@ -1794,6 +1799,7 @@ def save_next_editor_context():
     st.session_state.next_out_lunch_days=copy.deepcopy(st.session_state.get("out_lunch_days", []))
     st.session_state.next_out_dinner_days=copy.deepcopy(st.session_state.get("out_dinner_days", []))
     st.session_state.next_mensa_menus=copy.deepcopy(st.session_state.get("mensa_menus", {}))
+    st.session_state["_next_draft_dirty"] = True
 
 def restore_current_plan_context():
     if not st.session_state.get("_plan_editor_next"):
@@ -4540,7 +4546,10 @@ elif st.session_state.page=="Piano":
                     if confirm_next_plan_activation():
                         _mydiet_rerun()
                     else:
-                        st.error("Impossibile confermare la bozza: il piano non è completo.")
+                        # confirm_next_plan_activation() already stores the
+                        # precise validation message and deliberately preserves
+                        # the draft. Do not overwrite it with a generic error.
+                        st.error(st.session_state.get("plan_generation_message") or "Impossibile confermare la bozza.")
             with c_cancel:
                 if st.button("↩️ Torna al piano attuale", key="cancel_next_plan", use_container_width=True):
                     save_next_editor_context()
@@ -4665,6 +4674,13 @@ RESTITUISCI SOLO JSON, senza markdown e senza testo fuori dal JSON. Usa ESATTAME
                 st.session_state.plan_view_mode="current"
                 preview=pantry_week_preview(out)
                 st.session_state.next_pantry_preview=preview
+                st.session_state["_next_draft_dirty"] = False
+                # Persist the newly generated draft immediately. The active plan
+                # remains untouched, but the draft must survive a Streamlit
+                # session refresh/recreation and must not be replaced by an
+                # older PostgreSQL snapshot.
+                _db_save_plan_state()
+                _persist_app_state()
                 st.session_state.plan_generation_status="success"
                 st.session_state.plan_generation_message=f"✓ Bozza {week_label(next_start.isoformat())} pronta. Il piano attuale non è stato modificato."
                 st.session_state.plan_generation_message_week_start=next_start.isoformat()
@@ -4846,6 +4862,9 @@ RESTITUISCI SOLO JSON, senza markdown e senza testo fuori dal JSON. Usa ESATTAME
 
         if editing_next:
             save_next_editor_context()
+            if st.session_state.pop("_next_draft_dirty", False):
+                _db_save_plan_state()
+                _persist_app_state()
 
 # V90: stabilization — weekly rollover, canonical meal kcal rendering, pantry units/steps.
 # ---------------- Dispensa ----------------
