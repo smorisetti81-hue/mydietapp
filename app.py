@@ -202,6 +202,19 @@ def _gemini_interaction(prompt, image=None, thinking_level=None, feature="genera
     response = None
     used_model = GEMINI_MODEL
     started = time.perf_counter()
+    failures = []
+
+    def _is_gemini_503(exc):
+        # Different google-genai SDK versions can expose a 503 as ServerError,
+        # ClientError, or a generic exception. Do not let the fallback depend
+        # on one exact SDK exception class.
+        code = getattr(exc, "code", None)
+        status = getattr(exc, "status", None)
+        msg = str(exc)
+        return (str(code) == "503" or str(status) == "503" or
+                "503" in msg or "UNAVAILABLE" in msg.upper() or
+                "currently experiencing high demand" in msg.lower())
+
     for index, model in enumerate(models_to_try):
         try:
             response = _gemini_client.models.generate_content(
@@ -211,17 +224,26 @@ def _gemini_interaction(prompt, image=None, thinking_level=None, feature="genera
             )
             used_model = model
             break
-        except gemini_errors.ServerError as exc:
+        except Exception as exc:
             st.session_state["ai_usage"]["errors"] += 1
-            code = getattr(exc, "code", None)
-            if str(code) != "503" or index == len(models_to_try) - 1:
+            if not _is_gemini_503(exc):
                 raise
+
+            failures.append({"model": model, "error": str(exc)})
+            if index == len(models_to_try) - 1:
+                # Preserve a useful 503 message while showing which models
+                # were actually attempted. This makes deployment diagnosis
+                # much easier than exposing only the first failed attempt.
+                attempted = ", ".join(x["model"] for x in failures)
+                raise RuntimeError(
+                    f"Gemini 503 UNAVAILABLE su tutti i modelli configurati ({attempted}). "
+                    "Il servizio/modello è temporaneamente non disponibile; riprova tra poco."
+                ) from exc
+
+            next_model = models_to_try[index + 1]
             st.session_state.setdefault("ai_fallback_log", []).append(
-                {"from": model, "to": models_to_try[index + 1], "reason": "503 UNAVAILABLE"}
+                {"from": model, "to": next_model, "reason": "503 UNAVAILABLE"}
             )
-        except Exception:
-            st.session_state["ai_usage"]["errors"] += 1
-            raise
     elapsed_ms = (time.perf_counter() - started) * 1000
 
     meta = getattr(response, "usage_metadata", None)
