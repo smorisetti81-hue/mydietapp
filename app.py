@@ -1208,7 +1208,7 @@ _defaults = {
     "next_meal_plan":None, "next_overrides":{}, "next_week_start":None,
     "next_out_lunch_days":[], "next_out_dinner_days":[],
     "mensa_menus":{}, "next_mensa_menus":{},
-    "plan_generation_status":"idle", "plan_generation_message":"", "plan_generation_time":None,
+    "plan_generation_status":"idle", "plan_generation_message":"", "plan_generation_message_week_start":None, "plan_generation_time":None,
     "plan_editor_selection":"current", "_plan_editor_next":False, "plan_edit_meal":None,
     "pantry":{}, "shopping_checked":{}, "pantry_consumed_by_meal":{}, "smart_food_advice":None, "registered_meals":{}, "shopping_source":"Tutte", "shopping_strategy":"⚖️ Qualità / prezzo", "shopping_radius":5,
     "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None, "food_kcal_cache":{}, "profile_setup_complete":False, "profile_change_summary":[], "plan_needs_regeneration":False, "manual_activity_today":{}, "profile_change_time":None, "pantry_onboarding_complete":True, "pantry_onboarding_custom_items":[]
@@ -1241,7 +1241,7 @@ _PERSIST_KEYS = [
     "next_meal_plan", "next_overrides", "next_week_start",
     "next_out_lunch_days", "next_out_dinner_days", "mensa_menus",
     "next_mensa_menus", "plan_generation_status", "plan_generation_message",
-    "plan_generation_time", "plan_editor_selection", "_plan_editor_next",
+    "plan_generation_message_week_start", "plan_generation_time", "plan_editor_selection", "_plan_editor_next",
     "plan_edit_meal", "pantry", "shopping_checked", "pantry_consumed_by_meal",
     "smart_food_advice", "registered_meals", "shopping_source",
     "shopping_strategy", "shopping_radius", "shopping_cart_mode",
@@ -1868,6 +1868,59 @@ def maybe_activate_next_plan():
         if str(key).startswith("eat_"):
             st.session_state.pop(key,None)
     return True
+
+def confirm_next_plan_activation():
+    """Confirm the prepared next-week draft and make it the active plan now.
+
+    This is an explicit user action: unlike the automatic rollover, it does not
+    wait for the calendar to reach the draft week. The current plan is archived
+    first and the draft is then promoted without losing its edits.
+    """
+    next_start=st.session_state.get("next_week_start")
+    next_plan=st.session_state.get("next_meal_plan")
+    if not next_start or not _plan_is_complete(next_plan):
+        return False
+
+    # Persist the latest edits made while the next-week editor is open.
+    save_next_editor_context()
+    if not _plan_is_complete(st.session_state.get("next_meal_plan")):
+        return False
+
+    # Return to the real active-week context before archiving it.
+    restore_current_plan_context()
+    archive_current_plan(reason="Nuovo piano confermato dall'utente")
+
+    # Promote the edited draft.
+    st.session_state.meal_plan=copy.deepcopy(st.session_state.next_meal_plan)
+    st.session_state.plan_week_start=next_start
+    st.session_state.overrides=copy.deepcopy(st.session_state.get("next_overrides", {}) or {})
+    st.session_state.out_lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days", []))
+    st.session_state.out_dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days", []))
+    st.session_state.mensa_menus=copy.deepcopy(st.session_state.get("next_mensa_menus", {}))
+
+    # Clear the draft only after promotion is complete.
+    st.session_state.next_meal_plan=None
+    st.session_state.next_overrides={}
+    st.session_state.next_week_start=None
+    st.session_state.next_out_lunch_days=[]
+    st.session_state.next_out_dinner_days=[]
+    st.session_state.next_mensa_menus={}
+    st.session_state.next_pantry_preview=None
+    st.session_state.eaten={}
+    st.session_state.registered_meals={}
+    st.session_state._plan_editor_next=False
+    st.session_state.plan_view_mode="current"
+    st.session_state.plan_edit_meal=None
+    st.session_state.plan_generation_status="success"
+    st.session_state.plan_generation_message=f"✓ Piano {week_label(next_start)} confermato e attivato. Il piano precedente è stato archiviato nello Storico."
+    st.session_state.plan_generation_message_week_start=next_start
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("eat_"):
+            st.session_state.pop(key,None)
+    _db_save_plan_state()
+    _persist_app_state()
+    return True
+
 
 def maybe_rollover_to_current_week():
     """Promote an arrived next-week draft when the calendar has moved on.
@@ -4436,6 +4489,21 @@ elif st.session_state.page=="Piano":
         editing_next=(new_view=="next")
         if editing_next:
             st.markdown(f"<div class='plan-mode-banner'><div class='small'>BOZZA · NON ATTIVA</div><strong>✨ Prossima settimana</strong><div class='muted'>{week_label(next_start)}</div></div>",unsafe_allow_html=True)
+            st.info("✏️ Stai modificando una bozza separata. Il piano attuale non viene modificato.")
+            c_confirm, c_cancel = st.columns(2)
+            with c_confirm:
+                if st.button("✅ Conferma e attiva settimana", key="confirm_next_plan", use_container_width=True, type="primary"):
+                    if confirm_next_plan_activation():
+                        _mydiet_rerun()
+                    else:
+                        st.error("Impossibile confermare la bozza: il piano non è completo.")
+            with c_cancel:
+                if st.button("↩️ Torna al piano attuale", key="cancel_next_plan", use_container_width=True):
+                    save_next_editor_context()
+                    restore_current_plan_context()
+                    st.session_state.plan_view_mode="current"
+                    st.session_state.plan_edit_meal=None
+                    _mydiet_rerun()
         else:
             st.markdown(f"<div class='plan-mode-banner'><div class='small'>PIANO ATTIVO</div><strong>📌 Questa settimana</strong><div class='muted'>{week_label(current_start)}</div></div>",unsafe_allow_html=True)
 
@@ -4502,7 +4570,14 @@ elif st.session_state.page=="Piano":
         if st.session_state.plan_generation_status=="running":
             st.info("🤖 Sto generando la bozza…")
         elif st.session_state.plan_generation_status=="success" and st.session_state.plan_generation_message:
-            st.success(st.session_state.plan_generation_message)
+            _msg_week=st.session_state.get("plan_generation_message_week_start")
+            _show_generation_message=(
+                st.session_state.get("plan_generation_message_week_start") is None
+                or (st.session_state.get("next_week_start") and _msg_week == st.session_state.get("next_week_start"))
+                or (st.session_state.get("plan_week_start") and _msg_week == st.session_state.get("plan_week_start"))
+            )
+            if _show_generation_message:
+                st.success(st.session_state.plan_generation_message)
         elif st.session_state.plan_generation_status=="error":
             st.error(st.session_state.plan_generation_message or "La generazione non è riuscita.")
 
@@ -4511,6 +4586,7 @@ elif st.session_state.page=="Piano":
             next_start=(date.fromisoformat(current_start)+timedelta(days=7)) if current_start else (date.today()+timedelta(days=7))
             st.session_state.plan_generation_status="running"
             st.session_state.plan_generation_message="Sto generando una nuova settimana…"
+            st.session_state.plan_generation_message_week_start=next_start.isoformat()
             st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
             try:
                 ep=energy_profile()
@@ -4540,6 +4616,7 @@ RESTITUISCI SOLO JSON, senza markdown e senza testo fuori dal JSON. Usa ESATTAME
                 st.session_state.next_pantry_preview=preview
                 st.session_state.plan_generation_status="success"
                 st.session_state.plan_generation_message=f"✓ Bozza {week_label(next_start.isoformat())} pronta. Il piano attuale non è stato modificato."
+                st.session_state.plan_generation_message_week_start=next_start.isoformat()
                 st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
                 st.session_state.eaten={}; st.session_state.registered_meals={}
                 _mydiet_rerun()
