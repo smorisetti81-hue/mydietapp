@@ -4368,20 +4368,7 @@ if st.session_state.page=="Home":
     st.progress(pct)
     st.markdown('</div>',unsafe_allow_html=True)
 
-    # Personal-trainer placeholder: deterministic for now, ready to become AI-driven later.
-    trainer_lines=[]
-    if next_meal:
-        nm=next_meal.get("_meal_name") or "il prossimo pasto"
-        trainer_lines.append(f"Il prossimo passo è semplice: completa <b>{nm.split(' ',1)[-1]}</b> seguendo il piano.")
-    else:
-        trainer_lines.append("Hai completato i pasti previsti per oggi. La giornata alimentare è sotto controllo.")
-    tracking_mode=st.session_state.get("p_activity_tracking_mode","🚫 Solo dieta — non monitorare attività")
-    if tracking_mode.startswith("⌚") and b.get("using_observed"):
-        a=activity_summary()
-        trainer_lines.append(f"Oggi MyDiet ha già ricevuto i tuoi dati attività: <b>{a['steps']:,} passi</b>.".replace(",","."))
-    trainer_text=" ".join(trainer_lines)
-    st.markdown(f'''<div class="mydiet-home-section"><div class="mydiet-home-section-title">🤖 Il tuo Personal Trainer</div></div><div class="mydiet-trainer"><div class="mydiet-trainer-head">✨ Oggi con MyDiet</div><div class="mydiet-trainer-title">Un passo alla volta.</div><div class="mydiet-trainer-text">{trainer_text}</div><div class="mydiet-trainer-action">In futuro questa card diventerà il punto di guida intelligente della tua giornata →</div></div>''',unsafe_allow_html=True)
-
+    # V97: Home focuses directly on the next action.
     # Next meal: compact and actionable.
     if next_meal:
         mn=next_meal.get("_meal_name"); meal=st.session_state.meal_plan.get(d,{}).get(mn)
@@ -4400,7 +4387,7 @@ if st.session_state.page=="Home":
 
     # Today's meals: compact list instead of large cards.
     ms=st.session_state.meal_plan.get(d,{})
-    st.markdown('<div class="mydiet-home-section"><div class="mydiet-home-section-title">📋 La tua giornata</div><div class="mydiet-home-section-sub">Pasti previsti</div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="mydiet-home-section"><div class="mydiet-home-section-title">📋 Oggi</div><div class="mydiet-home-section-sub">Pasti previsti</div></div>',unsafe_allow_html=True)
     meal_order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
     ordered_meals=[(mn,ms[mn]) for mn in meal_order if mn in ms]
     for idx,(mn,m) in enumerate(ordered_meals):
@@ -4413,26 +4400,16 @@ if st.session_state.page=="Home":
         if registered and st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True):
             set_meal_registered(d,mn,False); _mydiet_rerun()
 
-    # Hydration: compact, always accessible without dominating the Home.
+    # V97: hydration stays visible, but with simpler wording.
     water=water_today_ml(); goal=water_goal_ml(); wp=min(max(water/max(goal,1),0),1)
-    st.markdown('<div class="mydiet-home-section"><div class="mydiet-home-section-title">💧 Idratazione</div><div class="mydiet-home-section-sub">oggi</div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="mydiet-home-section"><div class="mydiet-home-section-title">💧 Acqua</div></div>',unsafe_allow_html=True)
     with st.container(border=True):
         c1,c2=st.columns([3,1]); c1.markdown(f"**{water/1000:.2f} L** / {goal/1000:.2f} L"); c1.progress(wp)
         with c2:
             if st.button("+ 250 ml",key="water_plus",use_container_width=True,type="primary"):
                 add_water_ml(250); _mydiet_rerun()
 
-    # Activity snapshot: only a compact summary on Home; details stay in Attività.
-    if tracking_mode.startswith("⌚") and b.get("using_observed"):
-        a=activity_summary()
-        st.markdown('<div class="mydiet-home-section"><div class="mydiet-home-section-title">🏃 Oggi</div><div class="mydiet-home-section-sub">attività</div></div>',unsafe_allow_html=True)
-        st.markdown(f'''<div class="mydiet-mini-grid"><div class="mydiet-mini-card"><div class="mydiet-mini-label">👣 Passi</div><div class="mydiet-mini-value">{a['steps']:,}</div><div class="mydiet-mini-sub">Samsung Health</div></div><div class="mydiet-mini-card"><div class="mydiet-mini-label">⚡ Calorie attive</div><div class="mydiet-mini-value">{a['active_calories']:,} kcal</div><div class="mydiet-mini-sub">dati attività</div></div></div>'''.replace(",","."),unsafe_allow_html=True)
-    elif tracking_mode.startswith("✍️"):
-        manual=st.session_state.get("manual_activity_today",{})
-        if manual.get("date")==today():
-            st.markdown('<div class="mydiet-home-section"><div class="mydiet-home-section-title">🏃 Oggi</div><div class="mydiet-home-section-sub">attività manuale</div></div>',unsafe_allow_html=True)
-            st.markdown(f'''<div class="mydiet-mini-grid"><div class="mydiet-mini-card"><div class="mydiet-mini-label">👣 Passi</div><div class="mydiet-mini-value">{int(manual.get('steps',0)):,}</div></div><div class="mydiet-mini-card"><div class="mydiet-mini-label">⚡ Calorie attive</div><div class="mydiet-mini-value">{int(manual.get('active_calories',0)):,} kcal</div></div></div>'''.replace(",","."),unsafe_allow_html=True)
-
+    # V97: activity details live in Attività; Home stays focused.
     # Shopping preview: no invented price/budget; current Smart Shopping remains in Dispensa.
     try:
         shopping_rows=[x for x in shopping_list() if float(x.get("need",0) or 0)>0]
@@ -4440,10 +4417,10 @@ if st.session_state.page=="Home":
         shopping_rows=[]
     st.markdown('<div class="mydiet-home-section"><div class="mydiet-home-section-title">🛒 Spesa della settimana</div><div class="mydiet-home-section-sub">dispensa + piano</div></div>',unsafe_allow_html=True)
     if shopping_rows:
-        st.markdown(f'''<div class="mydiet-shopping"><div class="mydiet-shopping-title">{len(shopping_rows)} prodotti da acquistare</div><div class="mydiet-shopping-meta">La lista viene calcolata dal piano e da ciò che hai già in dispensa.</div></div>''',unsafe_allow_html=True)
+        st.markdown(f'''<div class="mydiet-shopping"><div class="mydiet-shopping-title">{len(shopping_rows)} prodotti da acquistare</div><div class="mydiet-shopping-meta">Calcolata automaticamente dal piano e dalla tua dispensa.</div></div>''',unsafe_allow_html=True)
     else:
         st.markdown('<div class="mydiet-shopping"><div class="mydiet-shopping-title">✓ Dispensa coperta</div><div class="mydiet-shopping-meta">Al momento non risultano prodotti mancanti per il piano.</div></div>',unsafe_allow_html=True)
-    if st.button("🛒 Apri Dispensa e Smart Shopping",key="home_open_shopping",use_container_width=True):
+    if st.button("🛒 Apri spesa",key="home_open_shopping",use_container_width=True):
         st.session_state.page="Dispensa"; _mydiet_rerun()
 
     with st.expander("🍴 Ho mangiato qualcosa fuori dal piano",expanded=False):
