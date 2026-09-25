@@ -1316,6 +1316,15 @@ if not st.session_state.get("_persistent_state_loaded", False):
     _restore_app_state()
     st.session_state["_persistent_state_loaded"] = True
 
+# V98: restore the native Health Connect snapshot AFTER persistent state.
+# The native bridge payload lives in the URL and must win over an older/empty
+# persisted `health` value restored above. This prevents the Activity page from
+# incorrectly returning to "in attesa del Bridge" after a Streamlit session refresh.
+try:
+    _ingest_native_health_bridge()
+except Exception:
+    pass
+
 # ============================================================
 # V86 — PostgreSQL/Supabase durable profile persistence
 # ============================================================
@@ -5304,27 +5313,28 @@ elif st.session_state.page=="Attività":
 
     if native:
         p=h.get("provider",{})
-        bridge_version=p.get("bridge_version") or h.get("native_health_payload",{}).get("bridge_version") or "—"
         last_sync=st.session_state.get("last_sync") or p.get("received_at") or "—"
+        # V98: user-facing status, with technical transport details hidden.
         st.markdown(f"""
         <div class="activity-top">
-          <div class="activity-top-title">⌚ Il tuo smartwatch è collegato</div>
-          <div class="activity-top-sub">MyDiet riceve automaticamente i dati attraverso Health Connect. Non devi inviarli manualmente.</div>
-          <div class="activity-status"><span class="activity-dot ok"></span><b>Sincronizzazione attiva</b><span style="opacity:.55">· ultimo aggiornamento {last_sync}</span></div>
+          <div class="activity-top-title">🟢 Smartwatch collegato</div>
+          <div class="activity-top-sub">MyDiet riceve automaticamente i dati della tua attività.</div>
+          <div class="activity-status"><span class="activity-dot ok"></span><b>Dati sincronizzati</b><span style="opacity:.55">· ultimo aggiornamento {last_sync}</span></div>
         </div>
-        <div class="activity-source-card">
-          <div class="activity-source-title">Samsung Health → Health Connect → MyDiet</div>
-          <div class="activity-source-sub">Fonte produttiva dei dati attività</div>
-          <span class="activity-chip">🟢 Health Connect nativo</span>
-          <span class="activity-chip">Bridge Android {bridge_version}</span>
+        """,unsafe_allow_html=True)
+    elif mode.startswith("⌚"):
+        st.markdown("""
+        <div class="activity-top">
+          <div class="activity-top-title">🟡 Smartwatch in attesa</div>
+          <div class="activity-top-sub">Hai scelto il monitoraggio automatico. MyDiet sta aspettando il primo dato dal tuo smartwatch.</div>
+          <div class="activity-status"><span class="activity-dot warn"></span><b>Nessun dato ricevuto ancora</b></div>
         </div>
         """,unsafe_allow_html=True)
     else:
         st.markdown("""
         <div class="activity-top">
-          <div class="activity-top-title">⌚ Collega i dati del tuo smartwatch</div>
-          <div class="activity-top-sub">Il percorso produttivo è <b>Samsung Health → Health Connect → MyDiet</b>. Una volta attivo, il Bridge Android sincronizza i dati automaticamente.</div>
-          <div class="activity-status"><span class="activity-dot warn"></span><b>In attesa di dati dal Bridge</b><span style="opacity:.55">· nessuno snapshot ricevuto</span></div>
+          <div class="activity-top-title">🏃 Attività</div>
+          <div class="activity-top-sub">Puoi usare MyDiet anche senza collegare uno smartwatch.</div>
         </div>
         """,unsafe_allow_html=True)
 
@@ -5346,8 +5356,8 @@ elif st.session_state.page=="Attività":
 
     # Google Fit is retained only as legacy diagnostics; it is not the productive path.
     if mode.startswith("⌚") and not native:
-        with st.expander("🧪 Diagnostica Google Fit (legacy)",expanded=False):
-            st.caption("Google Fit resta disponibile solo per diagnosi. Per il funzionamento normale di MyDiet usa il Bridge Android + Health Connect.")
+        with st.expander("🔧 Strumenti tecnici",expanded=False):
+            st.caption("Questi strumenti servono solo per la diagnosi. Per il funzionamento normale MyDiet usa Health Connect + Bridge Android.")
             cid=st.secrets.get("GOOGLE_CLIENT_ID"); cs=st.secrets.get("GOOGLE_CLIENT_SECRET"); ru=st.secrets.get("REDIRECT_URI")
             if not cid or not cs or not ru:
                 st.caption("Credenziali Google Fit non configurate: non necessarie per il percorso Health Connect.")
@@ -5430,7 +5440,7 @@ elif st.session_state.page=="Attività":
 
         if native:
             payload=h.get("native_health_payload",{})
-            with st.expander("🔎 Dettagli tecnici della sincronizzazione",expanded=False):
+            with st.expander("🔧 Dettagli tecnici",expanded=False):
                 st.write("**Schema:**",payload.get("schema","—"))
                 st.write("**Bridge:**",payload.get("bridge_version","—"))
                 st.write("**Data:**",payload.get("date","—"))
