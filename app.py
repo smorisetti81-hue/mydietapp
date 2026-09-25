@@ -4488,169 +4488,132 @@ elif st.session_state.page=="Piano":
     has_next=bool(st.session_state.get("next_meal_plan"))
     current_start=st.session_state.plan_week_start
     next_start=st.session_state.get("next_week_start") or ((date.fromisoformat(current_start)+timedelta(days=7)).isoformat() if current_start else (date.today()+timedelta(days=7)).isoformat())
+    editing_next=bool(st.session_state.get("_plan_editor_next",False))
+    new_view="next" if editing_next else "current"
 
-    # The plan page has only two user-facing contexts: active plan and next-week draft.
-    # History remains available as a compact third option.
-    current_label=f"📌 Questa settimana · {week_label(current_start)}"
-    next_label=f"✨ Prossima settimana · {week_label(next_start)}" if has_next else "✨ Prossima settimana · da preparare"
-    history_label="📚 Storico"
-    choices=[current_label,next_label,history_label]
-    default_view=st.session_state.get("plan_view_mode","current")
-    if default_view=="next" and not has_next: default_view="current"
-    view_index={"current":0,"next":1,"history":2}[default_view]
-    selected_view=st.radio("Vista",choices,index=view_index,horizontal=True,key="plan_main_view",label_visibility="collapsed")
-    new_view="next" if selected_view==next_label else ("history" if selected_view==history_label else "current")
-    old_view=st.session_state.get("plan_view_mode","current")
-    if new_view!=old_view:
-        if new_view=="next" and has_next:
-            enter_next_plan_editor()
-        else:
-            restore_current_plan_context()
-        st.session_state.plan_view_mode=new_view
-        st.session_state.plan_edit_meal=None
-        _mydiet_rerun()
-    else:
-        if new_view=="next" and has_next and not st.session_state.get("_plan_editor_next",False):
-            enter_next_plan_editor()
-        elif new_view in ("current","history") and st.session_state.get("_plan_editor_next",False):
-            restore_current_plan_context()
-        st.session_state.plan_view_mode=new_view
-
-    # ---------------- Storico ----------------
-    if new_view=="history":
-        st.markdown("### 📚 Storico")
-        st.caption("Le settimane concluse sono consultabili ma non modificabili.")
-        history_items=sorted(st.session_state.plan_history.values(),key=lambda x:x.get("created_at",""),reverse=True)
-        if not history_items:
-            st.info("Ancora nessun piano storico.")
-        else:
-            for rec in history_items:
-                label=rec.get("label","Settimana")
-                with st.expander(f"📅 {label}",expanded=False):
-                    created=rec.get("created_at","—")[:16].replace("T"," ")
-                    st.caption(f"Archiviato: {created}")
-                    for hday,hms in rec.get("plan",{}).items():
-                        day_kcal=round(sum(float(i.get("kcal",0)) for _,hm in hms.items() for i in hm.get("ingredients",[])))
-                        st.markdown(f"**{hday}** · {day_kcal} kcal")
-                        for hmn,hm in hms.items():
-                            names=", ".join(f"{i.get('name','Alimento')} · {i.get('qty',1):g}{i.get('unit','g')}" for i in hm.get("ingredients",[])) or "Fuori casa"
-                            st.caption(f"{hmn}: {names}")
-    else:
-        editing_next=(new_view=="next")
-        if editing_next:
-            st.markdown(f"<div class='plan-mode-banner'><div class='small'>BOZZA · NON ATTIVA</div><strong>✨ Prossima settimana</strong><div class='muted'>{week_label(next_start)}</div></div>",unsafe_allow_html=True)
-            st.info("✏️ Stai modificando una bozza separata. Il piano attuale non viene modificato.")
-            c_confirm, c_cancel = st.columns(2)
-            with c_confirm:
-                if st.button("✅ Conferma e attiva settimana", key="confirm_next_plan", use_container_width=True, type="primary"):
-                    if confirm_next_plan_activation():
-                        _mydiet_rerun()
-                    else:
-                        # confirm_next_plan_activation() already stores the
-                        # precise validation message and deliberately preserves
-                        # the draft. Do not overwrite it with a generic error.
-                        st.error(st.session_state.get("plan_generation_message") or "Impossibile confermare la bozza.")
-            with c_cancel:
-                if st.button("↩️ Torna al piano attuale", key="cancel_next_plan", use_container_width=True):
-                    save_next_editor_context()
-                    restore_current_plan_context()
-                    st.session_state.plan_view_mode="current"
-                    st.session_state.plan_edit_meal=None
+    # V96 UX: the user sees only two concepts on the main screen:
+    # "Questa settimana" and "Il tuo prossimo piano". Internal concepts such
+    # as draft/activation/history are deliberately kept out of the primary navigation.
+    if editing_next:
+        st.markdown(
+            f"<div class='plan-mode-banner'><div class='small'>IL TUO PROSSIMO PIANO</div><strong>✨ {week_label(next_start)}</strong></div>",
+            unsafe_allow_html=True
+        )
+        st.info("✏️ Puoi modificare il prossimo piano senza cambiare quello che stai usando adesso.")
+        c_confirm,c_cancel=st.columns(2)
+        with c_confirm:
+            if st.button("✅ Conferma questo piano",key="confirm_next_plan",use_container_width=True,type="primary"):
+                if confirm_next_plan_activation():
                     _mydiet_rerun()
-        else:
-            st.markdown(f"<div class='plan-mode-banner'><div class='small'>PIANO ATTIVO</div><strong>📌 Questa settimana</strong><div class='muted'>{week_label(current_start)}</div></div>",unsafe_allow_html=True)
-
-        # Generation/preparation is deliberately compact. Editing starts only after
-        # the user explicitly chooses a week, then a single meal.
-        if not editing_next:
-            # Planning window: encourage users to prepare the following week on Thursday/Friday,
-            # so the meal plan and shopping list are ready before the weekend. This is guidance,
-            # not a hard deadline: the user can prepare the week at any time.
-            today_local = datetime.now(ROME).date()
-            prep_weekday = today_local.weekday()  # Monday=0 ... Sunday=6
-            if not has_next:
-                if prep_weekday in (3, 4):
-                    st.info("💡 **È il momento giusto per preparare la prossima settimana.** Imposta il piano giovedì o venerdì: avrai più tempo per organizzare pasti e spesa.")
-                elif prep_weekday in (5, 6):
-                    st.warning("⏰ **La prossima settimana non è ancora pronta.** Preparala ora per arrivare organizzato alla spesa.")
-            with st.expander(f"✨ Prossima settimana · {week_label(next_start)}",expanded=False):
-                if has_next:
-                    st.success("Bozza pronta · il piano attuale è al sicuro")
-                    preview=st.session_state.get("next_pantry_preview")
-                    if preview:
-                        total=preview.get("fully_covered",0)+preview.get("partial",0)+preview.get("not_in_pantry",0)
-                        st.markdown("### 🏠 Quanto sfrutta quello che hai già")
-                        c1,c2,c3=st.columns(3)
-                        c1.metric("🟢 Già coperti",preview.get("fully_covered",0))
-                        c2.metric("🟡 Parziali",preview.get("partial",0))
-                        c3.metric("🛒 Da comprare",preview.get("not_in_pantry",0))
-                        st.caption("La settimana è stata costruita sul tuo profilo; questi numeri mostrano quanto della spesa può essere coperto dalla Dispensa. Non è un vincolo del piano.")
-                        partials=[r for r in preview.get("rows",[]) if r.get("missing",0)>0 and r.get("stock",0)>0]
-                        if partials:
-                            with st.expander("🔎 Dove la Dispensa copre solo una parte",expanded=False):
-                                for r in partials[:12]:
-                                    st.write(f"• **{r['name']}** · servono {r['required']:g} {r['unit']} · hai {r['stock']:g} {r['unit']} · da comprare {r['missing']:g} {r['unit']}")
-                    a,b=st.columns(2)
-                    with a:
-                        if st.button("✏️ Apri bozza",key="open_next_compact",use_container_width=True,type="primary"):
-                            st.session_state.plan_view_mode="current"
-                            st.session_state._force_plan_next_view=True
-                            _mydiet_rerun()
-                    with b:
-                        if st.button("🔄 Rigenera",key="regen_next_compact",use_container_width=True):
-                            st.session_state.force_next_generation=True; _mydiet_rerun()
                 else:
-                    st.caption("La prossima settimana viene preparata separatamente. Il piano attuale non viene toccato.")
-                    with st.expander("🍴 Pasti fuori casa",expanded=False):
-                        next_lunch_set=set(st.session_state.get("next_out_lunch_days",[]))
-                        next_dinner_set=set(st.session_state.get("next_out_dinner_days",[]))
-                        for od in days_week:
-                            a,b=st.columns(2)
-                            with a:
-                                lunch_on=st.checkbox(f"{od[:3]} · Pranzo",value=od in next_lunch_set,key=f"prep_next_lunch_{od}")
-                            with b:
-                                dinner_on=st.checkbox(f"{od[:3]} · Cena",value=od in next_dinner_set,key=f"prep_next_dinner_{od}")
-                            (next_lunch_set.add if lunch_on else next_lunch_set.discard)(od)
-                            (next_dinner_set.add if dinner_on else next_dinner_set.discard)(od)
-                        st.session_state.next_out_lunch_days=sorted(next_lunch_set,key=days_week.index)
-                        st.session_state.next_out_dinner_days=sorted(next_dinner_set,key=days_week.index)
-                    if st.button("✨ Genera piano della prossima settimana",key="generate_next_compact",use_container_width=True,type="primary"):
-                        st.session_state.force_next_generation=True; _mydiet_rerun()
+                    st.error(st.session_state.get("plan_generation_message") or "Impossibile confermare il piano.")
+        with c_cancel:
+            if st.button("↩️ Torna al piano attuale",key="cancel_next_plan",use_container_width=True):
+                save_next_editor_context()
+                restore_current_plan_context()
+                st.session_state.plan_view_mode="current"
+                st.session_state.plan_edit_meal=None
+                _mydiet_rerun()
+    else:
+        st.markdown(
+            f"<div class='plan-mode-banner'><div class='small'>PIANO ATTUALE</div><strong>📌 Questa settimana</strong><div class='muted'>{week_label(current_start)}</div></div>",
+            unsafe_allow_html=True
+        )
 
-        if st.session_state.pop("_force_plan_next_view",False) and has_next:
-            enter_next_plan_editor(); st.session_state.plan_view_mode="next"; st.session_state.plan_edit_meal=None; _mydiet_rerun()
+        # One clear action for the next week. The technical "generate" wording is
+        # replaced by the user-facing concept "prepara".
+        with st.container(border=True):
+            st.markdown(f"### ✨ Il tuo prossimo piano")
+            st.markdown(f"**{week_label(next_start)}**")
+            if has_next:
+                st.success("Il prossimo piano è pronto. Puoi controllarlo e modificarlo prima di confermarlo.")
+                preview=st.session_state.get("next_pantry_preview") or {}
+                total=preview.get("fully_covered",0)+preview.get("partial",0)+preview.get("not_in_pantry",0)
+                if total:
+                    covered=preview.get("fully_covered",0)
+                    missing=preview.get("not_in_pantry",0)
+                    st.caption(f"🏠 Ho tenuto conto anche della tua Dispensa · {covered} alimenti già coperti · {missing} da acquistare")
+                a,b=st.columns([2.2,1])
+                with a:
+                    if st.button("✏️ Apri e modifica",key="open_next_compact",use_container_width=True,type="primary"):
+                        enter_next_plan_editor()
+                        st.session_state.plan_view_mode="next"
+                        st.session_state.plan_edit_meal=None
+                        _mydiet_rerun()
+                with b:
+                    if st.button("🔄 Rigenera",key="regen_next_compact",use_container_width=True):
+                        st.session_state.force_next_generation=True
+                        _mydiet_rerun()
+            else:
+                st.caption("Non è ancora stato preparato. Quando vuoi, posso organizzare per te pasti e spesa della settimana.")
+                with st.expander("🍴 Pasti fuori casa",expanded=False):
+                    next_lunch_set=set(st.session_state.get("next_out_lunch_days",[]))
+                    next_dinner_set=set(st.session_state.get("next_out_dinner_days",[]))
+                    for od in days_week:
+                        a,b=st.columns(2)
+                        with a:
+                            lunch_on=st.checkbox(f"{od[:3]} · Pranzo",value=od in next_lunch_set,key=f"prep_next_lunch_{od}")
+                        with b:
+                            dinner_on=st.checkbox(f"{od[:3]} · Cena",value=od in next_dinner_set,key=f"prep_next_dinner_{od}")
+                        (next_lunch_set.add if lunch_on else next_lunch_set.discard)(od)
+                        (next_dinner_set.add if dinner_on else next_dinner_set.discard)(od)
+                    st.session_state.next_out_lunch_days=sorted(next_lunch_set,key=days_week.index)
+                    st.session_state.next_out_dinner_days=sorted(next_dinner_set,key=days_week.index)
+                if st.button("✨ Prepara il mio prossimo piano",key="generate_next_compact",use_container_width=True,type="primary"):
+                    st.session_state.force_next_generation=True
+                    _mydiet_rerun()
 
-        if not has_next and st.session_state.get("plan_generation_status")=="success" and st.session_state.get("plan_generation_message_week_start") not in (None, current_start):
-            st.session_state.plan_generation_status=None
-            st.session_state.plan_generation_message=None
-            st.session_state.plan_generation_message_week_start=None
-        if st.session_state.plan_generation_status=="running":
-            st.info("🤖 Sto generando la bozza…")
-        elif st.session_state.plan_generation_status=="success" and st.session_state.plan_generation_message:
-            _msg_week=st.session_state.get("plan_generation_message_week_start")
-            _show_generation_message=(
-                st.session_state.get("plan_generation_message_week_start") is None
-                or (st.session_state.get("next_week_start") and _msg_week == st.session_state.get("next_week_start"))
-                or (st.session_state.get("plan_week_start") and _msg_week == st.session_state.get("plan_week_start"))
-            )
-            if _show_generation_message:
-                st.success(st.session_state.plan_generation_message)
-        elif st.session_state.plan_generation_status=="error":
-            st.error(st.session_state.plan_generation_message or "La generazione non è riuscita.")
+        # Keep history available, but remove it from the primary navigation.
+        with st.expander("📚 Piani passati",expanded=False):
+            st.caption("Le settimane concluse sono consultabili ma non modificabili.")
+            history_items=sorted(st.session_state.plan_history.values(),key=lambda x:x.get("created_at",""),reverse=True)
+            if not history_items:
+                st.info("Ancora nessun piano passato.")
+            else:
+                for rec in history_items:
+                    label=rec.get("label","Settimana")
+                    with st.expander(f"📅 {label}",expanded=False):
+                        created=rec.get("created_at","—")[:16].replace("T"," ")
+                        st.caption(f"Archiviato: {created}")
+                        for hday,hms in rec.get("plan",{}).items():
+                            day_kcal=round(sum(float(i.get("kcal",0)) for _,hm in hms.items() for i in hm.get("ingredients",[])))
+                            st.markdown(f"**{hday}** · {day_kcal} kcal")
+                            for hmn,hm in hms.items():
+                                names=", ".join(f"{i.get('name','Alimento')} · {i.get('qty',1):g}{i.get('unit','g')}" for i in hm.get("ingredients",[])) or "Fuori casa"
+                                st.caption(f"{hmn}: {names}")
 
-        if st.session_state.pop("force_next_generation",False):
-            current_start=st.session_state.plan_week_start
-            next_start=(date.fromisoformat(current_start)+timedelta(days=7)) if current_start else (date.today()+timedelta(days=7))
-            st.session_state.plan_generation_status="running"
-            st.session_state.plan_generation_message="Sto generando una nuova settimana…"
-            st.session_state.plan_generation_message_week_start=next_start.isoformat()
-            st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
-            try:
-                ep=energy_profile()
-                lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days", st.session_state.get("out_lunch_days",[])))
-                dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days", st.session_state.get("out_dinner_days",[])))
-                pantry_snapshot=pantry_prompt_snapshot()
-                prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Deve essere una SETTIMANA NUOVA e variare chiaramente rispetto al piano attuale. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Mantenimento stimato: {ep['maintenance_est']} kcal/giorno. Target: {ep['target']} kcal/giorno. Obiettivo: {ep['diet_goal']}. Stile: {ep['diet_style']}. Frequenza allenamento prevista: {st.session_state.get('p_training_frequency','non specificata')}. Allergie/intolleranze: {st.session_state.get('p_allergies','nessuna') or 'nessuna'}. Alimenti esclusi: {st.session_state.get('p_excluded_foods','nessuno') or 'nessuno'}. Il piano deve rispettare il target calorico giornaliero.
+    if not editing_next and not has_next and st.session_state.get("plan_generation_status")=="success" and st.session_state.get("plan_generation_message_week_start") not in (None,current_start):
+        st.session_state.plan_generation_status=None
+        st.session_state.plan_generation_message=None
+        st.session_state.plan_generation_message_week_start=None
+    if st.session_state.plan_generation_status=="running":
+        st.info("🤖 Sto preparando il tuo prossimo piano…")
+    elif st.session_state.plan_generation_status=="success" and st.session_state.plan_generation_message:
+        _msg_week=st.session_state.get("plan_generation_message_week_start")
+        _show_generation_message=(
+            st.session_state.get("plan_generation_message_week_start") is None
+            or (st.session_state.get("next_week_start") and _msg_week==st.session_state.get("next_week_start"))
+            or (st.session_state.get("plan_week_start") and _msg_week==st.session_state.get("plan_week_start"))
+        )
+        if _show_generation_message:
+            st.success(st.session_state.plan_generation_message)
+    elif st.session_state.plan_generation_status=="error":
+        st.error(st.session_state.plan_generation_message or "La preparazione non è riuscita.")
+
+    # Generation happens only after the user explicitly asks for the next plan.
+    if st.session_state.pop("force_next_generation",False):
+        current_start=st.session_state.plan_week_start
+        next_start=(date.fromisoformat(current_start)+timedelta(days=7)) if current_start else (date.today()+timedelta(days=7))
+        st.session_state.plan_generation_status="running"
+        st.session_state.plan_generation_message="Sto preparando una nuova settimana…"
+        st.session_state.plan_generation_message_week_start=next_start.isoformat()
+        st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+        try:
+            ep=energy_profile()
+            lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days",st.session_state.get("out_lunch_days",[])))
+            dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days",st.session_state.get("out_dinner_days",[])))
+            pantry_snapshot=pantry_prompt_snapshot()
+            prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Deve essere una SETTIMANA NUOVA e variare chiaramente rispetto al piano attuale. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Mantenimento stimato: {ep['maintenance_est']} kcal/giorno. Target: {ep['target']} kcal/giorno. Obiettivo: {ep['diet_goal']}. Stile: {ep['diet_style']}. Frequenza allenamento prevista: {st.session_state.get('p_training_frequency','non specificata')}. Allergie/intolleranze: {st.session_state.get('p_allergies','nessuna') or 'nessuna'}. Alimenti esclusi: {st.session_state.get('p_excluded_foods','nessuno') or 'nessuno'}. Il piano deve rispettare il target calorico giornaliero.
 
 DISPENSA ATTUALE DELL'UTENTE:
 {pantry_snapshot}
@@ -4660,211 +4623,183 @@ REGOLE DISPENSA: la dispensa NON è un vincolo e NON deve determinare da sola la
 Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena". Nei pasti fuori casa usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche reali. Varia ricette e alimenti rispetto a una settimana standard: non copiare gli stessi pasti in giorni equivalenti.
 
 RESTITUISCI SOLO JSON, senza markdown e senza testo fuori dal JSON. Usa ESATTAMENTE questa struttura concettuale: un oggetto con le 7 chiavi di giorno "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"; ogni giorno deve contenere esattamente le 4 chiavi "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena"; ogni pasto deve avere "name" e "ingredients"; ogni ingrediente deve avere "name", "qty", "unit", "kcal". NON usare chiavi inglesi per i giorni. Devi includere TUTTI E 7 i giorni e TUTTI E 4 i pasti per ciascun giorno. GIORNI PRANZO FUORI CASA: {', '.join(lunch_days) if lunch_days else 'nessuno'}. GIORNI CENA FUORI CASA: {', '.join(dinner_days) if dinner_days else 'nessuno'}."""
-                with st.spinner("🤖 Sto generando il piano…"):
-                    raw=openai_interaction(prompt, thinking_level="low", feature="weekly_plan"); out=normalize_ai_plan(raw)
-                draft_errors=_draft_validation_errors(out)
-                if draft_errors:
-                    raise ValueError("L'AI ha restituito una bozza incompleta: " + "; ".join(draft_errors[:8]))
-                st.session_state.next_meal_plan=copy.deepcopy(out)
-                st.session_state.next_overrides={}
-                st.session_state.next_week_start=next_start.isoformat()
-                st.session_state.next_out_lunch_days=copy.deepcopy(lunch_days)
-                st.session_state.next_out_dinner_days=copy.deepcopy(dinner_days)
-                st.session_state.next_mensa_menus={}
-                st.session_state.plan_view_mode="current"
-                preview=pantry_week_preview(out)
-                st.session_state.next_pantry_preview=preview
-                st.session_state["_next_draft_dirty"] = False
-                # Persist the newly generated draft immediately. The active plan
-                # remains untouched, but the draft must survive a Streamlit
-                # session refresh/recreation and must not be replaced by an
-                # older PostgreSQL snapshot.
-                _db_save_plan_state()
-                _persist_app_state()
-                st.session_state.plan_generation_status="success"
-                st.session_state.plan_generation_message=f"✓ Bozza {week_label(next_start.isoformat())} pronta. Il piano attuale non è stato modificato."
-                st.session_state.plan_generation_message_week_start=next_start.isoformat()
-                st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
-                st.session_state.eaten={}; st.session_state.registered_meals={}
-                _mydiet_rerun()
-            except Exception as e:
-                st.session_state.plan_generation_status="error"
-                st.session_state.plan_generation_message=f"✕ Generazione non riuscita: {e}"
+            with st.spinner("🤖 Sto preparando il piano…"):
+                raw=openai_interaction(prompt,thinking_level="low",feature="weekly_plan"); out=normalize_ai_plan(raw)
+            draft_errors=_draft_validation_errors(out)
+            if draft_errors:
+                raise ValueError("L'AI ha restituito una bozza incompleta: " + "; ".join(draft_errors[:8]))
+            st.session_state.next_meal_plan=copy.deepcopy(out)
+            st.session_state.next_overrides={}
+            st.session_state.next_week_start=next_start.isoformat()
+            st.session_state.next_out_lunch_days=copy.deepcopy(lunch_days)
+            st.session_state.next_out_dinner_days=copy.deepcopy(dinner_days)
+            st.session_state.next_mensa_menus={}
+            st.session_state.plan_view_mode="current"
+            preview=pantry_week_preview(out)
+            st.session_state.next_pantry_preview=preview
+            st.session_state["_next_draft_dirty"]=False
+            _db_save_plan_state()
+            _persist_app_state()
+            st.session_state.plan_generation_status="success"
+            st.session_state.plan_generation_message=f"✓ Il tuo prossimo piano ({week_label(next_start.isoformat())}) è pronto. Quello attuale non è stato modificato."
+            st.session_state.plan_generation_message_week_start=next_start.isoformat()
+            st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+            st.session_state.eaten={}; st.session_state.registered_meals={}
+            _mydiet_rerun()
+        except Exception as e:
+            st.session_state.plan_generation_status="error"
+            st.session_state.plan_generation_message=f"✕ Non riesco a preparare il piano: {e}"
 
-        # Active plan is a read-only list until a user opens one specific meal.
-        # Next-week draft is editable, but still only one meal at a time.
-        # JSONB does not preserve object key order. Always render the week in
-        # the canonical Monday->Sunday order instead of trusting dict insertion order.
-        canonical_days=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
-        # IMPORTANT: when the user opens "Prossima settimana" before generating it,
-        # never fall back to the active week's meal_plan. Otherwise the current
-        # week's meals would be shown under the next-week heading.
-        if editing_next and not has_next:
-            st.info("✨ La prossima settimana non è ancora stata generata. Usa il pulsante **Genera piano della prossima settimana** qui sopra quando vuoi prepararla.")
-            active_days=[]
-        else:
-            active_days=[d for d in canonical_days if d in st.session_state.meal_plan]
-        if not active_days:
-            st.info("Nessun piano disponibile.")
-        else:
-            selected_day=st.session_state.get("plan_day_selector",active_days[0])
-            if selected_day not in active_days: selected_day=active_days[0]
-            day=st.selectbox("Giorno",active_days,index=active_days.index(selected_day),key="plan_day_selector")
-            day_meals=st.session_state.meal_plan.get(day,{})
-            day_total=round(sum(meal_kcal_total(m) for m in day_meals.values()))
-            registered_count=sum(1 for mn in day_meals if _meal_is_registered(day,mn)) if not editing_next else 0
-            day_status = 'BOZZA · non attiva' if editing_next else f'{registered_count}/{len(day_meals)} pasti registrati'
-            st.markdown(
-                f"<div class='mydiet-plan-day-head'><div><div class='mydiet-plan-day-title'>📅 {day}</div><div class='mydiet-plan-day-meta'>{day_status}</div></div><div class='mydiet-plan-meal-kcal'><b>{day_total}</b><span>kcal previste</span></div></div>",
-                unsafe_allow_html=True
-            )
+    # IMPORTANT: while editing the next week, only the draft is rendered. Before
+    # generation, never fall back to the active week's meals.
+    canonical_days=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+    if editing_next and not has_next:
+        active_days=[]
+    else:
+        active_days=[d for d in canonical_days if d in st.session_state.meal_plan]
+    if not active_days:
+        st.info("Nessun piano disponibile.")
+    else:
+        selected_day=st.session_state.get("plan_day_selector",active_days[0])
+        if selected_day not in active_days: selected_day=active_days[0]
+        day=st.selectbox("Giorno",active_days,index=active_days.index(selected_day),key="plan_day_selector")
+        day_meals=st.session_state.meal_plan.get(day,{})
+        day_total=round(sum(meal_kcal_total(m) for m in day_meals.values()))
+        registered_count=sum(1 for mn in day_meals if _meal_is_registered(day,mn)) if not editing_next else 0
+        day_status='BOZZA · non attiva' if editing_next else f'{registered_count}/{len(day_meals)} pasti registrati'
+        st.markdown(
+            f"<div class='mydiet-plan-day-head'><div><div class='mydiet-plan-day-title'>📅 {day}</div><div class='mydiet-plan-day-meta'>{day_status}</div></div><div class='mydiet-plan-meal-kcal'><b>{day_total}</b><span>kcal previste</span></div></div>",
+            unsafe_allow_html=True
+        )
 
-            edit_key=st.session_state.get("plan_edit_meal")
-            if edit_key and (edit_key[0]!=day or edit_key[1] not in day_meals):
-                st.session_state.plan_edit_meal=None; edit_key=None
+        edit_key=st.session_state.get("plan_edit_meal")
+        if edit_key and (edit_key[0]!=day or edit_key[1] not in day_meals):
+            st.session_state.plan_edit_meal=None; edit_key=None
 
-            # JSONB does not preserve object key order. Always render meals in
-            # the canonical order used throughout MyDiet.
-            ordered_day_meals = [(mn, day_meals[mn]) for mn in _PLAN_MEALS if mn in day_meals]
-            ordered_day_meals += [(mn, m) for mn, m in day_meals.items() if mn not in _PLAN_MEALS]
-            for mn,m in ordered_day_meals:
-                out_of_home=out_of_home_meal_configured(day,mn)
-                items=active_items(m)
-                kcal=meal_kcal_total(m)
-                meal_registered=False if editing_next else _meal_is_registered(day,mn)
-                status="📍 Fuori casa" if out_of_home else ("✓ Registrato" if meal_registered else "Da registrare")
-                with st.container(border=True):
-                    left,right=st.columns([5.5,1.5])
-                    with left:
-                        meal_icon = '📍' if out_of_home else mn.split(' ',1)[0]
-                        meal_title = mn.split(' ',1)[1] if ' ' in mn else mn
-                        if out_of_home:
-                            display_name="Pasto fuori"
-                        elif items:
-                            display_name=m.get("name","Pasto")
-                        else:
-                            display_name="Nessun alimento inserito"
-                        st.markdown(
-                            f"<div class='mydiet-plan-meal-head'><div class='mydiet-plan-meal-icon'>{meal_icon}</div><div style='min-width:0;flex:1'><div class='mydiet-plan-meal-title'>{meal_title}</div><div class='mydiet-plan-meal-name'>{display_name}</div></div><div class='mydiet-plan-meal-kcal'><b>{kcal}</b><span>kcal · {status}</span></div></div>",
-                            unsafe_allow_html=True
-                        )
-                    with right:
-                        if not editing_next and meal_registered:
-                            if st.button("↩",key=f"undo_{day}_{mn}",help="Annulla registrazione",use_container_width=True):
-                                set_meal_registered(day,mn,False); _mydiet_rerun()
-                    if st.button("✏️ Modifica solo questo pasto",key=f"edit_meal_{day}_{mn}",use_container_width=True):
-                        st.session_state.plan_edit_meal=None if edit_key==(day,mn) else (day,mn)
-                        _mydiet_rerun()
+        ordered_day_meals=[(mn,day_meals[mn]) for mn in _PLAN_MEALS if mn in day_meals]
+        ordered_day_meals += [(mn,m) for mn,m in day_meals.items() if mn not in _PLAN_MEALS]
+        for mn,m in ordered_day_meals:
+            out_of_home=out_of_home_meal_configured(day,mn)
+            items=active_items(m)
+            kcal=meal_kcal_total(m)
+            meal_registered=False if editing_next else _meal_is_registered(day,mn)
+            status="📍 Fuori casa" if out_of_home else ("✓ Registrato" if meal_registered else "Da registrare")
+            with st.container(border=True):
+                left,right=st.columns([5.5,1.5])
+                with left:
+                    meal_icon='📍' if out_of_home else mn.split(' ',1)[0]
+                    meal_title=mn.split(' ',1)[1] if ' ' in mn else mn
+                    if out_of_home: display_name="Pasto fuori"
+                    elif items: display_name=m.get("name","Pasto")
+                    else: display_name="Nessun alimento inserito"
+                    st.markdown(f"<div class='mydiet-plan-meal-head'><div class='mydiet-plan-meal-icon'>{meal_icon}</div><div style='min-width:0;flex:1'><div class='mydiet-plan-meal-title'>{meal_title}</div><div class='mydiet-plan-meal-name'>{display_name}</div></div><div class='mydiet-plan-meal-kcal'><b>{kcal}</b><span>kcal · {status}</span></div></div>",unsafe_allow_html=True)
+                with right:
+                    if not editing_next and meal_registered:
+                        if st.button("↩",key=f"undo_{day}_{mn}",help="Annulla registrazione",use_container_width=True):
+                            set_meal_registered(day,mn,False); _mydiet_rerun()
+                if st.button("✏️ Modifica solo questo pasto",key=f"edit_meal_{day}_{mn}",use_container_width=True):
+                    st.session_state.plan_edit_meal=None if edit_key==(day,mn) else (day,mn)
+                    _mydiet_rerun()
 
-                    if edit_key==(day,mn):
-                        st.markdown("**Modifica questo pasto**")
-                        if not editing_next:
-                            st.caption("Il piano attuale non viene modificato globalmente: stai modificando solo questo pasto.")
-                        if not out_of_home:
-                            if items:
-                                for item in items:
-                                    mult=item_multiplier(item); current_qty=item_qty(item); current_kcal=item_kcal(item); step=qty_step(item.get("unit","g"),current_qty)
-                                    a,b,c=st.columns([5,1,1])
-                                    with a:
-                                        st.markdown(f"**{item['name']}**")
-                                        st.caption(f"{current_qty:g} {item.get('unit','g')} · {round(current_kcal)} kcal")
-                                        if item.get("kcal_source"):
-                                            st.caption(f"Fonte calorie: {item.get('kcal_source')} · {item.get('kcal_assumption','')}")
-                                    with b:
-                                        if st.button("−",key=f"edit_minus_{item['id']}",use_container_width=True):
-                                            if quantity_mode()=="precise": set_item_qty(item,current_qty-step)
-                                            else: set_item_qty(item,max(0.5,mult-0.5)*float(item.get('qty',1)))
-                                            if editing_next: save_next_editor_context()
-                                            _mydiet_rerun()
-                                    with c:
-                                        if st.button("+",key=f"edit_plus_{item['id']}",use_container_width=True):
-                                            if quantity_mode()=="precise": set_item_qty(item,current_qty+step)
-                                            else: set_item_qty(item,(mult+0.5)*float(item.get('qty',1)))
-                                            if editing_next: save_next_editor_context()
-                                            _mydiet_rerun()
-                                    with st.expander(f"⚙️ {item['name']}",expanded=False):
-                                        a,b,c,d=st.columns([3,1,1,1])
-                                        with a: new_name=st.text_input("Alimento",value=item['name'],key=f"rn_{item['id']}")
-                                        with b: new_qty=st.number_input("Qtà",min_value=.1,value=float(current_qty),step=step,key=f"rq_{item['id']}")
-                                        with c: new_unit=st.selectbox("Unità",["g","ml","pz"],index=["g","ml","pz"].index(item.get('unit','g')) if item.get('unit','g') in ["g","ml","pz"] else 0,key=f"ru_{item['id']}")
-                                        with d: new_kcal=st.number_input("kcal",min_value=0,value=int(round(current_kcal)),step=5,key=f"rk_{item['id']}")
-                                        x,y=st.columns(2)
-                                        with x:
-                                            if st.button("💾 Salva",key=f"save_{item['id']}",use_container_width=True,type="primary") and new_name.strip():
-                                                item['name']=new_name.strip(); item['unit']=new_unit; item['qty']=float(new_qty); item['kcal']=int(new_kcal)
-                                                if editing_next:
-                                                    st.session_state.next_overrides[item['id']]={"multiplier":1}; save_next_editor_context()
-                                                else:
-                                                    st.session_state.overrides[item['id']]={"multiplier":1}
-                                                st.session_state.eaten[item['id']]=False
-                                                st.session_state.registered_meals[_meal_key(day,mn)]=False
-                                                st.session_state.plan_edit_meal=None; _mydiet_rerun()
-                                        with y:
-                                            if st.button("✕ Rimuovi",key=f"remove_{item['id']}",use_container_width=True):
-                                                if editing_next:
-                                                    st.session_state.next_overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}; save_next_editor_context()
-                                                else:
-                                                    st.session_state.overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}
-                                                st.session_state.eaten[item['id']]=False; st.session_state.registered_meals[_meal_key(day,mn)]=False
-                                                st.session_state.plan_edit_meal=None; _mydiet_rerun()
-                            else:
-                                st.info("Questo pasto non contiene ancora alimenti.")
-
-                        if out_of_home:
-                            menu=current_mensa_menu(day,mn)
-                            with st.expander("🍴 Menu associato",expanded=bool(menu)):
-                                if menu:
-                                    st.success(f"Menu associato · {menu.get('analyzed_at','—')}")
-                                    st.info(menu.get("result","Menu analizzato."))
-                                st.markdown("**📷 Menu del pasto fuori casa**")
-                                st.caption("Qui non devi modificare gli alimenti del piano: scegli cosa ordinare fotografando il menu reale.")
-                                img=st.camera_input("📸 Scatta una foto del menu",key=f"mensa_camera_{new_view}_{day}_{mn}") or st.file_uploader("🖼️ Oppure aggiungi una foto",type=["jpg","jpeg","png","webp"],key=f"mensa_upload_{new_view}_{day}_{mn}")
-                                if img:
-                                    st.image(img,width=420)
-                                    if st.button("✨ Analizza e associa",key=f"analyze_mensa_{new_view}_{day}_{mn}"):
-                                        try:
-                                            b=balance(); rec=meal_recommendation(day,mn,b); planned=rec["name"] if rec else "nessun piatto previsto"; planned_kcal=rec["planned_kcal"] if rec else 0
-                                            budget_label=f"target alimentare: {energy_profile()['target']} kcal/giorno" if editing_next else f"calorie ancora disponibili oggi: {b['remaining']} kcal"
-                                            prompt=f"Analizza questo menu fuori casa per {mn} del giorno {day}. Piano previsto: {planned}; calorie previste: {planned_kcal}; {budget_label}. Confronta solo ciò che compare nella foto. Rispondi con 🟢 COSA ORDINARE, 💡 PERCHÉ, ⚠️ COSA LIMITARE."
-                                            set_mensa_menu(day,mn,openai_interaction(prompt,image=img,thinking_level="low",feature="menu_image"))
-                                            if editing_next: save_next_editor_context()
-                                            _mydiet_rerun()
-                                        except Exception as e: st.error(f"Errore analisi menu: {e}")
-                        if not out_of_home:
-                            with st.expander("➕ Aggiungi alimento",expanded=False):
-                                suggestions=plan_food_suggestions(day,mn,limit=8)
-                                for idx,sug in enumerate(suggestions):
-                                    a,b=st.columns([5,1.4])
-                                    with a: st.markdown(f"**{sug['name']}** · {sug['qty']:g} {sug['unit']} · {round(sug['kcal'])} kcal")
-                                    with b:
-                                        if st.button("+ Aggiungi",key=f"suggest_{day}_{mn}_{idx}",use_container_width=True):
-                                            st.session_state.meal_plan[day][mn]['ingredients'].append({"id":sid(),"name":sug['name'],"qty":sug['qty'],"unit":sug['unit'],"kcal":sug['kcal']})
-                                            if editing_next: save_next_editor_context()
-                                            _mydiet_rerun()
-                                a,b,c=st.columns([3.2,1,1])
-                                with a: n=st.text_input("Alimento",key=f"n_{day}_{mn}",placeholder="Es. pizza, banana, yogurt...")
-                                with b: q=st.number_input("Qtà",min_value=.1,value=1.,step=1.,key=f"q_{day}_{mn}")
-                                with c: u=st.selectbox("Unità",["g","ml","pz"],key=f"u_{day}_{mn}")
-                                st.caption("💡 Le calorie vengono stimate automaticamente quando aggiungi l'alimento. Potrai sempre correggerle dopo.")
-                                if st.button("✨ Aggiungi e calcola calorie",key=f"add_{day}_{mn}",type="primary",use_container_width=True) and n.strip():
-                                    try:
-                                        with st.spinner("Calcolo delle calorie…"):
-                                            estimate=estimate_food_kcal(n,q,u)
-                                        new_item={"id":sid(),"name":n.strip(),"qty":float(q),"unit":u,"kcal":estimate["kcal"],"kcal_source":estimate["source"],"kcal_assumption":estimate["assumption"]}
-                                        st.session_state.meal_plan[day][mn]['ingredients'].append(new_item)
-                                        active_names=[x["name"] for x in st.session_state.meal_plan[day][mn].get("ingredients",[]) if not st.session_state.overrides.get(x["id"],{}).get("removed")]
-                                        st.session_state.meal_plan[day][mn]["name"] = ", ".join(active_names[:3])
+                if edit_key==(day,mn):
+                    st.markdown("**Modifica questo pasto**")
+                    if not editing_next: st.caption("Il piano attuale non viene modificato globalmente: stai modificando solo questo pasto.")
+                    if not out_of_home:
+                        if items:
+                            for item in items:
+                                mult=item_multiplier(item); current_qty=item_qty(item); current_kcal=item_kcal(item); step=qty_step(item.get("unit","g"),current_qty)
+                                a,b,c=st.columns([5,1,1])
+                                with a:
+                                    st.markdown(f"**{item['name']}**")
+                                    st.caption(f"{current_qty:g} {item.get('unit','g')} · {round(current_kcal)} kcal")
+                                    if item.get("kcal_source"): st.caption(f"Fonte calorie: {item.get('kcal_source')} · {item.get('kcal_assumption','')}")
+                                with b:
+                                    if st.button("−",key=f"edit_minus_{item['id']}",use_container_width=True):
+                                        if quantity_mode()=="precise": set_item_qty(item,current_qty-step)
+                                        else: set_item_qty(item,max(0.5,mult-0.5)*float(item.get('qty',1)))
                                         if editing_next: save_next_editor_context()
-                                        st.success(f"{n.strip()} aggiunto · circa {estimate['kcal']} kcal ({estimate['source']}).")
                                         _mydiet_rerun()
-                                    except Exception as e:
-                                        st.error(str(e))
+                                with c:
+                                    if st.button("+",key=f"edit_plus_{item['id']}",use_container_width=True):
+                                        if quantity_mode()=="precise": set_item_qty(item,current_qty+step)
+                                        else: set_item_qty(item,(mult+0.5)*float(item.get('qty',1)))
+                                        if editing_next: save_next_editor_context()
+                                        _mydiet_rerun()
+                                with st.expander(f"⚙️ {item['name']}",expanded=False):
+                                    a,b,c,d=st.columns([3,1,1,1])
+                                    with a: new_name=st.text_input("Alimento",value=item['name'],key=f"rn_{item['id']}")
+                                    with b: new_qty=st.number_input("Qtà",min_value=.1,value=float(current_qty),step=step,key=f"rq_{item['id']}")
+                                    with c: new_unit=st.selectbox("Unità",["g","ml","pz"],index=["g","ml","pz"].index(item.get('unit','g')) if item.get('unit','g') in ["g","ml","pz"] else 0,key=f"ru_{item['id']}")
+                                    with d: new_kcal=st.number_input("kcal",min_value=0,value=int(round(current_kcal)),step=5,key=f"rk_{item['id']}")
+                                    x,y=st.columns(2)
+                                    with x:
+                                        if st.button("💾 Salva",key=f"save_{item['id']}",use_container_width=True,type="primary") and new_name.strip():
+                                            item['name']=new_name.strip(); item['unit']=new_unit; item['qty']=float(new_qty); item['kcal']=int(new_kcal)
+                                            if editing_next: st.session_state.next_overrides[item['id']]={"multiplier":1}; save_next_editor_context()
+                                            else: st.session_state.overrides[item['id']]={"multiplier":1}
+                                            st.session_state.eaten[item['id']]=False; st.session_state.registered_meals[_meal_key(day,mn)]=False; st.session_state.plan_edit_meal=None; _mydiet_rerun()
+                                    with y:
+                                        if st.button("✕ Rimuovi",key=f"remove_{item['id']}",use_container_width=True):
+                                            if editing_next: st.session_state.next_overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}; save_next_editor_context()
+                                            else: st.session_state.overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}
+                                            st.session_state.eaten[item['id']]=False; st.session_state.registered_meals[_meal_key(day,mn)]=False; st.session_state.plan_edit_meal=None; _mydiet_rerun()
+                        else:
+                            st.info("Questo pasto non contiene ancora alimenti.")
 
-        if editing_next:
-            save_next_editor_context()
-            if st.session_state.pop("_next_draft_dirty", False):
-                _db_save_plan_state()
-                _persist_app_state()
+                    if out_of_home:
+                        menu=current_mensa_menu(day,mn)
+                        with st.expander("🍴 Menu associato",expanded=bool(menu)):
+                            if menu:
+                                st.success(f"Menu associato · {menu.get('analyzed_at','—')}")
+                                st.info(menu.get("result","Menu analizzato."))
+                            st.markdown("**📷 Menu del pasto fuori casa**")
+                            st.caption("Qui non devi modificare gli alimenti del piano: scegli cosa ordinare fotografando il menu reale.")
+                            img=st.camera_input("📸 Scatta una foto del menu",key=f"mensa_camera_{new_view}_{day}_{mn}") or st.file_uploader("🖼️ Oppure aggiungi una foto",type=["jpg","jpeg","png","webp"],key=f"mensa_upload_{new_view}_{day}_{mn}")
+                            if img:
+                                st.image(img,width=420)
+                                if st.button("✨ Analizza e associa",key=f"analyze_mensa_{new_view}_{day}_{mn}"):
+                                    try:
+                                        b=balance(); rec=meal_recommendation(day,mn,b); planned=rec["name"] if rec else "nessun piatto previsto"; planned_kcal=rec["planned_kcal"] if rec else 0
+                                        budget_label=f"target alimentare: {energy_profile()['target']} kcal/giorno" if editing_next else f"calorie ancora disponibili oggi: {b['remaining']} kcal"
+                                        prompt=f"Analizza questo menu fuori casa per {mn} del giorno {day}. Piano previsto: {planned}; calorie previste: {planned_kcal}; {budget_label}. Confronta solo ciò che compare nella foto. Rispondi con 🟢 COSA ORDINARE, 💡 PERCHÉ, ⚠️ COSA LIMITARE."
+                                        set_mensa_menu(day,mn,openai_interaction(prompt,image=img,thinking_level="low",feature="menu_image"))
+                                        if editing_next: save_next_editor_context()
+                                        _mydiet_rerun()
+                                    except Exception as e: st.error(f"Errore analisi menu: {e}")
+                    if not out_of_home:
+                        with st.expander("➕ Aggiungi alimento",expanded=False):
+                            suggestions=plan_food_suggestions(day,mn,limit=8)
+                            for idx,sug in enumerate(suggestions):
+                                a,b=st.columns([5,1.4])
+                                with a: st.markdown(f"**{sug['name']}** · {sug['qty']:g} {sug['unit']} · {round(sug['kcal'])} kcal")
+                                with b:
+                                    if st.button("+ Aggiungi",key=f"suggest_{day}_{mn}_{idx}",use_container_width=True):
+                                        st.session_state.meal_plan[day][mn]['ingredients'].append({"id":sid(),"name":sug['name'],"qty":sug['qty'],"unit":sug['unit'],"kcal":sug['kcal']})
+                                        if editing_next: save_next_editor_context()
+                                        _mydiet_rerun()
+                            a,b,c=st.columns([3.2,1,1])
+                            with a: n=st.text_input("Alimento",key=f"n_{day}_{mn}",placeholder="Es. pizza, banana, yogurt...")
+                            with b: q=st.number_input("Qtà",min_value=.1,value=1.,step=1.,key=f"q_{day}_{mn}")
+                            with c: u=st.selectbox("Unità",["g","ml","pz"],key=f"u_{day}_{mn}")
+                            st.caption("💡 Le calorie vengono stimate automaticamente quando aggiungi l'alimento. Potrai sempre correggerle dopo.")
+                            if st.button("✨ Aggiungi e calcola calorie",key=f"add_{day}_{mn}",type="primary",use_container_width=True) and n.strip():
+                                try:
+                                    with st.spinner("Calcolo delle calorie…"):
+                                        estimate=estimate_food_kcal(n,q,u)
+                                    new_item={"id":sid(),"name":n.strip(),"qty":float(q),"unit":u,"kcal":estimate["kcal"],"kcal_source":estimate["source"],"kcal_assumption":estimate["assumption"]}
+                                    st.session_state.meal_plan[day][mn]['ingredients'].append(new_item)
+                                    active_names=[x["name"] for x in st.session_state.meal_plan[day][mn].get('ingredients',[]) if not st.session_state.overrides.get(x["id"],{}).get('removed')]
+                                    st.session_state.meal_plan[day][mn]["name"]=", ".join(active_names[:3])
+                                    if editing_next: save_next_editor_context()
+                                    st.success(f"{n.strip()} aggiunto · circa {estimate['kcal']} kcal ({estimate['source']}).")
+                                    _mydiet_rerun()
+                                except Exception as e: st.error(str(e))
+
+    if editing_next:
+        save_next_editor_context()
+        if st.session_state.pop("_next_draft_dirty",False):
+            _db_save_plan_state()
+            _persist_app_state()
 
 # V90: stabilization — weekly rollover, canonical meal kcal rendering, pantry units/steps.
 # ---------------- Dispensa ----------------
