@@ -1674,17 +1674,17 @@ def _db_recover_local_plan():
 
 
 # Pull background Health data when an API transport is configured.
-def _ingest_remote_health_sync():
+def _ingest_remote_health_sync(force=False):
 
     """Pull the latest native Health snapshot from the optional sync API.
 
     The Android bridge writes to the API in background. MyDiet only reads the
     latest snapshot here; the local URL bridge remains a supported fallback.
     """
-    if st.session_state.get("_remote_health_checked_at"):
+    if (not force) and st.session_state.get("_remote_health_checked_at"):
         try:
             age=(datetime.now(ROME)-datetime.fromisoformat(st.session_state["_remote_health_checked_at"])).total_seconds()
-            if age < 300:
+            if age < 60:
                 return False
         except Exception:
             pass
@@ -1700,19 +1700,23 @@ def _ingest_remote_health_sync():
     profile_id=bridge_profile_id or _state_token()
     st.session_state["_remote_health_checked_at"]=datetime.now(ROME).isoformat()
     if not api_url or not token or not profile_id:
+        st.session_state["health_sync_status"] = {"status":"not_configured"}
         return False
     try:
         r=requests.get(f"{api_url}/v1/health/latest/{urllib.parse.quote(profile_id,safe='')}",
                        headers={"X-MyDiet-Token":token,"Accept":"application/json"}, timeout=8)
         if r.status_code != 200:
+            st.session_state["health_sync_status"] = {"status":"http_error", "http":r.status_code}
             return False
         obj=r.json()
         raw=obj.get("payload")
         payload=_decode_health_bridge_payload(raw)
         if not payload:
+            st.session_state["health_sync_status"] = {"status":"invalid_payload", "http":200}
             return False
         fingerprint=str(raw)[:32]
-        if st.session_state.get("health_bridge_fingerprint")==fingerprint:
+        if st.session_state.get("health_bridge_fingerprint")==fingerprint and st.session_state.get("health",{}).get("native_health_snapshot"):
+            st.session_state["health_sync_status"] = {"status":"already_current", "http":200}
             return False
         metrics=payload.get("metrics",{})
         health={
@@ -1738,6 +1742,7 @@ def _ingest_remote_health_sync():
         st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
         st.session_state.health_bridge_fingerprint=fingerprint
         st.session_state["health_remote_synced"]=True
+        st.session_state["health_sync_status"] = {"status":"ok", "http":200, "received_at":health["provider"]["received_at"]}
         return True
     except Exception:
         return False
@@ -5330,6 +5335,9 @@ elif st.session_state.page=="Attività":
           <div class="activity-status"><span class="activity-dot warn"></span><b>Nessun dato ricevuto ancora</b></div>
         </div>
         """,unsafe_allow_html=True)
+        if st.button("🔄 Aggiorna dati attività", use_container_width=True, key="activity_force_sync"):
+            _ingest_remote_health_sync(force=True)
+            _mydiet_rerun()
     else:
         st.markdown("""
         <div class="activity-top">
@@ -5357,6 +5365,17 @@ elif st.session_state.page=="Attività":
     # Google Fit is retained only as legacy diagnostics; it is not the productive path.
     if mode.startswith("⌚") and not native:
         with st.expander("🔧 Strumenti tecnici",expanded=False):
+            hs=st.session_state.get("health_sync_status", {})
+            if hs.get("status")=="ok":
+                st.success("✓ Health Sync raggiungibile e ultimo snapshot ricevuto.")
+            elif hs.get("status")=="http_error":
+                st.warning(f"⚠️ Health Sync ha risposto HTTP {hs.get('http')}.")
+            elif hs.get("status")=="invalid_payload":
+                st.warning("⚠️ Health Sync risponde, ma non contiene uno snapshot valido.")
+            elif hs.get("status")=="not_configured":
+                st.info("Health Sync non configurato: il Bridge può usare il collegamento diretto via URL.")
+            else:
+                st.caption("Health Sync: nessun dato ricevuto in questa sessione.")
             st.caption("Questi strumenti servono solo per la diagnosi. Per il funzionamento normale MyDiet usa Health Connect + Bridge Android.")
             cid=st.secrets.get("GOOGLE_CLIENT_ID"); cs=st.secrets.get("GOOGLE_CLIENT_SECRET"); ru=st.secrets.get("REDIRECT_URI")
             if not cid or not cs or not ru:
