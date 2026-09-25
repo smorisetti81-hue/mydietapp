@@ -1,4 +1,5 @@
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 from openai import OpenAI
 import io
 import json
@@ -32,7 +33,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v87.2.1 · PostgreSQL profile + meal plan + meal logs persistence
+# MyDietApp v100 · Health UI Auto Refresh · PostgreSQL profile + meal plan + meal logs persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -1225,6 +1226,13 @@ for k,v in {
 # Compatibilità: se il profilo arriva da una versione precedente, il peso desiderato parte dal peso attuale.
 st.session_state.setdefault("p_goal_weight", float(st.session_state.get("p_weight", 135.0)))
 
+# V100: automatic Health UI refresh.
+# Only Home/Attività are polled; the Bridge remains untouched.
+# The remote Health Sync is checked on each rerun and only applies a new
+# snapshot when its fingerprint changes.
+if st.session_state.get("page") in ("Home", "Attività"):
+    st_autorefresh(interval=15000, key="mydiet_health_auto_refresh")
+
 # ============================================================
 # Persistent browser/session state
 # Streamlit session_state is intentionally ephemeral. MyDiet keeps a
@@ -1684,7 +1692,7 @@ def _ingest_remote_health_sync(force=False):
     if (not force) and st.session_state.get("_remote_health_checked_at"):
         try:
             age=(datetime.now(ROME)-datetime.fromisoformat(st.session_state["_remote_health_checked_at"])).total_seconds()
-            if age < 60:
+            if age < 10:
                 return False
         except Exception:
             pass
