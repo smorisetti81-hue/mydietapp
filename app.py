@@ -16,6 +16,7 @@ import copy
 import re
 import math
 import os
+import hashlib
 
 # V86: durable PostgreSQL/Supabase profile persistence.
 # Import the stable DB API directly. Meal-log functions are resolved dynamically
@@ -1091,7 +1092,7 @@ def _ingest_native_health_bridge():
         return False
     # Avoid rewriting state on every Streamlit rerun. The payload itself remains
     # in the URL so a browser refresh can restore the latest bridge snapshot.
-    fingerprint = raw[:32]
+    fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     if st.session_state.get("health_bridge_fingerprint") == fingerprint:
         return False
     metrics = payload.get("metrics", {})
@@ -1722,7 +1723,7 @@ def _ingest_remote_health_sync(force=False):
         if not payload:
             st.session_state["health_sync_status"] = {"status":"invalid_payload", "http":200}
             return False
-        fingerprint=str(raw)[:32]
+        fingerprint=hashlib.sha256(str(raw).encode("utf-8")).hexdigest()
         if st.session_state.get("health_bridge_fingerprint")==fingerprint and st.session_state.get("health",{}).get("native_health_snapshot"):
             st.session_state["health_sync_status"] = {"status":"already_current", "http":200}
             return False

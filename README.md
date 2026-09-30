@@ -1,16 +1,9 @@
-# MyDietApp V100 – Health UI Auto Refresh
+# MyDietApp V100.1 – Health Auto Refresh Fix
 
-V100 is based on the working V99 build.
+Based on V100.
 
-## What changed
-- Automatic UI refresh every 15 seconds on Home and Attività.
-- Remote Health Sync polling reduced to a 10-second minimum interval.
-- New health snapshots are applied only when their fingerprint changes.
-- Bridge Android V1.8.2 is not modified.
-- No manual browser refresh is required to see updated health values.
-
-## Run
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+- Keeps automatic UI refresh every 15 seconds on Home and Attività.
+- Keeps remote Health Sync polling.
+- FIX: health snapshot fingerprint now hashes the entire payload instead of only its first 32 characters.
+- This detects changes in steps/calories/distance even when the beginning of the encoded payload remains unchanged.
+- Bridge V1.8.2 is not modified.
