@@ -1699,13 +1699,11 @@ def _ingest_remote_health_sync(force=False):
             pass
     api_url=str(st.secrets.get("HEALTH_SYNC_API_URL","") or "").strip().rstrip("/")
     token=str(st.secrets.get("HEALTH_SYNC_TOKEN","") or "").strip()
-    # Health Bridge has its own stable profile id. Keep the app mdid separate
-    # from the transport identity so an existing Bridge configuration continues
-    # to work even if the MyDiet URL/session id changes. A secret can override
-    # this default later for a different Bridge installation.
+    # The Android Bridge stores snapshots using the MyDiet mdid configured
+    # in its "ID profilo MyDiet" field. Keep an explicit secret as an optional
+    # override for special installations, but never fall back to a hardcoded
+    # profile id: that can make a valid Bridge snapshot look like HTTP 404.
     bridge_profile_id=str(st.secrets.get("HEALTH_BRIDGE_PROFILE_ID", "") or "").strip()
-    if not bridge_profile_id:
-        bridge_profile_id="c475e5a10b9144b6bb6cde887e06caee"
     profile_id=bridge_profile_id or _state_token()
     st.session_state["_remote_health_checked_at"]=datetime.now(ROME).isoformat()
     if not api_url or not token or not profile_id:
@@ -1715,7 +1713,14 @@ def _ingest_remote_health_sync(force=False):
         r=requests.get(f"{api_url}/v1/health/latest/{urllib.parse.quote(profile_id,safe='')}",
                        headers={"X-MyDiet-Token":token,"Accept":"application/json"}, timeout=8)
         if r.status_code != 200:
-            st.session_state["health_sync_status"] = {"status":"http_error", "http":r.status_code}
+            if r.status_code == 404:
+                st.session_state["health_sync_status"] = {
+                    "status":"snapshot_not_found",
+                    "http":404,
+                    "profile_id":profile_id,
+                }
+            else:
+                st.session_state["health_sync_status"] = {"status":"http_error", "http":r.status_code}
             return False
         obj=r.json()
         raw=obj.get("payload")
@@ -5377,6 +5382,8 @@ elif st.session_state.page=="Attività":
             hs=st.session_state.get("health_sync_status", {})
             if hs.get("status")=="ok":
                 st.success("✓ Health Sync raggiungibile e ultimo snapshot ricevuto.")
+            elif hs.get("status")=="snapshot_not_found":
+                st.warning("⚠️ Health Sync raggiungibile, ma non ha ancora uno snapshot per il profilo MyDiet corrente.")
             elif hs.get("status")=="http_error":
                 st.warning(f"⚠️ Health Sync ha risposto HTTP {hs.get('http')}.")
             elif hs.get("status")=="invalid_payload":
