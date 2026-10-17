@@ -33,3 +33,11 @@ Based on V100.
 - Corrected the profile-page automatic-target message so it reports estimated maintenance (TDEE) and the goal adjustment, rather than incorrectly saying the target is calculated directly from BMR.
 - Clarified the energy-details caption: TDEE is estimated as BMR × activity factor, then adjusted according to the selected goal.
 - No calorie formulas, database schema, database connection, stored profile, pantry, meal plan, or history data were changed.
+
+
+## V100.5 – Weekly plan calorie alignment
+- Weekly-plan prompt now specifies the daily target and approximate calorie distribution across breakfast, snack, lunch, and dinner.
+- Added a deterministic consistency safeguard after generation: if a normal at-home day differs from the target by more than 8%, ingredient quantities and their kcal values are proportionally adjusted when the required factor is within 0.75–1.40.
+- Days containing an outside-home meal, or without usable ingredient calories, are left untouched rather than misleadingly scaling the other meals.
+- This safeguard aligns the displayed arithmetic; it does not independently verify nutrition quality or medical suitability. Review ingredient quantities when testing the generated plan.
+- No database schema, connection, profile, pantry, current plan, or history data is changed by the code update. Existing plans are not automatically rewritten; the safeguard applies when a new plan is generated.

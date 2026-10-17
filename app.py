@@ -2147,6 +2147,48 @@ def normalize_ai_plan(raw):
 
     return out
 
+def adjust_plan_calories_to_target(plan, target_kcal):
+    """Bring each generated day close to the user's target by scaling ingredient quantities.
+
+    This is a consistency safeguard, not a nutrition analysis: it preserves the generated
+    foods and recipe structure, and proportionally scales quantities and ingredient kcal.
+    Days containing outside-home meals or no usable ingredient calories are left unchanged
+    because scaling their remaining meals would be misleading.
+    """
+    try:
+        target = int(round(float(target_kcal)))
+    except (TypeError, ValueError):
+        return plan, []
+    if target <= 0:
+        return plan, []
+
+    adjusted_days = []
+    meal_order = ["☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena"]
+    for day, meals in plan.items():
+        if not isinstance(meals, dict):
+            continue
+        if any("FUORI CASA" in str(meals.get(m, {}).get("name", "")).upper() for m in meal_order):
+            continue
+        items = [item for m in meal_order for item in (meals.get(m, {}).get("ingredients", []) or [])]
+        total = sum(max(0.0, float(item.get("kcal", 0) or 0)) for item in items)
+        if total <= 0 or not items:
+            continue
+        # Only intervene when the generated day misses the target by more than 8%.
+        if abs(total - target) / target <= 0.08:
+            continue
+        factor = target / total
+        # Avoid extreme automatic portion changes; those need a fresh AI generation instead.
+        if factor < 0.75 or factor > 1.40:
+            continue
+        for item in items:
+            qty = float(item.get("qty", 0) or 0)
+            kcal = float(item.get("kcal", 0) or 0)
+            item["qty"] = round(qty * factor, 2)
+            item["kcal"] = max(0, int(round(kcal * factor)))
+        adjusted_days.append(day)
+    return plan, adjusted_days
+
+
 def historical_food_library(limit=None):
     foods={}
     def add_from_plan(plan, source):
@@ -4632,7 +4674,7 @@ elif st.session_state.page=="Piano":
             lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days",st.session_state.get("out_lunch_days",[])))
             dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days",st.session_state.get("out_dinner_days",[])))
             pantry_snapshot=pantry_prompt_snapshot()
-            prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Deve essere una SETTIMANA NUOVA e variare chiaramente rispetto al piano attuale. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Mantenimento stimato: {ep['maintenance_est']} kcal/giorno. Target: {ep['target']} kcal/giorno. Obiettivo: {ep['diet_goal']}. Stile: {ep['diet_style']}. Frequenza allenamento prevista: {st.session_state.get('p_training_frequency','non specificata')}. Allergie/intolleranze: {st.session_state.get('p_allergies','nessuna') or 'nessuna'}. Alimenti esclusi: {st.session_state.get('p_excluded_foods','nessuno') or 'nessuno'}. Il piano deve rispettare il target calorico giornaliero.
+            prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Deve essere una SETTIMANA NUOVA e variare chiaramente rispetto al piano attuale. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Mantenimento stimato: {ep['maintenance_est']} kcal/giorno. Target: {ep['target']} kcal/giorno. Obiettivo: {ep['diet_goal']}. Stile: {ep['diet_style']}. Frequenza allenamento prevista: {st.session_state.get('p_training_frequency','non specificata')}. Allergie/intolleranze: {st.session_state.get('p_allergies','nessuna') or 'nessuna'}. Alimenti esclusi: {st.session_state.get('p_excluded_foods','nessuno') or 'nessuno'}. Il piano deve rispettare il target calorico giornaliero di {ep['target']} kcal con uno scarto massimo del 5%. Distribuisci indicativamente il target così: colazione 20%, spuntino 10%, pranzo 35%, cena 35%. Le kcal di ogni ingrediente devono essere coerenti con quantità e unità indicate; non ridurre arbitrariamente il totale giornaliero.
 
 DISPENSA ATTUALE DELL'UTENTE:
 {pantry_snapshot}
@@ -4644,6 +4686,7 @@ Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "�
 RESTITUISCI SOLO JSON, senza markdown e senza testo fuori dal JSON. Usa ESATTAMENTE questa struttura concettuale: un oggetto con le 7 chiavi di giorno "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"; ogni giorno deve contenere esattamente le 4 chiavi "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena"; ogni pasto deve avere "name" e "ingredients"; ogni ingrediente deve avere "name", "qty", "unit", "kcal". NON usare chiavi inglesi per i giorni. Devi includere TUTTI E 7 i giorni e TUTTI E 4 i pasti per ciascun giorno. GIORNI PRANZO FUORI CASA: {', '.join(lunch_days) if lunch_days else 'nessuno'}. GIORNI CENA FUORI CASA: {', '.join(dinner_days) if dinner_days else 'nessuno'}."""
             with st.spinner("🤖 Sto preparando il piano…"):
                 raw=openai_interaction(prompt,thinking_level="low",feature="weekly_plan"); out=normalize_ai_plan(raw)
+            out, adjusted_calorie_days = adjust_plan_calories_to_target(out, ep["target"])
             draft_errors=_draft_validation_errors(out)
             if draft_errors:
                 raise ValueError("L'AI ha restituito una bozza incompleta: " + "; ".join(draft_errors[:8]))
@@ -4660,7 +4703,7 @@ RESTITUISCI SOLO JSON, senza markdown e senza testo fuori dal JSON. Usa ESATTAME
             _db_save_plan_state()
             _persist_app_state()
             st.session_state.plan_generation_status="success"
-            st.session_state.plan_generation_message=f"✓ Il tuo prossimo piano ({week_label(next_start.isoformat())}) è pronto. Quello attuale non è stato modificato."
+            st.session_state.plan_generation_message=f"✓ Il tuo prossimo piano ({week_label(next_start.isoformat())}) è pronto. Quello attuale non è stato modificato." + (f" Calorie riallineate al target nei giorni: {', '.join(adjusted_calorie_days)}." if adjusted_calorie_days else "")
             st.session_state.plan_generation_message_week_start=next_start.isoformat()
             st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
             st.session_state.eaten={}; st.session_state.registered_meals={}
