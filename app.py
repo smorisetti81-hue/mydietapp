@@ -2073,6 +2073,10 @@ def normalize_ai_plan(raw):
                 "qty":float(x.get("qty",1)),
                 "unit":str(x.get("unit","g")),
                 "kcal":round(float(x.get("kcal",0))),
+                # Optional AI-estimated macronutrients per ingredient; absent values stay unknown.
+                "protein_g":round(float(x["protein_g"]),2) if x.get("protein_g") not in (None, "") else None,
+                "carbs_g":round(float(x["carbs_g"]),2) if x.get("carbs_g") not in (None, "") else None,
+                "fat_g":round(float(x["fat_g"]),2) if x.get("fat_g") not in (None, "") else None,
             })
         return {
             "name":str(meal.get("name","Pasto")).strip() or "Pasto",
@@ -2185,6 +2189,10 @@ def adjust_plan_calories_to_target(plan, target_kcal):
             kcal = float(item.get("kcal", 0) or 0)
             item["qty"] = round(qty * factor, 2)
             item["kcal"] = max(0, int(round(kcal * factor)))
+            for macro_key in ("protein_g", "carbs_g", "fat_g"):
+                macro_value = item.get(macro_key)
+                if macro_value is not None:
+                    item[macro_key] = round(max(0.0, float(macro_value) * factor), 2)
         adjusted_days.append(day)
     return plan, adjusted_days
 
@@ -4674,7 +4682,7 @@ elif st.session_state.page=="Piano":
             lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days",st.session_state.get("out_lunch_days",[])))
             dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days",st.session_state.get("out_dinner_days",[])))
             pantry_snapshot=pantry_prompt_snapshot()
-            prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Deve essere una SETTIMANA NUOVA e variare chiaramente rispetto al piano attuale. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Mantenimento stimato: {ep['maintenance_est']} kcal/giorno. Target: {ep['target']} kcal/giorno. Obiettivo: {ep['diet_goal']}. Stile: {ep['diet_style']}. Frequenza allenamento prevista: {st.session_state.get('p_training_frequency','non specificata')}. Allergie/intolleranze: {st.session_state.get('p_allergies','nessuna') or 'nessuna'}. Alimenti esclusi: {st.session_state.get('p_excluded_foods','nessuno') or 'nessuno'}. Il piano deve rispettare il target calorico giornaliero di {ep['target']} kcal con uno scarto massimo del 5%. Distribuisci indicativamente il target così: colazione 20%, spuntino 10%, pranzo 35%, cena 35%. Le kcal di ogni ingrediente devono essere coerenti con quantità e unità indicate; non ridurre arbitrariamente il totale giornaliero.
+            prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Deve essere una SETTIMANA NUOVA e variare chiaramente rispetto al piano attuale. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Mantenimento stimato: {ep['maintenance_est']} kcal/giorno. Target: {ep['target']} kcal/giorno. Obiettivo: {ep['diet_goal']}. Stile: {ep['diet_style']}. Frequenza allenamento prevista: {st.session_state.get('p_training_frequency','non specificata')}. Allergie/intolleranze: {st.session_state.get('p_allergies','nessuna') or 'nessuna'}. Alimenti esclusi: {st.session_state.get('p_excluded_foods','nessuno') or 'nessuno'}. Il piano deve rispettare il target calorico giornaliero di {ep['target']} kcal con uno scarto massimo del 5%. Distribuisci indicativamente il target così: colazione 20%, spuntino 10%, pranzo 35%, cena 35%. Le kcal di ogni ingrediente devono essere coerenti con quantità e unità indicate; non ridurre arbitrariamente il totale giornaliero. Per ogni ingrediente restituisci anche protein_g, carbs_g e fat_g come grammi stimati per la quantità indicata. Se non puoi stimarli in modo ragionevole, usa null: non inventare precisione. Le kcal e i macronutrienti devono riferirsi alla stessa quantità e unità dell'ingrediente.
 
 DISPENSA ATTUALE DELL'UTENTE:
 {pantry_snapshot}
@@ -4683,7 +4691,7 @@ REGOLE DISPENSA: la dispensa NON è un vincolo e NON deve determinare da sola la
 
 Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena". Nei pasti fuori casa usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche reali. Varia ricette e alimenti rispetto a una settimana standard: non copiare gli stessi pasti in giorni equivalenti.
 
-RESTITUISCI SOLO JSON, senza markdown e senza testo fuori dal JSON. Usa ESATTAMENTE questa struttura concettuale: un oggetto con le 7 chiavi di giorno "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"; ogni giorno deve contenere esattamente le 4 chiavi "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena"; ogni pasto deve avere "name" e "ingredients"; ogni ingrediente deve avere "name", "qty", "unit", "kcal". NON usare chiavi inglesi per i giorni. Devi includere TUTTI E 7 i giorni e TUTTI E 4 i pasti per ciascun giorno. GIORNI PRANZO FUORI CASA: {', '.join(lunch_days) if lunch_days else 'nessuno'}. GIORNI CENA FUORI CASA: {', '.join(dinner_days) if dinner_days else 'nessuno'}."""
+RESTITUISCI SOLO JSON, senza markdown e senza testo fuori dal JSON. Usa ESATTAMENTE questa struttura concettuale: un oggetto con le 7 chiavi di giorno "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"; ogni giorno deve contenere esattamente le 4 chiavi "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena"; ogni pasto deve avere "name" e "ingredients"; ogni ingrediente deve avere "name", "qty", "unit", "kcal", "protein_g", "carbs_g", "fat_g" (i tre macronutrienti in grammi per la quantità indicata; usa null se non stimabili). NON usare chiavi inglesi per i giorni. Devi includere TUTTI E 7 i giorni e TUTTI E 4 i pasti per ciascun giorno. GIORNI PRANZO FUORI CASA: {', '.join(lunch_days) if lunch_days else 'nessuno'}. GIORNI CENA FUORI CASA: {', '.join(dinner_days) if dinner_days else 'nessuno'}."""
             with st.spinner("🤖 Sto preparando il piano…"):
                 raw=openai_interaction(prompt,thinking_level="low",feature="weekly_plan"); out=normalize_ai_plan(raw)
             out, adjusted_calorie_days = adjust_plan_calories_to_target(out, ep["target"])
@@ -4727,12 +4735,24 @@ RESTITUISCI SOLO JSON, senza markdown e senza testo fuori dal JSON. Usa ESATTAME
         day=st.selectbox("Giorno",active_days,index=active_days.index(selected_day),key="plan_day_selector")
         day_meals=st.session_state.meal_plan.get(day,{})
         day_total=round(sum(meal_kcal_total(m) for m in day_meals.values()))
+        # Display macros only when every active ingredient has all three values; never invent missing data.
+        macro_items=[item for meal in day_meals.values() for item in active_items(meal)]
+        macros_complete=bool(macro_items) and all(all(item.get(k) is not None for k in ("protein_g","carbs_g","fat_g")) for item in macro_items)
+        day_macros={k:round(sum(float(item.get(k,0) or 0) for item in macro_items),1) for k in ("protein_g","carbs_g","fat_g")} if macros_complete else None
         registered_count=sum(1 for mn in day_meals if _meal_is_registered(day,mn)) if not editing_next else 0
         day_status='BOZZA · non attiva' if editing_next else f'{registered_count}/{len(day_meals)} pasti registrati'
         st.markdown(
             f"<div class='mydiet-plan-day-head'><div><div class='mydiet-plan-day-title'>📅 {day}</div><div class='mydiet-plan-day-meta'>{day_status}</div></div><div class='mydiet-plan-meal-kcal'><b>{day_total}</b><span>kcal previste</span></div></div>",
             unsafe_allow_html=True
         )
+        if day_macros:
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric("Proteine stimate", f"{day_macros['protein_g']:.1f} g")
+            mc2.metric("Carboidrati stimati", f"{day_macros['carbs_g']:.1f} g")
+            mc3.metric("Grassi stimati", f"{day_macros['fat_g']:.1f} g")
+            st.caption("Macronutrienti stimati dal generatore AI, non verificati su una banca dati nutrizionale certificata.")
+        else:
+            st.caption("Macronutrienti non ancora disponibili per tutti gli ingredienti: non vengono inventati né mostrati come valori certi.")
 
         edit_key=st.session_state.get("plan_edit_meal")
         if edit_key and (edit_key[0]!=day or edit_key[1] not in day_meals):

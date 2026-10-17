@@ -41,3 +41,11 @@ Based on V100.
 - Days containing an outside-home meal, or without usable ingredient calories, are left untouched rather than misleadingly scaling the other meals.
 - This safeguard aligns the displayed arithmetic; it does not independently verify nutrition quality or medical suitability. Review ingredient quantities when testing the generated plan.
 - No database schema, connection, profile, pantry, current plan, or history data is changed by the code update. Existing plans are not automatically rewritten; the safeguard applies when a new plan is generated.
+
+## V100.6 – Macro estimation visibility
+- Weekly-plan generation now requests protein, carbohydrate, and fat grams per ingredient alongside kcal and quantity.
+- The app shows daily macro totals only when all active ingredients in that day provide all three values; missing data is not silently filled with invented numbers.
+- Macro values are explicitly labelled as AI estimates, not verified values from a certified nutrition database.
+- When the existing calorie-alignment safeguard scales an ingredient, any supplied macro values are scaled consistently with the ingredient quantity.
+- Existing plans and stored database records are not migrated or rewritten. Existing plans without macro fields show a clear note that macro totals are unavailable.
+- No schema, database connection, credentials, profile, pantry, or history changes.
