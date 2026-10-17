@@ -3362,6 +3362,7 @@ def add_water_ml(delta):
     current=water_today_ml()
     st.session_state.water_history[d]=max(0, current + int(delta))
 
+# V100.3: calorie targets are calculated from estimated TDEE, adjusted by the selected goal.
 # V32: fixed the out_of_home variable mismatch in meal_recommendation/show_daily_meal_recommendation.
 # V45: active-calorie display shows 'Non disponibili' when no reliable active value exists; energy engine unchanged.
 # ---------------- Energy model ----------------
@@ -3371,26 +3372,41 @@ def bmr_mifflin(weight, height, age, sex):
     return round(value)
 
 ACTIVITY_FACTORS={"sedentaria":1.20,"leggera":1.375,"moderata":1.55,"alta":1.725}
+MIN_AUTOMATIC_TARGET_KCAL = 1500
+
+def calorie_target_for_goal(bmr, maintenance, goal, custom_target=0):
+    """Return a transparent planning target based on estimated TDEE.
+
+    This is a general estimate, not medical advice. Automatic weight-loss target
+    uses a moderate 15% reduction capped at 500 kcal/day. Maintenance uses TDEE;
+    weight gain and muscle gain use small, capped surpluses. The existing 1500 kcal
+    floor is retained for automatic/custom targets to avoid unexpectedly low values.
+    """
+    bmr=max(0, int(round(float(bmr or 0))))
+    maintenance=max(0, int(round(float(maintenance or 0))))
+    custom=int(float(custom_target or 0))
+    if goal == "🎯 Calorie personalizzate":
+        return max(MIN_AUTOMATIC_TARGET_KCAL, custom if custom > 0 else maintenance)
+    if goal == "🔻 Dimagrimento":
+        reduction=min(500, round(maintenance*0.15))
+        return max(MIN_AUTOMATIC_TARGET_KCAL, maintenance-reduction)
+    if goal == "⚖️ Mantenimento":
+        return max(MIN_AUTOMATIC_TARGET_KCAL, maintenance)
+    if goal == "🔺 Aumento di peso":
+        surplus=min(300, max(200, round(maintenance*0.10)))
+        return max(MIN_AUTOMATIC_TARGET_KCAL, maintenance+surplus)
+    if goal == "💪 Massa muscolare":
+        surplus=min(250, max(150, round(maintenance*0.07)))
+        return max(MIN_AUTOMATIC_TARGET_KCAL, maintenance+surplus)
+    return max(MIN_AUTOMATIC_TARGET_KCAL, maintenance)
 
 def energy_profile():
     p={k:st.session_state["p_"+k] for k in ["weight","height","age","sex","activity_level"]}
     bmr=bmr_mifflin(float(p["weight"]),float(p["height"]),int(p["age"]),p["sex"])
     maintenance=round(bmr*ACTIVITY_FACTORS[p["activity_level"]])
     goal=st.session_state.get("p_diet_goal","🔻 Dimagrimento")
-    # The meal-plan target is anchored to BMR, not to the full activity-adjusted
-    # maintenance value. Planned training is a profile preference, not a reason
-    # to automatically increase today's food target.
-    bmr_targets={
-        "🔻 Dimagrimento":0.00,
-        "⚖️ Mantenimento":0.10,
-        "🔺 Aumento di peso":0.15,
-        "💪 Massa muscolare":0.10,
-    }
-    if goal=="🎯 Calorie personalizzate":
-        custom=int(float(st.session_state.get("p_custom_calorie_target",0) or 0))
-        target=max(1500, custom if custom>0 else bmr)
-    else:
-        target=max(1500, round(bmr*(1+bmr_targets.get(goal,0.0))))
+    custom=int(float(st.session_state.get("p_custom_calorie_target",0) or 0))
+    target=calorie_target_for_goal(bmr, maintenance, goal, custom)
     adjustment=target-maintenance
     deficit=max(0, maintenance-target)
     surplus=max(0, target-maintenance)
@@ -3411,7 +3427,7 @@ def weight_projection():
     try:
         current=float(st.session_state.get("p_weight",0) or 0)
         goal=float(st.session_state.get("p_goal_weight",current) or current)
-        deficit=max(0,int(st.session_state.get("p_deficit",500) or 500))
+        deficit=max(0,int(st.session_state.get("p_deficit",0) or 0))
     except Exception:
         return None
 
@@ -4050,11 +4066,9 @@ def _save_profile_values(values):
     )
     goal = values["diet_goal"]
     bmr_save = bmr_mifflin(float(values["weight"]), float(values["height"]), int(values["age"]), values["sex"])
-    if goal == "🎯 Calorie personalizzate":
-        chosen_target = max(1500, int(values["custom_calorie_target"]))
-    else:
-        bmr_factor = {"🔻 Dimagrimento":0.00,"⚖️ Mantenimento":0.10,"🔺 Aumento di peso":0.15,"💪 Massa muscolare":0.10}.get(goal,0.0)
-        chosen_target = max(1500, round(bmr_save * (1 + bmr_factor)))
+    chosen_target = calorie_target_for_goal(
+        bmr_save, maintenance_for_save, goal, values.get("custom_calorie_target", 0)
+    )
     st.session_state.p_deficit = max(0, maintenance_for_save - chosen_target)
     st.session_state.profile_setup_complete = True
     if not _was_profile_complete:
@@ -4137,14 +4151,14 @@ if not _profile_complete():
         if diet_goal == "🎯 Calorie personalizzate":
             custom_target = st.number_input(
                 "Target kcal personalizzato", 1500, 6000,
-                int(st.session_state.get("p_custom_calorie_target",0) or max(1500, energy_profile()["bmr_est"])),
+                int(st.session_state.get("p_custom_calorie_target",0) or max(1500, energy_profile()["maintenance_est"])),
                 50
             )
-            st.caption(f"BMR stimato: {energy_profile()['bmr_est']} kcal · mantenimento stimato: {energy_profile()['maintenance_est']} kcal")
+            st.caption(f"BMR stimato: {energy_profile()['bmr_est']} kcal · mantenimento stimato (TDEE): {energy_profile()['maintenance_est']} kcal")
         else:
             custom_target = 0
             preview = energy_profile()
-            st.info(f"🎯 Target calcolato automaticamente: **{preview['target']} kcal/giorno** · base BMR {preview['bmr_est']} kcal. L'attività prevista non aumenta automaticamente il target.")
+            st.info(f"🎯 Target calcolato automaticamente: **{preview['target']} kcal/giorno** · mantenimento stimato (TDEE): {preview['maintenance_est']} kcal. Il target viene adattato all'obiettivo scelto.")
 
         st.subheader("🥗 Come vuoi mangiare?")
         style_options = ["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"]
@@ -5579,7 +5593,7 @@ else:
         goal_options=["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"]
         diet_goal=st.selectbox("Cosa vuoi ottenere?",goal_options,index=goal_options.index(st.session_state.p_diet_goal))
         if diet_goal == "🎯 Calorie personalizzate":
-            custom_target=st.number_input("Target kcal personalizzato",1500,6000,int(st.session_state.get("p_custom_calorie_target",0) or max(1500,ep["bmr_est"])),50)
+            custom_target=st.number_input("Target kcal personalizzato",1500,6000,int(st.session_state.get("p_custom_calorie_target",0) or max(1500,ep["maintenance_est"])),50)
             st.caption(f"BMR stimato: {ep['bmr_est']} kcal · mantenimento stimato: {ep['maintenance_est']} kcal")
         else:
             custom_target=0
