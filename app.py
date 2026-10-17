@@ -5594,10 +5594,10 @@ else:
         diet_goal=st.selectbox("Cosa vuoi ottenere?",goal_options,index=goal_options.index(st.session_state.p_diet_goal))
         if diet_goal == "🎯 Calorie personalizzate":
             custom_target=st.number_input("Target kcal personalizzato",1500,6000,int(st.session_state.get("p_custom_calorie_target",0) or max(1500,ep["maintenance_est"])),50)
-            st.caption(f"BMR stimato: {ep['bmr_est']} kcal · mantenimento stimato: {ep['maintenance_est']} kcal")
+            st.caption(f"BMR stimato: {ep['bmr_est']} kcal · mantenimento stimato (TDEE): {ep['maintenance_est']} kcal")
         else:
             custom_target=0
-            st.info(f"🎯 Target automatico: **{ep['target']} kcal/giorno** · calcolato a partire dal BMR ({ep['bmr_est']} kcal).")
+            st.info(f"🎯 Target automatico: **{ep['target']} kcal/giorno** · mantenimento stimato (TDEE): {ep['maintenance_est']} kcal. Il target è adattato all’obiettivo selezionato.")
 
         st.subheader("🥗 Stile alimentare")
         style_options=["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"]

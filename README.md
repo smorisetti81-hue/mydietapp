@@ -27,3 +27,9 @@ Based on V100.
 - Legacy profile deficit and weight projection now use the same target calculation; a zero deficit is no longer silently replaced with 500 kcal/day.
 - No database schema, database connection, stored profile, pantry, meal plan, or history data is modified by this release.
 - The 1500 kcal floor is a conservative software guard retained from the prior version, not an individualized medical recommendation.
+
+
+## V100.4 – TDEE target label fix
+- Corrected the profile-page automatic-target message so it reports estimated maintenance (TDEE) and the goal adjustment, rather than incorrectly saying the target is calculated directly from BMR.
+- Clarified the energy-details caption: TDEE is estimated as BMR × activity factor, then adjusted according to the selected goal.
+- No calorie formulas, database schema, database connection, stored profile, pantry, meal plan, or history data were changed.
