@@ -1,51 +1,29 @@
-# MyDietApp V100.1 – Health Auto Refresh Fix
+# MyDietApp V100.7 — Family Mode Foundation (draft)
 
-Based on V100.
+Based on **V100.6 – MACRO ESTIMATES**. The original app code and existing database schema are retained. This release adds a reviewed starting point for family-mode architecture; it does **not** yet activate family mode in the app.
 
-- Keeps automatic UI refresh every 15 seconds on Home and Attività.
-- Keeps remote Health Sync polling.
-- FIX: health snapshot fingerprint now hashes the entire payload instead of only its first 32 characters.
-- This detects changes in steps/calories/distance even when the beginning of the encoded payload remains unchanged.
-- Bridge V1.8.2 is not modified.
+## Included
+- `MIGRATION_FAMILY_MODE_V100_7_DRAFT.sql`: additive draft for Supabase/Postgres family groups, adult membership, invite-token records, shared pantry, shared meal assignments, and per-person meal portions.
+- Row-level security policies limit shared family data to authenticated family members.
+- The family owner is automatically added as a member when a family group is created.
+- Existing `profiles`, `meal_plans`, `meal_logs`, `mdid` identifiers, plans, and pantry data are not modified by this draft.
 
+## Important status / limitations
+- **Do not run this migration on production yet.** Review and test it in a staging Supabase project first.
+- This is a database foundation only. The current Streamlit app still uses its existing `mdid` flow; this release does not add Supabase Auth, invite acceptance, account linking, or family screens.
+- Invite creation/acceptance needs a trusted server-side implementation that validates hashed, expiring, one-time tokens. Client-side membership writes are intentionally not enabled.
+- Individual profiles, calorie targets, food logs, and progress must remain private per adult account. Children must not inherit an adult weight-loss calorie deficit; age-appropriate planning rules are still required before family meal generation is enabled.
+- Pantry quantities must only be deducted when a meal is confirmed consumed, not when a plan is generated. The current app flow is unchanged by this draft.
 
-## V100.2 – Health Sync profile fix
-- Health Sync lookup now uses the current MyDiet `mdid`, matching the Android Bridge configuration (`ID profilo MyDiet`).
-- `HEALTH_BRIDGE_PROFILE_ID` remains an optional Streamlit Secret override for special installations.
-- Removed the hardcoded profile fallback that could cause a valid Bridge snapshot to return HTTP 404.
-- A 404 is now reported as “snapshot not found for current profile” instead of a generic HTTP error.
-- Android Bridge V1.8.2 is unchanged.
+## V100.6 behavior retained
+- TDEE-based calorie target calculation.
+- Weekly-plan calorie alignment safeguard.
+- AI-estimated macros are shown only when available and remain labelled as estimates.
+- Existing app dependencies and runtime entry point are unchanged.
 
-
-## V100.3 – TDEE calorie target engine
-- Automatic targets now start from estimated daily maintenance (TDEE = BMR × activity factor), then adjust for the selected goal.
-- Weight loss: estimated 15% reduction from TDEE, capped at 500 kcal/day, with the existing 1500 kcal minimum retained.
-- Maintenance: estimated TDEE.
-- Weight gain: modest surplus (10%, bounded to 200–300 kcal/day).
-- Muscle gain: modest surplus (7%, bounded to 150–250 kcal/day).
-- Custom calorie target remains supported; when no custom value exists, the UI defaults to estimated TDEE rather than BMR.
-- Legacy profile deficit and weight projection now use the same target calculation; a zero deficit is no longer silently replaced with 500 kcal/day.
-- No database schema, database connection, stored profile, pantry, meal plan, or history data is modified by this release.
-- The 1500 kcal floor is a conservative software guard retained from the prior version, not an individualized medical recommendation.
-
-
-## V100.4 – TDEE target label fix
-- Corrected the profile-page automatic-target message so it reports estimated maintenance (TDEE) and the goal adjustment, rather than incorrectly saying the target is calculated directly from BMR.
-- Clarified the energy-details caption: TDEE is estimated as BMR × activity factor, then adjusted according to the selected goal.
-- No calorie formulas, database schema, database connection, stored profile, pantry, meal plan, or history data were changed.
-
-
-## V100.5 – Weekly plan calorie alignment
-- Weekly-plan prompt now specifies the daily target and approximate calorie distribution across breakfast, snack, lunch, and dinner.
-- Added a deterministic consistency safeguard after generation: if a normal at-home day differs from the target by more than 8%, ingredient quantities and their kcal values are proportionally adjusted when the required factor is within 0.75–1.40.
-- Days containing an outside-home meal, or without usable ingredient calories, are left untouched rather than misleadingly scaling the other meals.
-- This safeguard aligns the displayed arithmetic; it does not independently verify nutrition quality or medical suitability. Review ingredient quantities when testing the generated plan.
-- No database schema, connection, profile, pantry, current plan, or history data is changed by the code update. Existing plans are not automatically rewritten; the safeguard applies when a new plan is generated.
-
-## V100.6 – Macro estimation visibility
-- Weekly-plan generation now requests protein, carbohydrate, and fat grams per ingredient alongside kcal and quantity.
-- The app shows daily macro totals only when all active ingredients in that day provide all three values; missing data is not silently filled with invented numbers.
-- Macro values are explicitly labelled as AI estimates, not verified values from a certified nutrition database.
-- When the existing calorie-alignment safeguard scales an ingredient, any supplied macro values are scaled consistently with the ingredient quantity.
-- Existing plans and stored database records are not migrated or rewritten. Existing plans without macro fields show a clear note that macro totals are unavailable.
-- No schema, database connection, credentials, profile, pantry, or history changes.
+## Next implementation steps
+1. Test and refine this migration in a separate Supabase staging project.
+2. Add Supabase Auth and securely link each adult account to one family group without using `mdid` as authorization.
+3. Implement invite acceptance on the server and test RLS with two separate accounts.
+4. Add family setup and shared pantry/meal views, then test meal portions and shopping-list aggregation.
+5. Add age-appropriate child portions before enabling child meal planning.
