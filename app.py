@@ -34,7 +34,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp v100 · Health UI Auto Refresh · PostgreSQL profile + meal plan + meal logs persistence
+# MyDietApp V100.8 · Home Visual Refresh (CSS-only) · PostgreSQL profile + meal plan + meal logs persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -84,6 +84,31 @@ button,[data-testid="stBaseButton-secondary"],[data-testid="stBaseButton-primary
 .md-stat-label{font-size:.72rem;color:#949baa;margin-top:4px;}
 [data-testid="stExpander"] details {border-color:rgba(255,255,255,.08);background:#101318;border-radius:17px;}
 @media (max-width:700px){.md-page-title{font-size:1.55rem}.md-section-icon{width:43px;height:43px;border-radius:14px}.md-page-sub{font-size:.76rem}.md-stat{min-height:61px;padding:9px 10px;border-radius:16px}.md-stat-value{font-size:1.1rem}.md-stat-icon{width:30px;height:30px;border-radius:9px;font-size:15px}.block-container{padding-left:.8rem;padding-right:.8rem;padding-top:.35rem;padding-bottom:5.8rem;}h1{font-size:1.65rem !important;}h2{font-size:1.28rem !important;}h3{font-size:1.08rem !important;}.card{padding:14px;border-radius:19px}.hero{padding:17px;border-radius:21px}.big{font-size:1.8rem}.mydiet-logo{width:42px;height:42px;border-radius:14px;font-size:22px}.mydiet-brand-title{font-size:1.12rem}.mydiet-date{font-size:.72rem}.mydiet-kcal-number{font-size:2.05rem}div[data-testid="stButton"] button{min-height:2.65rem;}#bottom_nav div[data-testid="stButton"] button{min-height:2.85rem;font-size:.69rem;}}
+/* V100.8 HOME VISUAL REFRESH — presentation only; no business logic changes */
+.mydiet-home-intro { margin-bottom: 16px; }
+.mydiet-home-greeting { color: #f7f8fb; text-shadow: 0 2px 18px rgba(255,75,90,.10); }
+.mydiet-kcal-card {
+  position: relative; overflow: hidden;
+  border-color: rgba(255,83,96,.32);
+  background: radial-gradient(circle at 92% 4%, rgba(255,72,94,.22), transparent 38%),
+              linear-gradient(145deg, #1b202a 0%, #12151b 72%);
+  box-shadow: 0 14px 36px rgba(0,0,0,.24), inset 0 1px 0 rgba(255,255,255,.035);
+}
+.mydiet-kcal-label { color: #c1c7d1; }
+.mydiet-kcal-number { text-shadow: 0 2px 24px rgba(255,75,90,.10); }
+.mydiet-next-card, .mydiet-compact-meal, .mydiet-mini-card {
+  transition: border-color .18s ease, background .18s ease, transform .18s ease;
+}
+.mydiet-next-card { border-color: rgba(255,255,255,.12); background: linear-gradient(145deg,#1a2029,#12161c); }
+.mydiet-home-section { margin-top: 21px; }
+.mydiet-home-section-title { letter-spacing: -.03em; }
+.mydiet-compact-meal.done { border-color: rgba(53,199,123,.30); }
+.mydiet-shopping { box-shadow: inset 0 1px 0 rgba(255,255,255,.025); }
+@media (max-width:700px) {
+  .mydiet-home-section { margin-top: 17px; }
+  .mydiet-kcal-card { box-shadow: 0 10px 26px rgba(0,0,0,.22); }
+}
+
 </style>
 """
 st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", initial_sidebar_state="collapsed")
