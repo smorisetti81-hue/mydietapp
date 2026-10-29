@@ -34,7 +34,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp V100.8.1 · Home Visual Refresh (CSS-only) · PostgreSQL profile + meal plan + meal logs persistence
+# MyDietApp V100.8 · Home Visual Refresh (CSS-only) · PostgreSQL profile + meal plan + meal logs persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -108,6 +108,18 @@ button,[data-testid="stBaseButton-secondary"],[data-testid="stBaseButton-primary
   .mydiet-home-section { margin-top: 17px; }
   .mydiet-kcal-card { box-shadow: 0 10px 26px rgba(0,0,0,.22); }
 }
+
+
+/* V100.8.2 HOME CONCEPT — calorie ring, driven by existing balance values */
+.mydiet-kcal-card-v2 { padding: 20px 22px 22px; }
+.mydiet-kcal-layout { display:flex; align-items:center; gap:22px; margin-top:16px; }
+.mydiet-kcal-ring { width:132px; height:132px; flex:0 0 132px; border-radius:50%; display:grid; place-items:center; box-shadow:0 0 28px rgba(255,83,100,.10); }
+.mydiet-kcal-ring-inner { width:108px; height:108px; border-radius:50%; background:#11151b; border:1px solid rgba(255,255,255,.07); display:flex; flex-direction:column; align-items:center; justify-content:center; }
+.mydiet-kcal-ring-number { font-size:1.65rem; font-weight:950; letter-spacing:-.05em; color:#fff; line-height:1.05; }
+.mydiet-kcal-ring-caption { color:#aeb5c0; font-size:.72rem; margin-top:4px; }
+.mydiet-kcal-details { min-width:0; }
+.mydiet-kcal-unit { font-size:.88rem; font-weight:750; color:#a8afba; letter-spacing:-.02em; }
+@media (max-width:520px) { .mydiet-kcal-layout { gap:15px; } .mydiet-kcal-ring { width:104px;height:104px;flex-basis:104px; } .mydiet-kcal-ring-inner { width:84px;height:84px; } .mydiet-kcal-ring-number { font-size:1.35rem; } .mydiet-kcal-card-v2 { padding:17px; } .mydiet-kcal-number { font-size:1.8rem; } }
 
 </style>
 """
@@ -1068,46 +1080,6 @@ div[data-testid="stAlert"] { color: var(--md-text) !important; }
         font-size:.78rem !important;
     }
     .stButton > button {min-height:44px;}
-}
-
-/* V100.8.1 — visibly updated Home surface; CSS only */
-.mydiet-home-intro {
-    padding: 7px 2px 12px;
-    border-bottom: 1px solid rgba(255,255,255,.07);
-}
-.mydiet-home-greeting {
-    background: linear-gradient(90deg, #ffffff 0%, #ffd9dc 70%, #ff858e 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent !important;
-}
-.mydiet-kcal-card {
-    border: 1px solid rgba(255,82,104,.48) !important;
-    background:
-      radial-gradient(ellipse at 100% 0%, rgba(255,66,100,.25), transparent 42%),
-      radial-gradient(ellipse at 0% 100%, rgba(99,102,241,.11), transparent 44%),
-      linear-gradient(135deg, #1d202b 0%, #111319 72%) !important;
-    box-shadow: 0 18px 42px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.06) !important;
-}
-.mydiet-kcal-number { font-variant-numeric: tabular-nums; }
-.mydiet-home-progress [data-testid="stProgressBar"] > div {
-    background: linear-gradient(90deg, #ff5268, #ff8a72) !important;
-    border-radius: 999px !important;
-}
-.mydiet-next-card {
-    border: 1px solid rgba(255,110,125,.27) !important;
-    background: linear-gradient(120deg, rgba(255,75,95,.10), rgba(255,255,255,.025) 70%) !important;
-    box-shadow: 0 10px 26px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.035) !important;
-}
-.mydiet-home-section-title { font-size: 1.08rem; font-weight: 900; }
-.mydiet-compact-meal {
-    border-color: rgba(255,255,255,.10) !important;
-    background: linear-gradient(110deg, #171a21, #111318) !important;
-}
-.mydiet-compact-meal.done { border-color: rgba(53,199,123,.34) !important; }
-@media (max-width:700px) {
-    .mydiet-home-intro { padding-bottom: 10px; }
-    .mydiet-kcal-card { padding: 18px 16px 16px !important; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -4519,10 +4491,21 @@ if st.session_state.page=="Home":
     # Compact welcome line: the global MyDiet header remains the brand anchor.
     st.markdown(f'''<div class="mydiet-home-intro"><div><div class="mydiet-home-greeting">{greeting}</div><div class="mydiet-home-date">{date_label} · la tua giornata</div></div></div>''',unsafe_allow_html=True)
 
-    # Main calorie status: same underlying balance() logic, redesigned only visually.
-    st.markdown(f'''<div class="mydiet-kcal-card"><div class="mydiet-kcal-label">OBIETTIVO DI OGGI</div><div style="margin-top:9px;"><div class="mydiet-kcal-number">{eaten:,} <span style="font-size:.92rem;font-weight:750;color:#a8afba;letter-spacing:-.02em;">/ {target:,} kcal</span></div><div class="mydiet-kcal-sub">{'Ti restano' if rem>=0 else 'Sei sopra il target di'} <b>{abs(rem):,} kcal</b></div><div class="mydiet-kcal-target">Target alimentare di oggi</div></div></div>'''.replace(",","."),unsafe_allow_html=True)
-    st.markdown('<div class="mydiet-home-progress">',unsafe_allow_html=True)
-    st.progress(pct)
+    # Main calorie status: same balance() values, stronger visual hierarchy.
+    # Presentation-only change: the circular indicator is driven by the existing pct value.
+    ring_deg = int(round(pct * 360))
+    ring_style = f"background:conic-gradient(#ff5364 0deg, #ff5364 {ring_deg}deg, rgba(255,255,255,.09) {ring_deg}deg, rgba(255,255,255,.09) 360deg);"
+    st.markdown(f'''<div class="mydiet-kcal-card mydiet-kcal-card-v2">
+      <div class="mydiet-kcal-label">OBIETTIVO DI OGGI</div>
+      <div class="mydiet-kcal-layout">
+        <div class="mydiet-kcal-ring" style="{ring_style}"><div class="mydiet-kcal-ring-inner"><div class="mydiet-kcal-ring-number">{int(round(pct*100))}%</div><div class="mydiet-kcal-ring-caption">completato</div></div></div>
+        <div class="mydiet-kcal-details">
+          <div class="mydiet-kcal-number">{eaten:,}<span class="mydiet-kcal-unit"> / {target:,} kcal</span></div>
+          <div class="mydiet-kcal-sub">{'Ti restano' if rem>=0 else 'Sei sopra il target di'} <b>{abs(rem):,} kcal</b></div>
+          <div class="mydiet-kcal-target">Target alimentare di oggi</div>
+        </div>
+      </div>
+    </div>'''.replace(",","."),unsafe_allow_html=True)
     st.markdown('</div>',unsafe_allow_html=True)
 
     # V97: Home focuses directly on the next action.

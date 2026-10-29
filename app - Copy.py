@@ -1,0 +1,5846 @@
+import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+from openai import OpenAI
+import io
+import json
+import pandas as pd
+import urllib.parse
+import base64
+import requests
+from datetime import datetime, timedelta, timezone, date
+from zoneinfo import ZoneInfo
+from PIL import Image
+from collections import defaultdict
+import uuid
+import copy
+import re
+import math
+import os
+import hashlib
+
+# V86: durable PostgreSQL/Supabase profile persistence.
+# Import the stable DB API directly. Meal-log functions are resolved dynamically
+# so a stale deployment of db.py cannot crash the whole app at import time.
+import db as _db
+from db import (
+    ensure_schema as db_ensure_schema, load_profile as db_load_profile, save_profile as db_save_profile,
+    ensure_plan_schema as db_ensure_plan_schema, load_meal_plan_state as db_load_meal_plan_state,
+    save_meal_plan_state as db_save_meal_plan_state,
+)
+db_ensure_meal_logs_schema = getattr(_db, "ensure_meal_logs_schema", None)
+db_load_meal_logs = getattr(_db, "load_meal_logs", None)
+db_save_meal_logs = getattr(_db, "save_meal_logs", None)
+from html.parser import HTMLParser
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ============================================================
+# MyDietApp V100.8.1 · Home Visual Refresh (CSS-only) · PostgreSQL profile + meal plan + meal logs persistence
+# V57: next-week plan is a separate editable draft; active week stays untouched until activation.
+# V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
+# V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
+# V47: meal-level registration in Piano uses the same eaten state as Home; no changes to Health, energy balance, water or pantry logic.
+# - daily lunch/dinner recommendations linked to the active plan
+# - generic fuori-casa configuration for lunch/dinner, independent from the canteen
+# - recommendations adapt to the current dynamic calorie budget
+# - Pasto fuori receives the planned meal and available calorie context
+# Health-first release:
+# - real Google Fit data diagnostics
+# - robust aggregation for cumulative vs point data
+# - automatic BMR / calorie target calculation
+# - Home separates intake, target and observed expenditure
+# - Python owns local food/calorie state
+# - source-aware Google Fit diagnostics
+# - prefer Google Fit derived/reconciled streams instead of summing every source
+# ============================================================
+
+
+
+
+UI_BETA_CSS = """
+<style>
+#MainMenu, footer, header {visibility:hidden;}
+.stApp { background:#0b0d10; color:#f5f7fa; }
+.block-container {max-width:1120px;padding-top:.55rem;padding-bottom:6rem;}
+.mydiet-top {display:flex;align-items:center;justify-content:space-between;gap:16px;margin:4px 0 16px;}
+.mydiet-brand {display:flex;align-items:center;gap:12px;}
+.mydiet-logo {width:46px;height:46px;border-radius:15px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#ff5b62,#d71920);box-shadow:0 8px 28px rgba(255,70,80,.22);font-size:25px;}
+.mydiet-brand-title {font-size:1.22rem;font-weight:850;line-height:1.05;}.mydiet-brand-sub {font-size:.78rem;color:#9da4b0;margin-top:4px;}.mydiet-date {font-size:.78rem;color:#9da4b0;}
+.card {border:1px solid rgba(255,255,255,.08);border-radius:22px;padding:17px;margin:8px 0;background:#111419;box-shadow:0 8px 28px rgba(0,0,0,.16);}
+.hero {border-radius:25px;padding:22px;background:radial-gradient(circle at 85% 15%,rgba(255,76,84,.16),transparent 38%),linear-gradient(135deg,#17191f,#101216);border:1px solid rgba(255,76,84,.28);}
+.big {font-size:2.15rem;font-weight:850;line-height:1.05;}.muted,.small {color:#9da4b0;font-size:.84rem;}.ok {color:#5bd39a;font-weight:750;}.bad {color:#ff7279;font-weight:750;}
+.mydiet-kcal-card {border:1px solid rgba(255,255,255,.09);border-radius:26px;padding:21px;background:radial-gradient(circle at 92% 8%,rgba(215,25,32,.20),transparent 34%),linear-gradient(145deg,#181b22,#0f1115);box-shadow:0 12px 34px rgba(0,0,0,.22);}.mydiet-kcal-label {color:#aeb5c0;font-size:.76rem;font-weight:800;letter-spacing:.08em;}.mydiet-kcal-number {font-size:2.75rem;font-weight:950;letter-spacing:-.055em;line-height:1;}.mydiet-kcal-card .mydiet-kcal-sub {margin-top:8px;color:#aeb5c0;font-size:.86rem;}.mydiet-kcal-card .mydiet-kcal-sub b{color:#f5f7fa;}.mydiet-kcal-target{font-size:.76rem;color:#8f96a2;margin-top:3px;}.mydiet-meal-card{border:1px solid rgba(255,255,255,.09);border-radius:22px;padding:17px;background:linear-gradient(145deg,#15181e,#101216);box-shadow:0 8px 24px rgba(0,0,0,.15);}.mydiet-meal-title {font-size:1.02rem;font-weight:850;color:#f5f7fa;}.mydiet-meal-name{font-size:1.2rem;font-weight:900;margin-top:5px;letter-spacing:-.02em;}.mydiet-meal-meta{color:#9da4b0;font-size:.82rem;margin-top:6px;}.mydiet-section {font-size:1.12rem;font-weight:850;margin:21px 0 8px;}
+div[data-testid="stBottom"] {background:rgba(11,13,16,.96);border-top:1px solid rgba(255,255,255,.10);backdrop-filter:blur(16px);}#bottom_nav {padding:.18rem .25rem .32rem;}#bottom_nav div[data-testid="stHorizontalBlock"] {gap:.2rem !important;}#bottom_nav div[data-testid="stButton"] button {min-height:3.05rem;border-radius:15px;border:0;font-size:.76rem;font-weight:700;padding:.25rem .15rem;}#bottom_nav div[data-testid="stButton"] button[kind="primary"] {background:#d71920;color:white;box-shadow:0 4px 16px rgba(215,25,32,.25);}#bottom_nav div[data-testid="stButton"] button[kind="secondary"] {background:transparent;color:#aeb5c0;}
+button,[data-testid="stBaseButton-secondary"],[data-testid="stBaseButton-primary"] {border-radius:14px !important;}[data-testid="stMetric"] {background:#111419;border:1px solid rgba(255,255,255,.07);border-radius:18px;padding:10px 12px;}
+.md-section-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:4px 0 18px;padding:2px 2px;}
+.md-eyebrow{font-size:.68rem;font-weight:850;letter-spacing:.12em;color:#8e96a5;margin-bottom:4px;}
+.md-page-title{font-size:1.85rem;font-weight:900;letter-spacing:-.04em;line-height:1.05;}
+.md-page-sub{color:#949baa;font-size:.82rem;margin-top:7px;max-width:680px;line-height:1.4;}
+.md-section-icon{width:48px;height:48px;border-radius:16px;display:flex;align-items:center;justify-content:center;background:rgba(215,25,32,.13);border:1px solid rgba(215,25,32,.24);font-size:23px;flex:0 0 auto;}
+.md-stat{display:flex;align-items:center;gap:11px;background:#111419;border:1px solid rgba(255,255,255,.075);border-radius:18px;padding:11px 13px;min-height:67px;}
+.md-stat-accent{border-color:rgba(215,25,32,.28);background:linear-gradient(145deg,#171419,#111419);}
+.md-stat-ok{border-color:rgba(53,199,123,.18);}
+.md-stat-icon{width:34px;height:34px;border-radius:11px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.055);font-size:17px;flex:0 0 auto;}
+.md-stat-value{font-size:1.25rem;font-weight:900;line-height:1;}
+.md-stat-label{font-size:.72rem;color:#949baa;margin-top:4px;}
+[data-testid="stExpander"] details {border-color:rgba(255,255,255,.08);background:#101318;border-radius:17px;}
+@media (max-width:700px){.md-page-title{font-size:1.55rem}.md-section-icon{width:43px;height:43px;border-radius:14px}.md-page-sub{font-size:.76rem}.md-stat{min-height:61px;padding:9px 10px;border-radius:16px}.md-stat-value{font-size:1.1rem}.md-stat-icon{width:30px;height:30px;border-radius:9px;font-size:15px}.block-container{padding-left:.8rem;padding-right:.8rem;padding-top:.35rem;padding-bottom:5.8rem;}h1{font-size:1.65rem !important;}h2{font-size:1.28rem !important;}h3{font-size:1.08rem !important;}.card{padding:14px;border-radius:19px}.hero{padding:17px;border-radius:21px}.big{font-size:1.8rem}.mydiet-logo{width:42px;height:42px;border-radius:14px;font-size:22px}.mydiet-brand-title{font-size:1.12rem}.mydiet-date{font-size:.72rem}.mydiet-kcal-number{font-size:2.05rem}div[data-testid="stButton"] button{min-height:2.65rem;}#bottom_nav div[data-testid="stButton"] button{min-height:2.85rem;font-size:.69rem;}}
+/* V100.8 HOME VISUAL REFRESH — presentation only; no business logic changes */
+.mydiet-home-intro { margin-bottom: 16px; }
+.mydiet-home-greeting { color: #f7f8fb; text-shadow: 0 2px 18px rgba(255,75,90,.10); }
+.mydiet-kcal-card {
+  position: relative; overflow: hidden;
+  border-color: rgba(255,83,96,.32);
+  background: radial-gradient(circle at 92% 4%, rgba(255,72,94,.22), transparent 38%),
+              linear-gradient(145deg, #1b202a 0%, #12151b 72%);
+  box-shadow: 0 14px 36px rgba(0,0,0,.24), inset 0 1px 0 rgba(255,255,255,.035);
+}
+.mydiet-kcal-label { color: #c1c7d1; }
+.mydiet-kcal-number { text-shadow: 0 2px 24px rgba(255,75,90,.10); }
+.mydiet-next-card, .mydiet-compact-meal, .mydiet-mini-card {
+  transition: border-color .18s ease, background .18s ease, transform .18s ease;
+}
+.mydiet-next-card { border-color: rgba(255,255,255,.12); background: linear-gradient(145deg,#1a2029,#12161c); }
+.mydiet-home-section { margin-top: 21px; }
+.mydiet-home-section-title { letter-spacing: -.03em; }
+.mydiet-compact-meal.done { border-color: rgba(53,199,123,.30); }
+.mydiet-shopping { box-shadow: inset 0 1px 0 rgba(255,255,255,.025); }
+@media (max-width:700px) {
+  .mydiet-home-section { margin-top: 17px; }
+  .mydiet-kcal-card { box-shadow: 0 10px 26px rgba(0,0,0,.22); }
+}
+
+</style>
+"""
+st.set_page_config(page_title="MyDietApp", page_icon="💪", layout="wide", initial_sidebar_state="collapsed")
+st.markdown(UI_BETA_CSS, unsafe_allow_html=True)
+# ============================================================
+# MyDiet AI Engine v1.1 (V95.1)
+# Provider-neutral gateway: Gemini for DEV/free-tier, OpenAI for future PROD.
+# The rest of the app must never call either provider directly.
+# ============================================================
+AI_PROVIDER = str(st.secrets.get("AI_PROVIDER", "gemini")).strip().lower()
+if AI_PROVIDER not in {"gemini", "openai"}:
+    AI_PROVIDER = "gemini"
+
+OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-5.6-luna")
+GEMINI_MODEL = str(st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")).strip()
+# Ordered fallbacks: stable Gemini models with Free Tier, configurable via Streamlit Secrets.
+# Default chain deliberately spans different model tiers so a capacity spike on
+# the primary 3.8/3.7/3.6 family has additional escape routes.
+GEMINI_FALLBACK_MODELS = [m.strip() for m in str(st.secrets.get(
+    "GEMINI_FALLBACK_MODELS",
+    "gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite"
+)).split(",") if m.strip() and m.strip() != GEMINI_MODEL]
+_openai_api_key = st.secrets.get("OPENAI_API_KEY")
+_gemini_api_key = st.secrets.get("GEMINI_API_KEY")
+openai_client = OpenAI(api_key=_openai_api_key) if _openai_api_key else None
+_gemini_client = None
+AI_DEV_MODE = str(st.secrets.get("OPENAI_DEV_MODE", st.secrets.get("AI_DEV_MODE", "false"))).strip().lower() in {"1", "true", "yes", "on"}
+
+# USD / 1M tokens. These are telemetry estimates, not billing statements.
+# Gemini 3.8 Flash currently has a free tier; the paid prices below are kept
+# so the same engine can estimate cost if a paid Gemini project is used later.
+AI_PRICING_USD_PER_MILLION = {
+    "openai": {
+        "gpt-5.6-luna": {"input": 0.20, "cached_input": 0.02, "output": 1.20},
+    },
+    "gemini": {
+        "gemini-3.8-flash": {"input": 0.75, "cached_input": 0.075, "output": 3.75},
+        "gemini-3.7-flash": {"input": 0.75, "cached_input": 0.075, "output": 3.75},
+        "gemini-3.6-flash": {"input": 0.75, "cached_input": 0.075, "output": 3.75},
+    },
+}
+
+
+def _ai_usage_init():
+    return st.session_state.setdefault("ai_usage", {
+        "calls": 0, "errors": 0, "by_feature": {}, "input_tokens": 0,
+        "cached_input_tokens": 0, "output_tokens": 0, "estimated_usd": 0.0,
+        "last_call": None,
+    })
+
+
+def _ai_usage_record(provider, model, feature, input_tokens=0, cached_tokens=0,
+                     output_tokens=0, elapsed_ms=0):
+    usage = _ai_usage_init()
+    prices = AI_PRICING_USD_PER_MILLION.get(provider, {}).get(model, {})
+    uncached_input = max(0, int(input_tokens) - int(cached_tokens))
+    estimated = (
+        uncached_input * prices.get("input", 0)
+        + int(cached_tokens) * prices.get("cached_input", prices.get("input", 0))
+        + int(output_tokens) * prices.get("output", 0)
+    ) / 1_000_000
+    usage["calls"] += 1
+    usage["input_tokens"] += int(input_tokens)
+    usage["cached_input_tokens"] += int(cached_tokens)
+    usage["output_tokens"] += int(output_tokens)
+    usage["estimated_usd"] += estimated
+    usage["last_call"] = {
+        "feature": feature, "provider": provider, "model": model,
+        "input_tokens": int(input_tokens), "cached_input_tokens": int(cached_tokens),
+        "output_tokens": int(output_tokens), "estimated_usd": estimated,
+        "elapsed_ms": int(elapsed_ms),
+    }
+    by = usage["by_feature"].setdefault(feature, {
+        "calls": 0, "input_tokens": 0, "cached_input_tokens": 0,
+        "output_tokens": 0, "estimated_usd": 0.0,
+    })
+    by["calls"] += 1
+    by["input_tokens"] += int(input_tokens)
+    by["cached_input_tokens"] += int(cached_tokens)
+    by["output_tokens"] += int(output_tokens)
+    by["estimated_usd"] += estimated
+
+
+def _gemini_interaction(prompt, image=None, thinking_level=None, feature="general"):
+    """Gemini adapter. Lazy-imports the SDK so OpenAI-only deployments do not need it at runtime."""
+    global _gemini_client
+    import time
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise RuntimeError("Dipendenza Gemini mancante. Installa google-genai oppure usa AI_PROVIDER='openai'.") from exc
+    if not _gemini_api_key:
+        raise RuntimeError("GEMINI_API_KEY non configurata. Aggiungila nei Secrets di Streamlit.")
+    if _gemini_client is None:
+        _gemini_client = genai.Client(api_key=_gemini_api_key)
+
+    # Gemini 3.x supports low/medium/high; minimal is not supported by 3.7/3.8.
+    level = {None: None, "minimal": "low", "low": "low", "medium": "medium", "high": "high"}.get(thinking_level, "low")
+    config_kwargs = {}
+    if level:
+        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=level)
+
+    contents = [prompt]
+    if image is not None:
+        if hasattr(image, "getvalue"):
+            image_bytes = image.getvalue()
+            mime_type = getattr(image, "type", None) or "image/jpeg"
+            try:
+                image_obj = Image.open(io.BytesIO(image_bytes))
+            except Exception:
+                image_obj = image
+        else:
+            image_obj = image
+        contents.append(image_obj)
+
+    # The SDK already retries transient failures internally. Only a genuine 503
+    # triggers a switch to another model. Never bypass quota/auth errors (429/401/403).
+    # The fallback chain can cross model families/tiers (for example 3.8 -> 3.5 Lite)
+    # to reduce the chance that a capacity spike affects every attempt.
+    from google.genai import errors as gemini_errors
+    models_to_try = list(dict.fromkeys([GEMINI_MODEL] + GEMINI_FALLBACK_MODELS))
+    response = None
+    used_model = GEMINI_MODEL
+    started = time.perf_counter()
+    failures = []
+
+    def _is_gemini_503(exc):
+        # Different google-genai SDK versions can expose a 503 as ServerError,
+        # ClientError, or a generic exception. Do not let the fallback depend
+        # on one exact SDK exception class.
+        code = getattr(exc, "code", None)
+        status = getattr(exc, "status", None)
+        msg = str(exc)
+        return (str(code) == "503" or str(status) == "503" or
+                "503" in msg or "UNAVAILABLE" in msg.upper() or
+                "currently experiencing high demand" in msg.lower())
+
+    for index, model in enumerate(models_to_try):
+        try:
+            response = _gemini_client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(**config_kwargs) if config_kwargs else None,
+            )
+            used_model = model
+            break
+        except Exception as exc:
+            st.session_state["ai_usage"]["errors"] += 1
+            if not _is_gemini_503(exc):
+                raise
+
+            failures.append({"model": model, "error": str(exc)})
+            if index == len(models_to_try) - 1:
+                # Preserve a useful 503 message while showing which models
+                # were actually attempted. This makes deployment diagnosis
+                # much easier than exposing only the first failed attempt.
+                attempted = ", ".join(x["model"] for x in failures)
+                raise RuntimeError(
+                    f"Gemini 503 UNAVAILABLE su tutti i modelli configurati ({attempted}). "
+                    "Il servizio/modello è temporaneamente non disponibile; riprova tra poco."
+                ) from exc
+
+            next_model = models_to_try[index + 1]
+            st.session_state.setdefault("ai_fallback_log", []).append(
+                {"from": model, "to": next_model, "reason": "503 UNAVAILABLE"}
+            )
+    elapsed_ms = (time.perf_counter() - started) * 1000
+
+    meta = getattr(response, "usage_metadata", None)
+    input_tokens = int(getattr(meta, "prompt_token_count", 0) or 0) if meta else 0
+    output_tokens = int(getattr(meta, "candidates_token_count", 0) or 0) if meta else 0
+    cached_tokens = int(getattr(meta, "cached_content_token_count", 0) or 0) if meta else 0
+    _ai_usage_record("gemini", used_model, feature, input_tokens, cached_tokens, output_tokens, elapsed_ms)
+
+    text = getattr(response, "text", None)
+    if not text:
+        st.session_state["ai_usage"]["errors"] += 1
+        raise RuntimeError("Gemini non ha restituito testo.")
+    return text.strip()
+
+
+def _openai_interaction(prompt, image=None, thinking_level=None, feature="general"):
+    """OpenAI adapter."""
+    import time
+    _ai_usage_init()
+    if openai_client is None:
+        st.session_state["ai_usage"]["errors"] += 1
+        raise RuntimeError("OPENAI_API_KEY non configurata. Aggiungila nei Secrets di Streamlit.")
+
+    effort_map = {None: None, "minimal": "none", "low": "low", "medium": "medium", "high": "high"}
+    effort = effort_map.get(thinking_level, thinking_level if thinking_level in {"none", "low", "medium", "high"} else None)
+    if image is None:
+        input_payload = prompt
+    else:
+        if hasattr(image, "getvalue"):
+            image_bytes = image.getvalue()
+        else:
+            buf = io.BytesIO(); image.save(buf, format="JPEG"); image_bytes = buf.getvalue()
+        mime_type = getattr(image, "type", None) or "image/jpeg"
+        if mime_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+            mime_type = "image/jpeg"
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        input_payload = [{"role": "user", "content": [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": f"data:{mime_type};base64,{image_b64}"}]}]
+
+    kwargs = {"model": OPENAI_MODEL, "input": input_payload}
+    if effort:
+        kwargs["reasoning"] = {"effort": effort}
+    started = time.perf_counter()
+    try:
+        response = openai_client.responses.create(**kwargs)
+    except Exception:
+        st.session_state["ai_usage"]["errors"] += 1
+        raise
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    u = getattr(response, "usage", None)
+    input_tokens = int(getattr(u, "input_tokens", 0) or 0) if u else 0
+    output_tokens = int(getattr(u, "output_tokens", 0) or 0) if u else 0
+    details = getattr(u, "input_tokens_details", None) if u else None
+    cached_tokens = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+    _ai_usage_record("openai", OPENAI_MODEL, feature, input_tokens, cached_tokens, output_tokens, elapsed_ms)
+    text = getattr(response, "output_text", None)
+    if not text:
+        st.session_state["ai_usage"]["errors"] += 1
+        raise RuntimeError("OpenAI non ha restituito testo.")
+    return text.strip()
+
+
+def openai_interaction(prompt, image=None, thinking_level=None, feature="general"):
+    """Provider-neutral public gateway kept for backward compatibility.
+
+    Existing MyDiet code continues to call this function; the provider is selected
+    only through AI_PROVIDER, so switching provider does not require changing app features.
+    """
+    _ai_usage_init()
+    if AI_PROVIDER == "gemini":
+        return _gemini_interaction(prompt, image=image, thinking_level=thinking_level, feature=feature)
+    return _openai_interaction(prompt, image=image, thinking_level=thinking_level, feature=feature)
+
+
+def ai_cached_text(cache_namespace, cache_key, producer):
+    """Small session cache for expensive AI explanations.
+
+    The cache is intentionally session-scoped in V95.1; persistence can move to
+    PostgreSQL/backend when MyDiet becomes a multi-user product.
+    """
+    cache = st.session_state.setdefault("ai_response_cache", {})
+    key = f"{cache_namespace}::{cache_key}"
+    if key in cache:
+        return cache[key]
+    value = producer()
+    cache[key] = value
+    return value
+
+# ============================================================
+# Smart Shopping live data
+# ============================================================
+SMART_SHOPPING_STORES = [
+    "Conad", "Esselunga", "Carrefour", "Eurospin", "Tosano", "Lidl",
+    "Iper", "Tigros", "Coop", "Penny", "Aldi", "PAM", "Bennet",
+    "Sigma", "Il Gigante", "Famila"
+]
+
+
+def _money_value(value):
+    """Parse Italian/European money safely without turning 3.59 into 359.
+
+    Comprissimo can expose decimals with either a comma or a dot. A dot is
+    therefore a decimal separator when it is followed by exactly two digits;
+    it is a thousands separator only when the format clearly contains a
+    grouped number (e.g. 1.299,00).
+    """
+    try:
+        raw=str(value or "").replace("€", "").replace("\u00a0", " ").strip()
+        raw=re.sub(r"[^0-9,.-]", "", raw)
+        if not raw:
+            return None
+        if "," in raw and "." in raw:
+            # European grouped form: 1.299,00 -> 1299.00
+            if raw.rfind(",") > raw.rfind("."):
+                raw=raw.replace(".", "").replace(",", ".")
+            else:
+                # Less common US form: 1,299.00 -> 1299.00
+                raw=raw.replace(",", "")
+        elif "," in raw:
+            raw=raw.replace(",", ".")
+        elif raw.count(".") > 1:
+            # Multiple dots are grouping separators except the final decimal
+            parts=raw.split(".")
+            raw="".join(parts[:-1])+"."+parts[-1]
+        # A single dot followed by 1-2 digits is a decimal separator.
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _comprissimo_search_url(product_name, sort="unit_price"):
+    q = urllib.parse.quote_plus(str(product_name).strip())
+    return (
+        "https://comprissimo.ai/search?brand=&category=&has_price=True&on_sale=False"
+        f"&page=1&per_page=24&q={q}&sort={sort}&supermarket="
+    )
+
+
+def _clean_spaces(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _tokens(text):
+    return set(re.findall(r"[a-zàèéìòù0-9]+", str(text).lower()))
+
+
+def _match_score(query, product):
+    q = _tokens(query)
+    p = _tokens(product)
+    if not q or not p:
+        return 0.0
+    return len(q & p) / max(1, len(q))
+
+
+class _HTMLNode:
+    __slots__ = ("tag", "attrs", "parent", "children", "text_parts")
+    def __init__(self, tag="root", attrs=None, parent=None):
+        self.tag = tag
+        self.attrs = dict(attrs or [])
+        self.parent = parent
+        self.children = []
+        self.text_parts = []
+
+    def text(self):
+        parts = list(self.text_parts)
+        for child in self.children:
+            parts.append(child.text())
+        return _clean_spaces(" ".join(parts))
+
+    def find_links(self):
+        found = []
+        stack = list(self.children)
+        while stack:
+            node = stack.pop()
+            if node.tag == "a" and node.attrs.get("href"):
+                found.append(node)
+            stack.extend(reversed(node.children))
+        return found
+
+
+class _ComprissimoHTMLParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = _HTMLNode()
+        self.current = self.root
+        self.h3_nodes = []
+
+    def handle_starttag(self, tag, attrs):
+        node = _HTMLNode(tag.lower(), attrs, self.current)
+        self.current.children.append(node)
+        if node.tag == "h3":
+            self.h3_nodes.append(node)
+        # Keep void elements from changing the current parent.
+        if node.tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+            self.current = node
+
+    def handle_startendtag(self, tag, attrs):
+        node = _HTMLNode(tag.lower(), attrs, self.current)
+        self.current.children.append(node)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        node = self.current
+        while node is not self.root and node.tag != tag:
+            node = node.parent
+        if node is not self.root:
+            self.current = node.parent
+
+    def handle_data(self, data):
+        if data and data.strip():
+            self.current.text_parts.append(data)
+
+
+def _parse_comprissimo_search(html, query, limit=8):
+    """Parse the public Comprissimo catalog without external HTML dependencies.
+
+    A result is accepted only when product name, euro price and unit price are
+    all visible in the same small ancestor block. This keeps the parser
+    conservative and avoids inventing prices.
+    """
+    parser = _ComprissimoHTMLParser()
+    try:
+        parser.feed(html or "")
+        parser.close()
+    except Exception:
+        return []
+
+    products = []
+    seen = set()
+    for h3 in parser.h3_nodes:
+        name = _clean_spaces(h3.text())
+        if not name or name.lower() in {"catalogo prodotti", "confronto prezzi"}:
+            continue
+
+        card = h3
+        card_text = ""
+        # Walk up only a few structural levels to avoid using the whole page.
+        for _ in range(6):
+            parent = card.parent
+            if parent is None:
+                break
+            card = parent
+            if card.tag not in {"div", "article", "li", "section"}:
+                continue
+            txt = card.text()
+            if len(txt) <= 1800 and "Aggiungi" in txt and re.search(r"\d+[,.]\d+\s*€?/\s*(kg|L|pz)", txt, re.I):
+                card_text = txt
+                break
+        if not card_text:
+            continue
+
+        unit_match = re.search(r"(\d+[,.]\d+)\s*€?/\s*(kg|L|pz)", card_text, re.I)
+        if not unit_match:
+            continue
+        unit_price = _money_value(unit_match.group(1))
+        unit_kind = unit_match.group(2)
+        if unit_price is None:
+            continue
+
+        before_unit = card_text[:unit_match.start()]
+        prices = re.findall(r"(?<!\d)(\d+[,.]\d{2})\s*€", before_unit)
+        if not prices:
+            continue
+        price = _money_value(prices[-1])
+        if price is None or price <= 0:
+            continue
+
+        # Sanity-check the pair price/unit-price. The public catalog can contain
+        # unrelated numeric fragments inside a card; reject clearly impossible
+        # combinations such as 2.09 € for 0.10 €/kg (an implied 20.9 kg pack)
+        # unless the product name explicitly indicates a large pack.
+        if unit_kind.lower() in {"kg", "l"} and unit_price > 0:
+            implied_qty = price / unit_price
+            has_large_pack = bool(re.search(r"(?:[1-9]\d{1,3}(?:[,.]\d+)?|\d+(?:[,.]\d+)?)\s*(?:kg|l|litri|litro)", name, re.I))
+            if implied_qty > 10 and not has_large_pack:
+                continue
+
+        stores = [store for store in SMART_SHOPPING_STORES if re.search(rf"\b{re.escape(store)}\b", card_text, re.I)]
+        store = stores[0] if stores else ""
+        compare_url = ""
+        for a in card.find_links():
+            href = str(a.attrs.get("href", ""))
+            if "/compare/" in href:
+                compare_url = urllib.parse.urljoin("https://comprissimo.ai", href)
+                break
+
+        score = _match_score(query, name)
+        if score < 0.34:
+            continue
+        key = (name.lower(), store.lower(), round(price, 2), round(unit_price, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        products.append({
+            "name": name,
+            "store": store,
+            "price": price,
+            "unit_price": unit_price,
+            "unit_kind": unit_kind,
+            "compare_url": compare_url,
+            "search_url": _comprissimo_search_url(query),
+            "score": score,
+            "source": "Comprissimo",
+        })
+
+    products.sort(key=lambda x: (-x["score"], x["unit_price"], x["price"]))
+    return products[:limit]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_comprissimo_live(product_name):
+    """Fetch current public Comprissimo search data. Cached for 15 minutes."""
+    url = _comprissimo_search_url(product_name)
+    try:
+        response = requests.get(
+            url,
+            timeout=15,
+            headers={"User-Agent": "MyDietApp/66 (+smart-shopping)"},
+        )
+        response.raise_for_status()
+        return _parse_comprissimo_search(response.text, product_name, limit=8)
+    except Exception:
+        return []
+
+
+def _shopping_live_for_items(items):
+    """Fetch live results for the whole basket, with a small worker pool so the UI stays responsive."""
+    selected = list(items or [])
+    out = {}
+    if not selected:
+        return out
+    with ThreadPoolExecutor(max_workers=min(5, len(selected))) as pool:
+        futures = {pool.submit(fetch_comprissimo_live, str(r["name"]).strip()): r["name"] for r in selected}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                out[name] = future.result()
+            except Exception:
+                out[name] = []
+    return out
+
+
+def _shopping_cart_summary(live_results, items):
+    """Build a conservative store summary from products actually matched."""
+    store_totals = defaultdict(float)
+    store_products = defaultdict(int)
+    for r in items:
+        matches = live_results.get(r["name"], [])
+        if not matches:
+            continue
+        best_by_store = {}
+        for m in matches:
+            store = m.get("store") or ""
+            if not store:
+                continue
+            current = best_by_store.get(store)
+            if current is None or m["unit_price"] < current["unit_price"]:
+                best_by_store[store] = m
+        # We cannot know how many packages are needed without packaging data;
+        # therefore use the observed unit-price ranking only and never invent a cart total.
+        for store, m in best_by_store.items():
+            store_products[store] += 1
+    ranking = sorted(store_products.items(), key=lambda x: (-x[1], x[0]))
+    return [{"store": store, "matched": count} for store, count in ranking]
+
+def _shopping_need_in_source_unit(required_qty, required_unit, source_unit):
+    """Convert a planned requirement to the unit used by a live price."""
+    ru=str(required_unit or "g").lower()
+    su=str(source_unit or "").lower()
+    if ru==su: return float(required_qty)
+    if ru=="g" and su=="kg": return float(required_qty)/1000.0
+    if ru=="kg" and su=="g": return float(required_qty)*1000.0
+    if ru=="ml" and su=="l": return float(required_qty)/1000.0
+    if ru=="l" and su=="ml": return float(required_qty)*1000.0
+    return None
+
+def _shopping_store_cart(live_results, items, store):
+    """Estimate the actual package cost for one chain, conservatively."""
+    rows=[]
+    total=0.0
+    for r in items:
+        matches=[m for m in live_results.get(r["name"],[]) if (m.get("store") or "").lower()==store.lower()]
+        if not matches:
+            continue
+        matches=sorted(matches,key=lambda m:(m.get("unit_price",999999),m.get("price",999999)))
+        m=matches[0]
+        unit_price=float(m.get("unit_price") or 0)
+        price=float(m.get("price") or 0)
+        if unit_price<=0 or price<=0:
+            continue
+        need=_shopping_need_in_source_unit(float(r.get("need",0) or 0),r.get("unit","g"),m.get("unit_kind",""))
+        if need is None:
+            continue
+        package_qty=price/unit_price
+        if package_qty<=0:
+            continue
+        packages=max(1,int(math.ceil((need/package_qty)-1e-9)))
+        line_total=packages*price
+        rows.append({
+            "name":r["name"],"need":float(r.get("need",0) or 0),"need_unit":r.get("unit","g"),
+            "store":store,"price":price,"unit_price":unit_price,"unit_kind":m.get("unit_kind",""),
+            "package_qty":package_qty,"packages":packages,"line_total":line_total,"match":m
+        })
+        total+=line_total
+    return {"store":store,"rows":rows,"total":round(total,2),"matched":len(rows),"total_items":len(items)}
+
+def _shopping_all_store_carts(live_results, items):
+    carts={}
+    for store in SMART_SHOPPING_STORES:
+        cart=_shopping_store_cart(live_results,items,store)
+        if cart["matched"]>0:
+            carts[store]=cart
+    return carts
+
+FIT_BASE = "https://www.googleapis.com/fitness/v1/users/me"
+FIT_SCOPES = (
+    "https://www.googleapis.com/auth/fitness.activity.read "
+    "https://www.googleapis.com/auth/fitness.body.read "
+    "https://www.googleapis.com/auth/fitness.nutrition.read"
+)
+ROME = ZoneInfo("Europe/Rome")
+
+def today(): return datetime.now(ROME).date().isoformat()
+
+st.markdown("""
+<style>
+/* ==========================================================
+   MyDiet UI BETA — primo passaggio grafico
+   Obiettivo: meno effetto Streamlit, più app mobile.
+   ========================================================== */
+#MainMenu, footer, header {visibility:hidden;}
+
+/* MyDiet owns its visual theme: do not inherit Streamlit/browser light mode. */
+:root {
+    color-scheme: dark;
+    --md-bg: #0f1218;
+    --md-bg-soft: #141821;
+    --md-surface: #171b23;
+    --md-surface-2: #1c212b;
+    --md-surface-3: #222833;
+    --md-border: rgba(255,255,255,.105);
+    --md-border-strong: rgba(255,255,255,.16);
+    --md-soft: rgba(255,255,255,.045);
+    --md-text: #f5f6f8;
+    --md-muted: #9aa0ad;
+    --md-subtle: #747b89;
+    --md-accent: #ff4b4b;
+    --md-accent-soft: rgba(255,75,75,.14);
+    --md-success: #35c77b;
+    --md-radius: 22px;
+    --md-radius-sm: 15px;
+}
+
+html, body, [data-testid="stAppViewContainer"], [data-testid="stAppViewBlockContainer"] {
+    background: var(--md-bg) !important;
+    color: var(--md-text) !important;
+}
+.stApp {
+    background: radial-gradient(circle at 50% -8%, #202631 0%, var(--md-bg) 42%, #0a0d12 100%) !important;
+}
+
+/* Force readable text even when the host Streamlit theme is light. */
+.stMarkdown, .stText, label, p, li, span, div {
+    color: inherit;
+}
+.stCaption, [data-testid="stCaptionContainer"] { color: var(--md-muted) !important; }
+[data-testid="stHeader"] { background: transparent !important; }
+
+.block-container {
+    max-width: 940px;
+    padding-top: .45rem;
+    padding-bottom: 7.5rem;
+}
+
+/* App header */
+.mydiet-header {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:16px;
+    padding: 6px 2px 12px;
+}
+.mydiet-brand {
+    display:flex;
+    align-items:center;
+    gap:11px;
+}
+.mydiet-logo {
+    width:40px;height:40px;border-radius:13px;
+    display:flex;align-items:center;justify-content:center;
+    background:linear-gradient(135deg,rgba(255,75,75,.95),rgba(255,145,100,.88));
+    color:white;font-size:22px;box-shadow:0 8px 22px rgba(255,75,75,.18);
+}
+.mydiet-name {font-size:1.15rem;font-weight:850;letter-spacing:-.02em;line-height:1.05;}
+.mydiet-sub {font-size:.76rem;color:var(--md-muted);margin-top:3px;}
+.mydiet-date {font-size:.78rem;color:var(--md-muted);text-align:right;}
+
+/* Navigation buttons */
+div[data-testid="stHorizontalBlock"] button {
+    border-radius:14px !important;
+    min-height:42px !important;
+    font-weight:700 !important;
+    border:1px solid var(--md-border) !important;
+    transition:all .15s ease;
+}
+div[data-testid="stHorizontalBlock"] button:hover {transform:translateY(-1px);}
+
+/* Typography */
+h1 {font-size:1.9rem !important;letter-spacing:-.045em !important;margin-bottom:.1rem !important;}
+h2 {font-size:1.3rem !important;letter-spacing:-.03em !important;}
+h3 {font-size:1rem !important;letter-spacing:-.02em !important;}
+.stCaption {line-height:1.45;}
+
+/* Generic cards */
+.card {
+    border:1px solid var(--md-border);
+    border-radius:var(--md-radius);
+    padding:16px 18px;
+    margin:7px 0;
+    background:var(--md-surface);
+    box-shadow:0 4px 18px rgba(0,0,0,.035);
+    backdrop-filter: blur(8px);
+}
+.hero {
+    border-radius:24px;
+    padding:20px;
+    background:linear-gradient(135deg,rgba(255,75,75,.16),rgba(255,145,100,.06) 58%,rgba(128,128,128,.035));
+    border:1px solid rgba(255,75,75,.20);
+    box-shadow:0 8px 26px rgba(0,0,0,.045);
+}
+.muted {color:var(--md-muted);font-size:.86rem;}
+.big {font-size:2.25rem;font-weight:850;letter-spacing:-.04em;line-height:1.05;}
+.ok {color:#22a06b;font-weight:750;}
+.bad {color:#d64545;font-weight:750;}
+.small {font-size:.78rem;color:var(--md-muted);}
+
+/* Streamlit metric cards */
+div[data-testid="stMetric"] {
+    border:1px solid var(--md-border);
+    border-radius:18px;
+    padding:11px 13px;
+    background:var(--md-surface);
+    box-shadow:0 3px 14px rgba(0,0,0,.025);
+}
+div[data-testid="stMetricLabel"] {font-size:.78rem !important;}
+div[data-testid="stMetricValue"] {font-weight:800 !important;}
+
+/* Inputs / expanders / tabs */
+div[data-testid="stExpander"] {
+    border:1px solid var(--md-border) !important;
+    border-radius:17px !important;
+    overflow:hidden;
+    background:var(--md-surface-2);
+}
+div[data-baseweb="tab-list"] {gap:5px;}
+button[data-baseweb="tab"] {border-radius:12px !important;}
+
+/* Progress bars */
+div[data-testid="stProgressBar"] {height:9px !important;}
+
+/* Buttons feel like app actions */
+.stButton > button, .stDownloadButton > button {
+    border-radius:14px !important;
+    min-height:42px;
+    font-weight:700;
+}
+
+/* Reduce Streamlit vertical noise */
+hr {margin:1.1rem 0 !important;opacity:.35;}
+
+
+/* V89 Home redesign */
+.mydiet-home-intro{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:2px 1px 12px;}
+.mydiet-home-greeting{font-size:1.45rem;font-weight:900;letter-spacing:-.035em;line-height:1.05;}
+.mydiet-home-date{font-size:.74rem;color:var(--md-muted);margin-top:4px;}
+.mydiet-kcal-card{border:1px solid rgba(255,255,255,.11);border-radius:25px;padding:18px 18px 15px;background:radial-gradient(circle at 90% 8%,rgba(255,75,75,.16),transparent 34%),linear-gradient(145deg,#1a1f28,#141820);box-shadow:0 12px 32px rgba(0,0,0,.20);}
+.mydiet-kcal-label{color:#aeb5c0;font-size:.72rem;font-weight:850;letter-spacing:.075em;}
+.mydiet-kcal-number{font-size:2.55rem;font-weight:950;letter-spacing:-.055em;line-height:1;}
+.mydiet-kcal-sub{margin-top:7px;color:#b4bac4;font-size:.9rem;}
+.mydiet-kcal-sub b{color:#fff;}
+.mydiet-kcal-target{font-size:.73rem;color:#8f96a2;margin-top:3px;}
+.mydiet-home-progress{margin-top:9px;}
+.mydiet-trainer{border:1px solid rgba(255,145,100,.22);border-radius:21px;padding:15px 16px;background:linear-gradient(135deg,rgba(255,75,75,.11),rgba(255,145,100,.045) 58%,rgba(255,255,255,.025));box-shadow:0 7px 22px rgba(0,0,0,.14);}
+.mydiet-trainer-head{display:flex;align-items:center;gap:9px;font-size:.78rem;font-weight:850;color:#ffb09a;letter-spacing:.045em;text-transform:uppercase;}
+.mydiet-trainer-title{font-size:1.05rem;font-weight:900;margin-top:7px;}
+.mydiet-trainer-text{font-size:.82rem;line-height:1.42;color:#b8bec8;margin-top:4px;}
+.mydiet-trainer-action{margin-top:10px;font-size:.75rem;color:#ff9f8e;font-weight:800;}
+.mydiet-home-section{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:18px 1px 8px;}
+.mydiet-home-section-title{font-size:1.05rem;font-weight:900;letter-spacing:-.025em;}
+.mydiet-home-section-sub{font-size:.68rem;color:var(--md-subtle);}
+.mydiet-next-card{border:1px solid rgba(255,255,255,.10);border-radius:20px;padding:15px 15px 13px;background:linear-gradient(145deg,#191e27,#151920);box-shadow:0 7px 22px rgba(0,0,0,.14);}
+.mydiet-next-top{display:flex;align-items:center;gap:9px;color:#aeb5c0;font-size:.77rem;font-weight:800;}
+.mydiet-next-name{font-size:1.17rem;font-weight:900;letter-spacing:-.025em;margin-top:7px;}
+.mydiet-next-kcal{font-size:.78rem;color:#9da4b0;margin-top:4px;}
+.mydiet-compact-meal{display:flex;align-items:center;gap:10px;border:1px solid rgba(255,255,255,.075);border-radius:17px;padding:10px 11px;margin:6px 0;background:rgba(255,255,255,.025);}
+.mydiet-compact-meal.done{border-color:rgba(53,199,123,.20);background:rgba(53,199,123,.055);}
+.mydiet-compact-meal-icon{width:34px;height:34px;border-radius:11px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.055);font-size:1rem;flex:0 0 34px;}
+.mydiet-compact-meal-copy{min-width:0;flex:1;}
+.mydiet-compact-meal-title{font-size:.82rem;font-weight:850;}
+.mydiet-compact-meal-name{font-size:.73rem;color:#9da4b0;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mydiet-compact-meal-status{font-size:.66rem;color:#7f8794;margin-top:3px;}
+.mydiet-compact-meal.done .mydiet-compact-meal-status{color:#35c77b;font-weight:750;}
+.mydiet-compact-kcal{text-align:right;white-space:nowrap;}
+.mydiet-compact-kcal b{font-size:.86rem;font-weight:900;}
+.mydiet-compact-kcal span{display:block;font-size:.60rem;color:#7f8794;margin-top:2px;}
+.mydiet-mini-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.mydiet-mini-card{border:1px solid rgba(255,255,255,.075);border-radius:17px;padding:12px 13px;background:rgba(255,255,255,.025);}
+.mydiet-mini-label{font-size:.67rem;color:#8f96a2;font-weight:750;}
+.mydiet-mini-value{font-size:1.02rem;font-weight:900;margin-top:3px;}
+.mydiet-mini-sub{font-size:.65rem;color:#7f8794;margin-top:2px;}
+.mydiet-shopping{border:1px solid rgba(53,199,123,.20);border-radius:20px;padding:14px 15px;background:linear-gradient(145deg,rgba(53,199,123,.07),rgba(255,255,255,.02));}
+.mydiet-shopping-title{font-size:.96rem;font-weight:900;}
+.mydiet-shopping-meta{font-size:.74rem;color:#a6adb8;margin-top:4px;}
+@media (max-width:700px){
+ .mydiet-home-intro{margin-top:0;margin-bottom:10px;}
+ .mydiet-home-greeting{font-size:1.25rem;}
+ .mydiet-kcal-card{padding:16px 15px 13px;border-radius:21px;}
+ .mydiet-kcal-number{font-size:2.18rem;}
+ .mydiet-kcal-card .mydiet-kcal-sub{font-size:.82rem;}
+ .mydiet-trainer{padding:13px 14px;border-radius:19px;}
+ .mydiet-next-card{padding:13px 13px 11px;border-radius:18px;}
+ .mydiet-home-section{margin-top:15px;}
+}
+
+/* V81: daily meal cards — app-like status list */
+.mydiet-day-meal {
+    border:1px solid rgba(255,255,255,.085); border-radius:19px; padding:13px 14px;
+    margin:7px 0 5px; background:linear-gradient(145deg,#15181e,#101216);
+    box-shadow:0 6px 18px rgba(0,0,0,.13); transition:transform .15s ease,border-color .15s ease;
+}
+.mydiet-day-meal.done {border-color:rgba(53,199,123,.22); background:linear-gradient(145deg,rgba(53,199,123,.075),#111419);}
+.mydiet-day-meal-main {display:flex; align-items:center; gap:11px; min-width:0;}
+.mydiet-day-meal-icon {width:38px;height:38px;border-radius:12px;display:flex;align-items:center;justify-content:center;flex:0 0 38px;background:rgba(255,255,255,.055);font-size:1.08rem;}
+.mydiet-day-meal.done .mydiet-day-meal-icon {background:rgba(53,199,123,.12);}
+.mydiet-day-meal-copy {min-width:0; flex:1;}
+.mydiet-day-meal-title {font-size:.94rem;font-weight:850;line-height:1.1;}
+.mydiet-day-meal-name {font-size:.78rem;color:#a5abb6;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mydiet-day-meal-status {font-size:.70rem;color:#8f96a2;margin-top:5px;}
+.mydiet-day-meal.done .mydiet-day-meal-status {color:#35c77b;font-weight:750;}
+.mydiet-day-meal-kcal {display:flex;flex-direction:column;align-items:flex-end;line-height:1;}
+.mydiet-day-meal-kcal b {font-size:1rem;font-weight:900;}
+.mydiet-day-meal-kcal span {font-size:.64rem;color:#7f8693;margin-top:4px;}
+
+/* Piano modes */
+.plan-mode-banner {
+    border:1px solid var(--md-border); border-radius:16px; padding:13px 15px;
+    background:var(--md-soft); margin:8px 0 14px;
+}
+.plan-mode-banner strong {display:block;font-size:1.02rem;margin:2px 0;}
+
+
+/* V82: Piano visual refresh — weekly context, day header and meal containers */
+div[data-testid="stRadio"] [role="radiogroup"] {
+    gap:6px !important;
+    background:var(--md-surface-2);
+    border:1px solid var(--md-border);
+    border-radius:16px;
+    padding:5px;
+}
+div[data-testid="stRadio"] label {
+    border-radius:11px !important;
+    padding:7px 10px !important;
+    min-height:34px !important;
+}
+div[data-testid="stRadio"] label:has(input:checked) {
+    background:rgba(255,75,75,.16) !important;
+}
+.mydiet-plan-day-head {
+    display:flex; align-items:flex-end; justify-content:space-between; gap:12px;
+    margin:14px 0 10px; padding:2px 2px 0;
+}
+.mydiet-plan-day-title {font-size:1.28rem;font-weight:900;letter-spacing:-.025em;line-height:1.05;}
+.mydiet-plan-day-meta {font-size:.72rem;color:#8f96a2;margin-top:5px;}
+.mydiet-plan-meal-head {
+    display:flex;align-items:center;gap:10px;margin-bottom:8px;
+}
+.mydiet-plan-meal-icon {
+    width:36px;height:36px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+    background:rgba(255,255,255,.055);font-size:1.02rem;flex:0 0 36px;
+}
+.mydiet-plan-meal-title {font-size:.92rem;font-weight:850;line-height:1.1;}
+.mydiet-plan-meal-name {font-size:.78rem;color:#9ba1ad;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mydiet-plan-meal-kcal {margin-left:auto;text-align:right;white-space:nowrap;}
+.mydiet-plan-meal-kcal b {font-size:.92rem;font-weight:900;}
+.mydiet-plan-meal-kcal span {display:block;font-size:.62rem;color:#7f8693;margin-top:3px;}
+/* Make the bordered meal containers feel like native cards. */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius:19px !important;
+    background:linear-gradient(145deg,#15181e,#101216) !important;
+    border-color:rgba(255,255,255,.075) !important;
+    box-shadow:0 5px 18px rgba(0,0,0,.12);
+}
+
+/* Fixed mobile-style bottom navigation */
+.mydiet-bottom-nav {
+    position:fixed; left:10px; right:10px; bottom:10px; z-index:9999;
+    display:grid; grid-template-columns:repeat(5,1fr); gap:5px;
+    padding:7px; border:1px solid rgba(128,128,128,.22); border-radius:20px;
+    background:rgba(20,22,29,.94); backdrop-filter:blur(16px);
+    box-shadow:0 10px 30px rgba(0,0,0,.35);
+}
+.mydiet-bottom-nav a {
+    text-decoration:none !important; color:#aaa !important; text-align:center;
+    padding:6px 2px 5px; border-radius:14px; font-size:.68rem; line-height:1.05;
+}
+.mydiet-bottom-nav a span {display:block;font-size:1.1rem;margin-bottom:3px;}
+.mydiet-bottom-nav a.active {background:rgba(255,75,75,.18); color:#fff !important; font-weight:800;}
+@media (min-width:701px) { .mydiet-bottom-nav {left:50%;right:auto;transform:translateX(-50%);width:min(620px,calc(100% - 30px));} }
+
+/* Native Streamlit bottom tabs. st.bottom owns the viewport positioning. */
+[data-testid="stBottom"] {
+    background: transparent !important;
+    z-index: 9999 !important;
+    padding: 0 .5rem .5rem !important;
+}
+.st-key-bottom_nav {
+    width: min(680px, 100%) !important;
+    margin: 0 auto !important;
+    padding: 5px !important;
+    border-radius: 19px;
+    background: rgba(30,33,40,.96);
+    border: 1px solid rgba(255,255,255,.10);
+    box-shadow: 0 10px 35px rgba(0,0,0,.35);
+    backdrop-filter: blur(14px);
+}
+.st-key-bottom_nav div[data-testid="stHorizontalBlock"] {
+    gap: 2px !important;
+    flex-wrap: nowrap !important;
+    align-items: stretch !important;
+    width: 100% !important;
+}
+.st-key-bottom_nav div[data-testid="stHorizontalBlock"] > div {
+    min-width: 0 !important;
+    flex: 1 1 0 !important;
+    width: 20% !important;
+}
+.st-key-bottom_nav button {
+    width: 100% !important;
+    min-height: 2.75rem !important;
+    padding: .32rem .05rem !important;
+    margin: 0 !important;
+    border-radius: 13px !important;
+    font-size: .68rem !important;
+    line-height: 1 !important;
+    white-space: nowrap !important;
+}
+@media (max-width: 700px) {
+    [data-testid="stBottom"] { padding: 0 .35rem calc(.35rem + env(safe-area-inset-bottom)) !important; }
+    .st-key-bottom_nav { padding: 5px !important; border-radius: 17px; }
+    .st-key-bottom_nav button { min-height: 2.7rem !important; font-size: .62rem !important; padding: .28rem .02rem !important; }
+}
+
+
+
+/* Form controls */
+.stTextInput input, .stNumberInput input, .stDateInput input,
+.stTextArea textarea, div[data-baseweb="select"] > div,
+div[data-baseweb="input"] > div, .stMultiSelect div[data-baseweb="select"] > div {
+    background: var(--md-surface-2) !important;
+    color: var(--md-text) !important;
+    border-color: var(--md-border-strong) !important;
+}
+.stTextInput input::placeholder, .stNumberInput input::placeholder, .stTextArea textarea::placeholder {
+    color: var(--md-subtle) !important;
+}
+.stSelectbox label, .stMultiSelect label, .stNumberInput label, .stTextInput label,
+.stTextArea label, .stRadio label, .stCheckbox label {
+    color: var(--md-muted) !important;
+}
+button[data-baseweb="tab"] { color: var(--md-muted) !important; }
+button[data-baseweb="tab"][aria-selected="true"] { color: var(--md-text) !important; }
+
+/* Keep success/warning/error surfaces readable in the dark theme. */
+div[data-testid="stAlert"] { color: var(--md-text) !important; }
+
+@media (max-width: 700px) {
+    .block-container {max-width:100%;padding: .25rem .68rem 6rem;}
+    .mydiet-header {padding:3px 1px 10px;}
+    .mydiet-logo {width:38px;height:38px;border-radius:12px;font-size:20px;}
+    .mydiet-name {font-size:1.02rem;}
+    .mydiet-date {display:none;}
+    h1 {font-size:1.65rem !important;}
+    h2 {font-size:1.18rem !important;}
+    .hero {padding:16px;border-radius:20px;}
+    .card {padding:13px 14px;border-radius:17px;}
+    .big {font-size:2rem;}
+    div[data-testid="stMetric"] {padding:10px 11px;}
+    div[data-testid="stHorizontalBlock"] {gap:6px !important;}
+    div[data-testid="stHorizontalBlock"] button {
+        padding-left:4px !important;padding-right:4px !important;
+        font-size:.78rem !important;
+    }
+    .stButton > button {min-height:44px;}
+}
+
+/* V100.8.1 — visibly updated Home surface; CSS only */
+.mydiet-home-intro {
+    padding: 7px 2px 12px;
+    border-bottom: 1px solid rgba(255,255,255,.07);
+}
+.mydiet-home-greeting {
+    background: linear-gradient(90deg, #ffffff 0%, #ffd9dc 70%, #ff858e 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent !important;
+}
+.mydiet-kcal-card {
+    border: 1px solid rgba(255,82,104,.48) !important;
+    background:
+      radial-gradient(ellipse at 100% 0%, rgba(255,66,100,.25), transparent 42%),
+      radial-gradient(ellipse at 0% 100%, rgba(99,102,241,.11), transparent 44%),
+      linear-gradient(135deg, #1d202b 0%, #111319 72%) !important;
+    box-shadow: 0 18px 42px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.06) !important;
+}
+.mydiet-kcal-number { font-variant-numeric: tabular-nums; }
+.mydiet-home-progress [data-testid="stProgressBar"] > div {
+    background: linear-gradient(90deg, #ff5268, #ff8a72) !important;
+    border-radius: 999px !important;
+}
+.mydiet-next-card {
+    border: 1px solid rgba(255,110,125,.27) !important;
+    background: linear-gradient(120deg, rgba(255,75,95,.10), rgba(255,255,255,.025) 70%) !important;
+    box-shadow: 0 10px 26px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.035) !important;
+}
+.mydiet-home-section-title { font-size: 1.08rem; font-weight: 900; }
+.mydiet-compact-meal {
+    border-color: rgba(255,255,255,.10) !important;
+    background: linear-gradient(110deg, #171a21, #111318) !important;
+}
+.mydiet-compact-meal.done { border-color: rgba(53,199,123,.34) !important; }
+@media (max-width:700px) {
+    .mydiet-home-intro { padding-bottom: 10px; }
+    .mydiet-kcal-card { padding: 18px 16px 16px !important; }
+}
+</style>
+""", unsafe_allow_html=True)
+
+# Global MyDiet header: rendered once for the whole app
+weekday_it={0:'Lunedì',1:'Martedì',2:'Mercoledì',3:'Giovedì',4:'Venerdì',5:'Sabato',6:'Domenica'}
+month_it={1:'gennaio',2:'febbraio',3:'marzo',4:'aprile',5:'maggio',6:'giugno',7:'luglio',8:'agosto',9:'settembre',10:'ottobre',11:'novembre',12:'dicembre'}
+now_ui=datetime.now(ROME)
+ui_date=f'{weekday_it[now_ui.weekday()]} {now_ui.day} {month_it[now_ui.month]}'
+
+st.markdown(f"""
+<div class="mydiet-header">
+  <div class="mydiet-brand">
+    <div class="mydiet-logo">🥗</div>
+    <div>
+      <div class="mydiet-name">MyDiet</div>
+      <div class="mydiet-sub">Il tuo piano. La tua giornata.</div>
+    </div>
+  </div>
+  <div class="mydiet-date">{ui_date}</div>
+</div>
+""", unsafe_allow_html=True)
+
+# ---------------- Native Health Connect bridge ----------------
+HEALTH_BRIDGE_PARAM = "mydiet_health"
+
+def _decode_health_bridge_payload(raw):
+    """Decode a compact URL-safe Health Connect snapshot from the Android bridge."""
+    if not raw:
+        return None
+    try:
+        pad = "=" * (-len(raw) % 4)
+        data = base64.urlsafe_b64decode((raw + pad).encode("ascii"))
+        obj = json.loads(data.decode("utf-8"))
+        if obj.get("schema") != "mydietapp.health.v1":
+            return None
+        return obj
+    except Exception:
+        return None
+
+def _ingest_native_health_bridge():
+    raw = st.query_params.get(HEALTH_BRIDGE_PARAM)
+    if not raw:
+        return False
+    payload = _decode_health_bridge_payload(raw)
+    if not payload:
+        return False
+    # Avoid rewriting state on every Streamlit rerun. The payload itself remains
+    # in the URL so a browser refresh can restore the latest bridge snapshot.
+    fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    if st.session_state.get("health_bridge_fingerprint") == fingerprint:
+        return False
+    metrics = payload.get("metrics", {})
+    health = {
+        "provider": {
+            "key": "health_connect_native",
+            "name": "Health Connect (Android nativo)",
+            "status": "active",
+            "schema": payload.get("schema"),
+            "received_at": datetime.now(ROME).isoformat(),
+            "bridge_version": payload.get("bridge_version"),
+        },
+        "date": payload.get("date") or today(),
+        "steps_today": metrics.get("steps"),
+        "calories_today": metrics.get("total_calories"),
+        "active_calories_today": metrics.get("active_calories"),
+        "distance_today": metrics.get("distance_km"),
+        "weight": metrics.get("weight_kg"),
+        "body_fat": metrics.get("body_fat_percent"),
+        "lean_mass": metrics.get("lean_mass_kg"),
+        "bmr": metrics.get("bmr_kcal_per_day"),
+        "workouts_today": metrics.get("workouts"),
+        "workout_details_today": metrics.get("workout_details", []),
+        "heart_rate_avg": metrics.get("heart_rate_avg"),
+        "heart_rate_min": metrics.get("heart_rate_min"),
+        "heart_rate_max": metrics.get("heart_rate_max"),
+        "heart_rate_samples": metrics.get("heart_rate_samples"),
+        "sleep_minutes": metrics.get("sleep_minutes"),
+        "steps_source_verified": bool(payload.get("trust", {}).get("steps", False)),
+        "calories_source_verified": bool(payload.get("trust", {}).get("total_calories", False)),
+        "active_calories_source_verified": bool(payload.get("trust", {}).get("active_calories", False)),
+        "native_health_snapshot": True,
+        "native_health_payload": payload,
+    }
+    # Keep the history contract simple for the first native bridge release.
+    hist = {}
+    for key, value in (("steps", metrics.get("steps")), ("calories", metrics.get("total_calories")),
+                       ("weight", metrics.get("weight_kg")), ("body_fat", metrics.get("body_fat_percent")),
+                       ("distance", metrics.get("distance_km"))):
+        if value is not None:
+            hist[key] = [{"date": health["date"], "value": value}]
+    st.session_state.health = health
+    st.session_state.health_history = hist
+    st.session_state.diagnostics = {
+        "native_bridge": {
+            "status": "available",
+            "type": "Health Connect native snapshot",
+            "bridge_version": payload.get("bridge_version"),
+            "received_at": health["provider"]["received_at"],
+        }
+    }
+    st.session_state.last_sync = datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+    st.session_state.health_bridge_fingerprint = fingerprint
+    return True
+
+_ingest_native_health_bridge()
+
+# ---------------- State ----------------
+def sid(): return uuid.uuid4().hex[:10]
+
+def init_plan():
+    def ing(n,q,u,k): return {"id":sid(),"name":n,"qty":q,"unit":u,"kcal":k}
+    # Piano demo completo per tutti i 7 giorni. In questo modo la Home non rimane
+    # senza il giorno corrente quando una nuova sessione Streamlit viene aperta.
+    return {
+        "Lunedì": {
+            "☕ Colazione":{"name":"Yogurt, avena e frutta","ingredients":[ing("Yogurt greco",250,"g",180),ing("Avena",50,"g",190),ing("Miele",10,"g",30)]},
+            "🍎 Spuntino":{"name":"Mela e mandorle","ingredients":[ing("Mela",180,"g",95),ing("Mandorle",15,"g",90)]},
+            "🍽️ Pranzo":{"name":"Riso, pollo e verdure","ingredients":[ing("Riso basmati",90,"g",320),ing("Petto di pollo",180,"g",300),ing("Zucchine",250,"g",45),ing("Olio EVO",10,"g",90)]},
+            "🌙 Cena":{"name":"Uova, pane e verdure","ingredients":[ing("Uova",2,"pz",150),ing("Pane integrale",70,"g",175),ing("Insalata mista",250,"g",50),ing("Olio EVO",10,"g",90)]}
+        },
+        "Martedì": {
+            "☕ Colazione":{"name":"Yogurt, banana e avena","ingredients":[ing("Yogurt greco",250,"g",180),ing("Banana",120,"g",105),ing("Avena",40,"g",152)]},
+            "🍎 Spuntino":{"name":"Frutta e noci","ingredients":[ing("Pera",180,"g",100),ing("Noci",15,"g",98)]},
+            "🍽️ Pranzo":{"name":"Pasta al pomodoro e tacchino","ingredients":[ing("Pasta",90,"g",320),ing("Passata di pomodoro",150,"g",45),ing("Fesa di tacchino",180,"g",200),ing("Olio EVO",10,"g",90)]},
+            "🌙 Cena":{"name":"Salmone, patate e verdure","ingredients":[ing("Salmone",160,"g",330),ing("Patate",250,"g",190),ing("Verdure miste",250,"g",70),ing("Olio EVO",5,"g",45)]}
+        },
+        "Mercoledì": {
+            "☕ Colazione":{"name":"Pane, ricotta e frutta","ingredients":[ing("Pane integrale",80,"g",200),ing("Ricotta",100,"g",170),ing("Frutta",150,"g",80)]},
+            "🍎 Spuntino":{"name":"Yogurt e frutta","ingredients":[ing("Yogurt greco",170,"g",120),ing("Frutti di bosco",100,"g",45)]},
+            "🍽️ Pranzo":{"name":"Riso, tacchino e broccoli","ingredients":[ing("Riso basmati",90,"g",320),ing("Fesa di tacchino",180,"g",200),ing("Broccoli",250,"g",85),ing("Olio EVO",10,"g",90)]},
+            "🌙 Cena":{"name":"Frittata e pane","ingredients":[ing("Uova",3,"pz",225),ing("Pane integrale",70,"g",175),ing("Spinaci",250,"g",60),ing("Olio EVO",5,"g",45)]}
+        },
+        "Giovedì": {
+            "☕ Colazione":{"name":"Yogurt, avena e mela","ingredients":[ing("Yogurt greco",250,"g",180),ing("Avena",50,"g",190),ing("Mela",150,"g",80)]},
+            "🍎 Spuntino":{"name":"Banana e mandorle","ingredients":[ing("Banana",120,"g",105),ing("Mandorle",15,"g",90)]},
+            "🍽️ Pranzo":{"name":"Pollo, riso e verdure","ingredients":[ing("Petto di pollo",180,"g",300),ing("Riso basmati",80,"g",285),ing("Verdure miste",250,"g",70),ing("Olio EVO",10,"g",90)]},
+            "🌙 Cena":{"name":"Merluzzo, patate e insalata","ingredients":[ing("Merluzzo",200,"g",170),ing("Patate",250,"g",190),ing("Insalata mista",250,"g",50),ing("Olio EVO",10,"g",90)]}
+        },
+        "Venerdì": {
+            "☕ Colazione":{"name":"Yogurt, banana e avena","ingredients":[ing("Yogurt greco",250,"g",180),ing("Banana",120,"g",105),ing("Avena",40,"g",152)]},
+            "🍎 Spuntino":{"name":"Mela e noci","ingredients":[ing("Mela",180,"g",95),ing("Noci",15,"g",98)]},
+            "🍽️ Pranzo":{"name":"Pasta, tonno e pomodoro","ingredients":[ing("Pasta",90,"g",320),ing("Tonno al naturale",120,"g",130),ing("Passata di pomodoro",150,"g",45),ing("Olio EVO",10,"g",90)]},
+            "🌙 Cena":{"name":"Pollo, pane e verdure","ingredients":[ing("Petto di pollo",180,"g",300),ing("Pane integrale",70,"g",175),ing("Verdure miste",300,"g",80),ing("Olio EVO",10,"g",90)]}
+        },
+        "Sabato": {
+            "☕ Colazione":{"name":"Uova, pane e frutta","ingredients":[ing("Uova",2,"pz",150),ing("Pane integrale",70,"g",175),ing("Frutta",150,"g",80)]},
+            "🍎 Spuntino":{"name":"Yogurt e mandorle","ingredients":[ing("Yogurt greco",170,"g",120),ing("Mandorle",15,"g",90)]},
+            "🍽️ Pranzo":{"name":"Pasta al ragù leggero e insalata","ingredients":[ing("Pasta",90,"g",320),ing("Carne macinata magra",150,"g",250),ing("Passata di pomodoro",150,"g",45),ing("Insalata mista",200,"g",40)]},
+            "🌙 Cena":{"name":"Salmone, riso e verdure","ingredients":[ing("Salmone",150,"g",310),ing("Riso basmati",70,"g",250),ing("Verdure miste",250,"g",70),ing("Olio EVO",5,"g",45)]}
+        },
+        "Domenica": {
+            "☕ Colazione":{"name":"Yogurt, avena e frutta","ingredients":[ing("Yogurt greco",250,"g",180),ing("Avena",50,"g",190),ing("Frutta",150,"g",80)]},
+            "🍎 Spuntino":{"name":"Frutta e noci","ingredients":[ing("Pera",180,"g",100),ing("Noci",15,"g",98)]},
+            "🍽️ Pranzo":{"name":"Pollo al forno, patate e verdure","ingredients":[ing("Petto di pollo",200,"g",330),ing("Patate",250,"g",190),ing("Verdure miste",250,"g",70),ing("Olio EVO",10,"g",90)]},
+            "🌙 Cena":{"name":"Uova, pane e insalata","ingredients":[ing("Uova",2,"pz",150),ing("Pane integrale",70,"g",175),ing("Insalata mista",300,"g",60),ing("Olio EVO",10,"g",90)]}
+        }
+    }
+
+
+_defaults = {
+    "page":"Home", "meal_plan":init_plan(), "overrides":{}, "eaten":{}, "manual_foods":[],
+    "health":{}, "health_history":{}, "diagnostics":{}, "last_sync":None, "water_history":{},
+    "plan_week_start":None, "plan_history":{}, "out_lunch_days":[], "out_dinner_days":[],
+    "next_meal_plan":None, "next_overrides":{}, "next_week_start":None,
+    "next_out_lunch_days":[], "next_out_dinner_days":[],
+    "mensa_menus":{}, "next_mensa_menus":{},
+    "plan_generation_status":"idle", "plan_generation_message":"", "plan_generation_message_week_start":None, "plan_generation_time":None,
+    "plan_editor_selection":"current", "_plan_editor_next":False, "plan_edit_meal":None,
+    "pantry":{}, "shopping_checked":{}, "pantry_consumed_by_meal":{}, "smart_food_advice":None, "registered_meals":{}, "shopping_source":"Tutte", "shopping_strategy":"⚖️ Qualità / prezzo", "shopping_radius":5,
+    "shopping_cart_mode":"best_mix", "shopping_cart_summary":{}, "shopping_cart_time":None, "food_kcal_cache":{}, "profile_setup_complete":False, "profile_change_summary":[], "plan_needs_regeneration":False, "manual_activity_today":{}, "profile_change_time":None, "pantry_onboarding_complete":True, "pantry_onboarding_custom_items":[]
+}
+for k,v in _defaults.items(): st.session_state.setdefault(k,v)
+for k,v in {
+    "name":"Stefano", "weight":135.0, "height":180.0, "age":40, "sex":"male",
+    "activity_level":"moderata", "deficit":500, "goal_weight":135.0, "water_goal_ml":2500, "quantity_mode":"porzioni",
+    "diet_goal":"🔻 Dimagrimento", "diet_style":"🥗 Mediterranea", "custom_calorie_target":0,
+    "activity_tracking_mode":"🚫 Solo dieta — non monitorare attività",
+    "training_frequency":"5–6 giorni/settimana",
+    "allergies":"", "excluded_foods":""
+}.items(): st.session_state.setdefault("p_"+k,v)
+# Compatibilità: se il profilo arriva da una versione precedente, il peso desiderato parte dal peso attuale.
+st.session_state.setdefault("p_goal_weight", float(st.session_state.get("p_weight", 135.0)))
+
+# V100: automatic Health UI refresh.
+# Only Home/Attività are polled; the Bridge remains untouched.
+# The remote Health Sync is checked on each rerun and only applies a new
+# snapshot when its fingerprint changes.
+if st.session_state.get("page") in ("Home", "Attività"):
+    st_autorefresh(interval=15000, key="mydiet_health_auto_refresh")
+
+# ============================================================
+# Persistent browser/session state
+# Streamlit session_state is intentionally ephemeral. MyDiet keeps a
+# lightweight local snapshot on the app server and a stable anonymous ID
+# in the URL so a browser session recreated by navigation can be restored.
+# Sensitive OAuth tokens are deliberately excluded.
+# ============================================================
+_PERSIST_DIR = os.path.join("/tmp", "mydietapp_state")
+_PERSIST_FILE = os.path.join(_PERSIST_DIR, "state_{token}.json")
+_PERSIST_KEYS = [
+    "page", "meal_plan", "overrides", "eaten", "manual_foods", "health",
+    "health_history", "diagnostics", "last_sync", "water_history",
+    "plan_week_start", "plan_history", "out_lunch_days", "out_dinner_days",
+    "next_meal_plan", "next_overrides", "next_week_start",
+    "next_out_lunch_days", "next_out_dinner_days", "mensa_menus",
+    "next_mensa_menus", "plan_generation_status", "plan_generation_message",
+    "plan_generation_message_week_start", "plan_generation_time", "plan_editor_selection", "_plan_editor_next",
+    "plan_edit_meal", "pantry", "shopping_checked", "pantry_consumed_by_meal",
+    "smart_food_advice", "registered_meals", "shopping_source",
+    "shopping_strategy", "shopping_radius", "shopping_cart_mode",
+    "shopping_cart_summary", "shopping_cart_time", "food_kcal_cache",
+    "profile_setup_complete", "profile_change_summary", "plan_needs_regeneration", "manual_activity_today", "profile_change_time", "pantry_onboarding_complete", "pantry_onboarding_custom_items",
+    # Profile values
+    "p_name", "p_weight", "p_goal_weight", "p_height", "p_age", "p_sex",
+    "p_activity_level", "p_deficit", "p_water_goal_ml", "p_quantity_mode",
+    "p_diet_goal", "p_diet_style", "p_custom_calorie_target",
+    "p_activity_tracking_mode", "p_training_frequency", "p_allergies",
+    "p_excluded_foods",
+]
+
+def _state_token():
+    return str(st.query_params.get("mdid", "") or "").strip()
+
+def _safe_json_value(value):
+    try:
+        json.dumps(value, ensure_ascii=False)
+        return value
+    except Exception:
+        return None
+
+def _persistent_snapshot():
+    data={}
+    for key in _PERSIST_KEYS:
+        if key in st.session_state:
+            value=_safe_json_value(st.session_state[key])
+            if value is not None:
+                data[key]=value
+    return data
+
+def _persist_app_state():
+    token=_state_token()
+    if not token:
+        return
+    try:
+        os.makedirs(_PERSIST_DIR, exist_ok=True)
+        tmp=_PERSIST_FILE.format(token=token)+".tmp"
+        with open(tmp,"w",encoding="utf-8") as f:
+            json.dump(_persistent_snapshot(), f, ensure_ascii=False, separators=(",",":"))
+        os.replace(tmp, _PERSIST_FILE.format(token=token))
+    except Exception:
+        # Persistence must never break the app itself.
+        pass
+
+def _restore_app_state():
+    token=_state_token()
+    if not token:
+        return False
+    path=_PERSIST_FILE.format(token=token)
+    try:
+        with open(path,"r",encoding="utf-8") as f:
+            data=json.load(f)
+        if not isinstance(data,dict):
+            return False
+        for key,value in data.items():
+            if key in _PERSIST_KEYS:
+                st.session_state[key]=value
+        return bool(st.session_state.get("profile_setup_complete",False))
+    except Exception:
+        return False
+
+# Stable anonymous browser token: keeps the same MyDiet identity when Streamlit
+# recreates the Python session during navigation.
+if not str(st.query_params.get("mdid", "") or "").strip():
+    st.query_params["mdid"] = uuid.uuid4().hex[:16]
+
+# If Streamlit creates a fresh session while the browser keeps the same app
+# URL, restore the previous MyDiet state before onboarding/navigation runs.
+if not st.session_state.get("_persistent_state_loaded", False):
+    _restore_app_state()
+    st.session_state["_persistent_state_loaded"] = True
+
+# V98: restore the native Health Connect snapshot AFTER persistent state.
+# The native bridge payload lives in the URL and must win over an older/empty
+# persisted `health` value restored above. This prevents the Activity page from
+# incorrectly returning to "in attesa del Bridge" after a Streamlit session refresh.
+try:
+    _ingest_native_health_bridge()
+except Exception:
+    pass
+
+# ============================================================
+# V86 — PostgreSQL/Supabase durable profile persistence
+# ============================================================
+def _database_url():
+    try:
+        return str(st.secrets.get("DATABASE_URL", "") or "").strip()
+    except Exception:
+        return ""
+
+def _db_ensure_profile_schema_once(dsn):
+    if st.session_state.get("_db_profile_schema_ready", False):
+        return True
+    db_ensure_schema(dsn)
+    st.session_state["_db_profile_schema_ready"] = True
+    return True
+
+def _db_load_profile_once():
+    if st.session_state.get("_db_profile_loaded", False):
+        return
+    st.session_state["_db_profile_loaded"] = True
+    mdid = _state_token()
+    dsn = _database_url()
+    if not mdid or not dsn:
+        st.session_state["_db_status"] = "non configurato"
+        return
+    try:
+        _db_ensure_profile_schema_once(dsn)
+        row = db_load_profile(mdid, dsn)
+        if row:
+            for key in ["name", "weight", "goal_weight", "height", "age", "sex",
+                        "activity_level", "deficit", "water_goal_ml", "quantity_mode",
+                        "diet_goal", "diet_style", "custom_calorie_target",
+                        "activity_tracking_mode", "training_frequency", "allergies",
+                        "excluded_foods"]:
+                if key in row and row[key] is not None:
+                    st.session_state["p_" + key] = row[key]
+            st.session_state["profile_setup_complete"] = bool(row.get("profile_setup_complete", False))
+            st.session_state["_db_profile_found"] = True
+            st.session_state["_db_status"] = "profilo caricato"
+        else:
+            st.session_state["_db_status"] = "pronto"
+    except Exception as e:
+        # DB must never make the app unusable; keep the /tmp transition fallback.
+        st.session_state["_db_status"] = "errore PostgreSQL: " + str(e)[:300]
+
+_db_load_profile_once()
+
+def _db_diagnostic():
+    """Safe connectivity/read test; never displays the database password."""
+    dsn = _database_url()
+    if not dsn:
+        return {"ok": False, "status": "DATABASE_URL assente nei Secrets"}
+    try:
+        import psycopg
+        dsn_test = dsn if "sslmode=" in dsn else dsn + (("&" if "?" in dsn else "?") + "sslmode=require")
+        with psycopg.connect(dsn_test, connect_timeout=8) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_database(), current_user, current_schema()")
+                dbname, user, schema = cur.fetchone()
+                cur.execute("SELECT to_regclass('public.profiles')")
+                table = cur.fetchone()[0]
+                count = None
+                if table:
+                    cur.execute("SELECT COUNT(*) FROM public.profiles")
+                    count = cur.fetchone()[0]
+                cur.execute("SELECT to_regclass('public.meal_plans')")
+                plan_table = cur.fetchone()[0]
+                plan_rows = None
+                if plan_table:
+                    cur.execute("SELECT COUNT(*) FROM public.meal_plans")
+                    plan_rows = cur.fetchone()[0]
+        return {"ok": True, "database": dbname, "user": user, "schema": schema, "table": table, "rows": count, "plan_table": plan_table, "plan_rows": plan_rows}
+    except Exception as e:
+        return {"ok": False, "status": str(e)[:500]}
+
+def _db_ensure_plan_schema_once(dsn):
+    if st.session_state.get("_db_plan_schema_ready", False):
+        return True
+    db_ensure_plan_schema(dsn)
+    st.session_state["_db_plan_schema_ready"] = True
+    return True
+
+def _db_plan_state():
+    """Return only durable meal-plan domain data, never the full Streamlit session."""
+    return {
+        "plan_week_start": st.session_state.get("plan_week_start"),
+        "meal_plan": st.session_state.get("meal_plan", {}),
+        "overrides": st.session_state.get("overrides", {}),
+        "plan_history": st.session_state.get("plan_history", {}),
+        "out_lunch_days": st.session_state.get("out_lunch_days", []),
+        "out_dinner_days": st.session_state.get("out_dinner_days", []),
+        "mensa_menus": st.session_state.get("mensa_menus", {}),
+        "next_meal_plan": st.session_state.get("next_meal_plan"),
+        "next_overrides": st.session_state.get("next_overrides", {}),
+        "next_week_start": st.session_state.get("next_week_start"),
+        "next_out_lunch_days": st.session_state.get("next_out_lunch_days", []),
+        "next_out_dinner_days": st.session_state.get("next_out_dinner_days", []),
+        "next_mensa_menus": st.session_state.get("next_mensa_menus", {}),
+        "plan_needs_regeneration": bool(st.session_state.get("plan_needs_regeneration", False)),
+    }
+
+
+_PLAN_DAYS = ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+_PLAN_MEALS = ["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
+
+def _plan_is_complete(plan):
+    """A valid weekly plan must contain all 7 days and the 4 expected meals."""
+    if not isinstance(plan, dict) or set(plan.keys()) != set(_PLAN_DAYS):
+        return False
+    return all(isinstance(plan.get(day), dict) and all(m in plan[day] for m in _PLAN_MEALS) for day in _PLAN_DAYS)
+
+def _plan_day_count(plan):
+    return sum(1 for d in _PLAN_DAYS if isinstance(plan, dict) and isinstance(plan.get(d), dict))
+
+def _db_plan_fingerprint(state=None):
+    state = state or _db_plan_state()
+    try:
+        return json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",",":"), default=str)
+    except Exception:
+        return ""
+
+def _db_load_plan_once():
+    if st.session_state.get("_db_plan_loaded", False):
+        return
+    st.session_state["_db_plan_loaded"] = True
+    mdid = _state_token()
+    dsn = _database_url()
+    if not mdid or not dsn:
+        return
+    # Capture the state restored from the old /tmp fallback BEFORE PostgreSQL
+    # gets a chance to replace it. This gives us a safe recovery candidate if a
+    # previous build wrote an incomplete plan to the database.
+    local_candidate = copy.deepcopy(_db_plan_state())
+    st.session_state["_db_local_plan_candidate"] = local_candidate
+    try:
+        _db_ensure_plan_schema_once(dsn)
+        row = db_load_meal_plan_state(mdid, dsn)
+        if row:
+            db_plan = row.get("meal_plan") or {}
+            if not _plan_is_complete(db_plan):
+                st.session_state["_db_plan_found"] = True
+                st.session_state["_db_plan_incomplete"] = True
+                st.session_state["_db_plan_db_days"] = _plan_day_count(db_plan)
+                st.session_state["_db_plan_status"] = f"piano PostgreSQL incompleto ({_plan_day_count(db_plan)}/7 giorni)"
+                st.session_state["_db_local_plan_available"] = _plan_is_complete(local_candidate.get("meal_plan"))
+                # If the pre-DB /tmp snapshot is a complete weekly plan, it is
+                # safer to recover it automatically than to expose the known
+                # incomplete DB row to the user. Then immediately make the
+                # recovered plan the durable PostgreSQL source.
+                if st.session_state["_db_local_plan_available"]:
+                    for key, value in local_candidate.items():
+                        if key in {
+                            "plan_week_start", "meal_plan", "overrides", "plan_history",
+                            "out_lunch_days", "out_dinner_days", "mensa_menus",
+                            "next_meal_plan", "next_overrides", "next_week_start",
+                            "next_out_lunch_days", "next_out_dinner_days", "next_mensa_menus",
+                            "plan_needs_regeneration"
+                        }:
+                            st.session_state[key] = copy.deepcopy(value)
+                    st.session_state["_db_plan_incomplete"] = False
+                    if _db_save_plan_state():
+                        st.session_state["_db_plan_status"] = "vecchio piano locale recuperato e salvato su PostgreSQL"
+                return
+            for key, value in row.items():
+                if key in {
+                    "plan_week_start", "meal_plan", "overrides", "plan_history",
+                    "out_lunch_days", "out_dinner_days", "mensa_menus",
+                    "next_meal_plan", "next_overrides", "next_week_start",
+                    "next_out_lunch_days", "next_out_dinner_days", "next_mensa_menus",
+                    "plan_needs_regeneration"
+                }:
+                    st.session_state[key] = value
+            st.session_state["_db_plan_found"] = True
+            st.session_state["_db_plan_status"] = "piano caricato"
+            st.session_state["_db_last_saved_fingerprint"] = _db_plan_fingerprint()
+        else:
+            st.session_state["_db_plan_status"] = "nessun piano salvato"
+    except Exception as e:
+        st.session_state["_db_plan_status"] = "errore PostgreSQL piano: " + str(e)[:300]
+
+
+def _db_save_plan_state():
+    dsn = _database_url()
+    mdid = _state_token()
+    if not dsn or not mdid:
+        return False
+    try:
+        _db_ensure_plan_schema_once(dsn)
+        state = _db_plan_state()
+        db_save_meal_plan_state(mdid, state, dsn)
+        st.session_state["_db_plan_status"] = "piano salvato"
+        st.session_state["_db_last_saved_fingerprint"] = _db_plan_fingerprint(state)
+        st.session_state["_db_plan_incomplete"] = False
+        return True
+    except Exception as e:
+        st.session_state["_db_plan_status"] = "salvataggio piano non riuscito: " + str(e)[:300]
+        return False
+
+def _db_maybe_save_plan_state():
+    """Persist only when durable plan data actually changed. Never on every rerun."""
+    if not st.session_state.get("_db_plan_loaded", False):
+        return False
+    if st.session_state.get("_db_plan_incomplete", False):
+        return False
+    current = _db_plan_state()
+    fp = _db_plan_fingerprint(current)
+    if not fp or fp == st.session_state.get("_db_last_saved_fingerprint", ""):
+        return False
+    return _db_save_plan_state()
+
+def _db_ensure_meal_logs_schema_once(dsn):
+    if st.session_state.get("_db_meal_logs_schema_ready", False):
+        return True
+    db_ensure_meal_logs_schema(dsn)
+    st.session_state["_db_meal_logs_schema_ready"] = True
+    return True
+
+def _current_week_meal_log_state():
+    """Build durable registration state for every meal in the active week."""
+    start_iso = st.session_state.get("plan_week_start")
+    if not start_iso:
+        return []
+    try:
+        start = date.fromisoformat(str(start_iso))
+    except Exception:
+        return []
+    rows = []
+    plan = st.session_state.get("meal_plan", {}) or {}
+    registered_map = st.session_state.get("registered_meals", {}) or {}
+    eaten_map = st.session_state.get("eaten", {}) or {}
+    for day in _PLAN_DAYS:
+        meal_map = plan.get(day, {}) or {}
+        meal_date = (start + timedelta(days=_PLAN_DAYS.index(day))).isoformat()
+        for meal_name in _PLAN_MEALS:
+            meal = meal_map.get(meal_name)
+            if not meal:
+                continue
+            key = _meal_key(day, meal_name)
+            eaten_items = [
+                str(item.get("id")) for item in active_items(meal)
+                if eaten_map.get(item.get("id"), False)
+            ]
+            rows.append({
+                "meal_date": meal_date,
+                "meal_name": meal_name,
+                "registered": bool(registered_map.get(key, False)),
+                "eaten_items": eaten_items,
+            })
+    return rows
+
+def _db_load_meal_logs_once():
+    if st.session_state.get("_db_meal_logs_loaded", False):
+        return
+    st.session_state["_db_meal_logs_loaded"] = True
+    mdid = _state_token()
+    dsn = _database_url()
+    start_iso = st.session_state.get("plan_week_start")
+    if not mdid or not dsn or not start_iso:
+        return
+    try:
+        if not all((db_ensure_meal_logs_schema, db_load_meal_logs, db_save_meal_logs)):
+            raise RuntimeError("db.py non aggiornato: funzioni meal_logs mancanti")
+        _db_ensure_meal_logs_schema_once(dsn)
+        rows = db_load_meal_logs(mdid, start_iso, dsn)
+        if rows:
+            st.session_state.registered_meals = {}
+            st.session_state.eaten = {}
+            for row in rows:
+                meal_date = row.get("meal_date")
+                if hasattr(meal_date, "isoformat"):
+                    meal_date = meal_date.isoformat()
+                try:
+                    offset = (date.fromisoformat(str(meal_date)) - date.fromisoformat(str(start_iso))).days
+                except Exception:
+                    continue
+                if offset < 0 or offset > 6:
+                    continue
+                day = _PLAN_DAYS[offset]
+                meal_name = row.get("meal_name")
+                if meal_name not in _PLAN_MEALS:
+                    continue
+                st.session_state.registered_meals[_meal_key(day, meal_name)] = bool(row.get("registered", False))
+                for iid in (row.get("eaten_items") or []):
+                    st.session_state.eaten[str(iid)] = True
+            st.session_state["_db_meal_logs_found"] = True
+            st.session_state["_db_meal_logs_status"] = "registrazioni pasti caricate"
+            st.session_state["_db_meal_logs_last_saved_fingerprint"] = _meal_logs_fingerprint()
+        else:
+            local_rows = _current_week_meal_log_state()
+            if any(r["registered"] or r["eaten_items"] for r in local_rows):
+                db_save_meal_logs(mdid, local_rows, dsn)
+                st.session_state["_db_meal_logs_status"] = "registrazioni locali migrate su PostgreSQL"
+                st.session_state["_db_meal_logs_last_saved_fingerprint"] = _meal_logs_fingerprint(local_rows)
+            else:
+                st.session_state["_db_meal_logs_status"] = "nessuna registrazione pasti"
+    except Exception as e:
+        st.session_state["_db_meal_logs_status"] = "errore PostgreSQL registrazioni: " + str(e)[:300]
+
+def _meal_logs_fingerprint(rows=None):
+    rows = _current_week_meal_log_state() if rows is None else rows
+    try:
+        return json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        return ""
+
+def _db_save_meal_logs_state(force=False):
+    dsn = _database_url()
+    mdid = _state_token()
+    start_iso = st.session_state.get("plan_week_start")
+    if not dsn or not mdid or not start_iso:
+        return False
+    rows = _current_week_meal_log_state()
+    fp = _meal_logs_fingerprint(rows)
+    if not force and fp and fp == st.session_state.get("_db_meal_logs_last_saved_fingerprint", ""):
+        return False
+    try:
+        if not all((db_ensure_meal_logs_schema, db_load_meal_logs, db_save_meal_logs)):
+            raise RuntimeError("db.py non aggiornato: funzioni meal_logs mancanti")
+        _db_ensure_meal_logs_schema_once(dsn)
+        db_save_meal_logs(mdid, rows, dsn)
+        st.session_state["_db_meal_logs_status"] = "registrazioni pasti salvate"
+        st.session_state["_db_meal_logs_last_saved_fingerprint"] = fp
+        return True
+    except Exception as e:
+        st.session_state["_db_meal_logs_status"] = "salvataggio registrazioni non riuscito: " + str(e)[:300]
+        return False
+
+
+def _db_recover_local_plan():
+    candidate = st.session_state.get("_db_local_plan_candidate")
+    if not candidate or not _plan_is_complete(candidate.get("meal_plan")):
+        st.session_state["_db_plan_status"] = "nessun piano locale completo recuperabile"
+        return False
+    for key, value in candidate.items():
+        if key in {
+            "plan_week_start", "meal_plan", "overrides", "plan_history",
+            "out_lunch_days", "out_dinner_days", "mensa_menus",
+            "next_meal_plan", "next_overrides", "next_week_start",
+            "next_out_lunch_days", "next_out_dinner_days", "next_mensa_menus",
+            "plan_needs_regeneration"
+        }:
+            st.session_state[key] = copy.deepcopy(value)
+    ok = _db_save_plan_state()
+    if ok:
+        st.session_state["_db_plan_status"] = "piano locale recuperato e salvato su PostgreSQL"
+    return ok
+
+
+# Pull background Health data when an API transport is configured.
+def _ingest_remote_health_sync(force=False):
+
+    """Pull the latest native Health snapshot from the optional sync API.
+
+    The Android bridge writes to the API in background. MyDiet only reads the
+    latest snapshot here; the local URL bridge remains a supported fallback.
+    """
+    if (not force) and st.session_state.get("_remote_health_checked_at"):
+        try:
+            age=(datetime.now(ROME)-datetime.fromisoformat(st.session_state["_remote_health_checked_at"])).total_seconds()
+            if age < 10:
+                return False
+        except Exception:
+            pass
+    api_url=str(st.secrets.get("HEALTH_SYNC_API_URL","") or "").strip().rstrip("/")
+    token=str(st.secrets.get("HEALTH_SYNC_TOKEN","") or "").strip()
+    # The Android Bridge stores snapshots using the MyDiet mdid configured
+    # in its "ID profilo MyDiet" field. Keep an explicit secret as an optional
+    # override for special installations, but never fall back to a hardcoded
+    # profile id: that can make a valid Bridge snapshot look like HTTP 404.
+    bridge_profile_id=str(st.secrets.get("HEALTH_BRIDGE_PROFILE_ID", "") or "").strip()
+    profile_id=bridge_profile_id or _state_token()
+    st.session_state["_remote_health_checked_at"]=datetime.now(ROME).isoformat()
+    if not api_url or not token or not profile_id:
+        st.session_state["health_sync_status"] = {"status":"not_configured"}
+        return False
+    try:
+        r=requests.get(f"{api_url}/v1/health/latest/{urllib.parse.quote(profile_id,safe='')}",
+                       headers={"X-MyDiet-Token":token,"Accept":"application/json"}, timeout=8)
+        if r.status_code != 200:
+            if r.status_code == 404:
+                st.session_state["health_sync_status"] = {
+                    "status":"snapshot_not_found",
+                    "http":404,
+                    "profile_id":profile_id,
+                }
+            else:
+                st.session_state["health_sync_status"] = {"status":"http_error", "http":r.status_code}
+            return False
+        obj=r.json()
+        raw=obj.get("payload")
+        payload=_decode_health_bridge_payload(raw)
+        if not payload:
+            st.session_state["health_sync_status"] = {"status":"invalid_payload", "http":200}
+            return False
+        fingerprint=hashlib.sha256(str(raw).encode("utf-8")).hexdigest()
+        if st.session_state.get("health_bridge_fingerprint")==fingerprint and st.session_state.get("health",{}).get("native_health_snapshot"):
+            st.session_state["health_sync_status"] = {"status":"already_current", "http":200}
+            return False
+        metrics=payload.get("metrics",{})
+        health={
+            "provider":{"key":"health_connect_native","name":"Health Connect (Android nativo)","status":"active","schema":payload.get("schema"),"received_at":datetime.now(ROME).isoformat(),"bridge_version":payload.get("bridge_version")},
+            "date":payload.get("date") or today(),
+            "steps_today":metrics.get("steps"),"calories_today":metrics.get("total_calories"),"active_calories_today":metrics.get("active_calories"),
+            "distance_today":metrics.get("distance_km"),"weight":metrics.get("weight_kg"),"body_fat":metrics.get("body_fat_percent"),
+            "lean_mass":metrics.get("lean_mass_kg"),"bmr":metrics.get("bmr_kcal_per_day"),"workouts_today":metrics.get("workouts"),
+            "workout_details_today":metrics.get("workout_details",[]),"heart_rate_avg":metrics.get("heart_rate_avg"),
+            "heart_rate_min":metrics.get("heart_rate_min"),"heart_rate_max":metrics.get("heart_rate_max"),"heart_rate_samples":metrics.get("heart_rate_samples"),
+            "sleep_minutes":metrics.get("sleep_minutes"),
+            "steps_source_verified":bool(payload.get("trust",{}).get("steps",False)),
+            "calories_source_verified":bool(payload.get("trust",{}).get("total_calories",False)),
+            "active_calories_source_verified":bool(payload.get("trust",{}).get("active_calories",False)),
+            "native_health_snapshot":True,"native_health_payload":payload,
+        }
+        hist={}
+        for key,value in (("steps",metrics.get("steps")),("calories",metrics.get("total_calories")),("weight",metrics.get("weight_kg")),("body_fat",metrics.get("body_fat_percent")),("distance",metrics.get("distance_km"))):
+            if value is not None: hist[key]=[{"date":health["date"],"value":value}]
+        st.session_state.health=health
+        st.session_state.health_history=hist
+        st.session_state.diagnostics={"native_bridge":{"status":"available","type":"Health Connect native background sync","bridge_version":payload.get("bridge_version"),"received_at":health["provider"]["received_at"]}}
+        st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+        st.session_state.health_bridge_fingerprint=fingerprint
+        st.session_state["health_remote_synced"]=True
+        st.session_state["health_sync_status"] = {"status":"ok", "http":200, "received_at":health["provider"]["received_at"]}
+        return True
+    except Exception:
+        return False
+
+_ingest_remote_health_sync()
+
+# Save before every explicit rerun so meal edits, registrations, pantry
+# changes and navigation survive a recreated Streamlit session.
+def _mydiet_rerun():
+    _persist_app_state()
+    # V87.2: meal logs are written only when their durable fingerprint changes.
+    # This keeps navigation fast and avoids unnecessary Supabase round-trips.
+    # V86.4.1: write to PostgreSQL only when the durable plan domain changed.
+    # Navigation, meal registration, water, pantry and other reruns must never
+    # overwrite the plan accidentally.
+    try:
+        _db_maybe_save_plan_state()
+        _db_save_meal_logs_state()
+    except Exception:
+        pass
+    st.rerun()
+
+# Mobile navigation: the main app navigation is rendered as a fixed bottom tab bar.
+APP_PAGES={"Home":"🏠","Piano":"🍽️","Dispensa":"🛒","Attività":"🏃","Profilo":"👤"}
+
+def meals():
+    for day, ms in st.session_state.meal_plan.items():
+        for name, meal in ms.items(): yield day,name,meal
+
+def week_start(d=None):
+    d = d or datetime.now(ROME).date()
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+def week_label(start_iso):
+    start=date.fromisoformat(start_iso)
+    end=start+timedelta(days=6)
+    return f"{start.strftime('%d/%m/%Y')} – {end.strftime('%d/%m/%Y')}"
+
+def ensure_plan_metadata():
+    if not st.session_state.get("plan_week_start"):
+        st.session_state.plan_week_start=week_start()
+
+def mensa_key(day, meal_name):
+    return f"{day}::{meal_name}"
+
+def current_mensa_menu(day, meal_name):
+    return st.session_state.get("mensa_menus", {}).get(mensa_key(day, meal_name))
+
+def set_mensa_menu(day, meal_name, result_text, analyzed_at=None):
+    st.session_state.setdefault("mensa_menus", {})[mensa_key(day, meal_name)] = {
+        "day": day,
+        "meal": meal_name,
+        "result": result_text,
+        "analyzed_at": analyzed_at or datetime.now(ROME).strftime("%d/%m/%Y %H:%M"),
+    }
+
+def save_next_editor_context():
+    """Persist the currently edited draft without aliasing it to the active plan.
+
+    The draft is also marked dirty so the durable PostgreSQL state is refreshed
+    at the end of the current render. This prevents a later session restore from
+    replacing a valid draft with an older DB snapshot.
+    """
+    if not st.session_state.get("_plan_editor_next"):
+        return
+    st.session_state.next_meal_plan=copy.deepcopy(st.session_state.get("meal_plan", {}))
+    st.session_state.next_overrides=copy.deepcopy(st.session_state.get("overrides", {}))
+    st.session_state.next_out_lunch_days=copy.deepcopy(st.session_state.get("out_lunch_days", []))
+    st.session_state.next_out_dinner_days=copy.deepcopy(st.session_state.get("out_dinner_days", []))
+    st.session_state.next_mensa_menus=copy.deepcopy(st.session_state.get("mensa_menus", {}))
+    st.session_state["_next_draft_dirty"] = True
+
+def restore_current_plan_context():
+    if not st.session_state.get("_plan_editor_next"):
+        return
+    save_next_editor_context()
+    current=st.session_state.get("_editor_current_meal_plan")
+    current_overrides=st.session_state.get("_editor_current_overrides")
+    if current is not None:
+        st.session_state.meal_plan=current
+    if current_overrides is not None:
+        st.session_state.overrides=current_overrides
+    st.session_state.out_lunch_days=copy.deepcopy(st.session_state.get("_editor_current_out_lunch_days", []))
+    st.session_state.out_dinner_days=copy.deepcopy(st.session_state.get("_editor_current_out_dinner_days", []))
+    st.session_state.mensa_menus=copy.deepcopy(st.session_state.get("_editor_current_mensa_menus", {}))
+    st.session_state.eaten=st.session_state.get("_editor_current_eaten", {})
+    st.session_state.registered_meals=st.session_state.get("_editor_current_registered_meals", {})
+    st.session_state._plan_editor_next=False
+
+def enter_next_plan_editor():
+    if not st.session_state.get("next_meal_plan"):
+        return False
+    if st.session_state.get("_plan_editor_next"):
+        return True
+    st.session_state._editor_current_meal_plan=copy.deepcopy(st.session_state.get("meal_plan", {}))
+    st.session_state._editor_current_overrides=copy.deepcopy(st.session_state.get("overrides", {}))
+    st.session_state._editor_current_out_lunch_days=copy.deepcopy(st.session_state.get("out_lunch_days", []))
+    st.session_state._editor_current_out_dinner_days=copy.deepcopy(st.session_state.get("out_dinner_days", []))
+    st.session_state._editor_current_mensa_menus=copy.deepcopy(st.session_state.get("mensa_menus", {}))
+    st.session_state._editor_current_eaten=st.session_state.eaten
+    st.session_state._editor_current_registered_meals=st.session_state.registered_meals
+    st.session_state.meal_plan=copy.deepcopy(st.session_state.next_meal_plan)
+    st.session_state.overrides=copy.deepcopy(st.session_state.next_overrides)
+    st.session_state.out_lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days", []))
+    st.session_state.out_dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days", []))
+    st.session_state.mensa_menus=copy.deepcopy(st.session_state.get("next_mensa_menus", {}))
+    st.session_state.eaten={}
+    st.session_state.registered_meals={}
+    st.session_state._plan_editor_next=True
+    return True
+
+# Navigation uses Streamlit state buttons instead of URL anchors.
+# URL-based tabs caused mobile browsers/webviews to open a fresh document/session,
+# which could make onboarding/profile appear again.
+if "page" in st.query_params:
+    try:
+        del st.query_params["page"]
+    except Exception:
+        pass
+
+def maybe_activate_next_plan():
+    next_start=st.session_state.get("next_week_start")
+    if not next_start or not st.session_state.get("next_meal_plan"):
+        return False
+    if date.fromisoformat(next_start) > date.fromisoformat(week_start(datetime.now(ROME).date())):
+        return False
+    restore_current_plan_context()
+    archive_current_plan(reason="Settimana precedente sostituita dal piano preparato")
+    st.session_state.meal_plan=st.session_state.next_meal_plan
+    st.session_state.plan_week_start=next_start
+    st.session_state.overrides=st.session_state.next_overrides or {}
+    st.session_state.out_lunch_days=copy.deepcopy(st.session_state.next_out_lunch_days)
+    st.session_state.out_dinner_days=copy.deepcopy(st.session_state.next_out_dinner_days)
+    st.session_state.mensa_menus=copy.deepcopy(st.session_state.next_mensa_menus)
+    st.session_state.next_meal_plan=None
+    st.session_state.next_overrides={}
+    st.session_state.next_week_start=None
+    st.session_state.next_out_lunch_days=[]
+    st.session_state.next_out_dinner_days=[]
+    st.session_state.next_mensa_menus={}
+    st.session_state.eaten={}
+    st.session_state.registered_meals={}
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("eat_"):
+            st.session_state.pop(key,None)
+    return True
+
+def _draft_validation_errors(plan):
+    """Return precise, user-facing completeness errors for a weekly draft."""
+    errors=[]
+    if not isinstance(plan, dict):
+        return ["la bozza non contiene un piano valido"]
+    for day in _PLAN_DAYS:
+        day_plan=plan.get(day)
+        if not isinstance(day_plan, dict):
+            errors.append(f"{day}: giornata mancante")
+            continue
+        for meal in _PLAN_MEALS:
+            if meal not in day_plan:
+                errors.append(f"{day} → {meal}")
+    extra_days=[d for d in plan.keys() if d not in _PLAN_DAYS]
+    if extra_days:
+        errors.append("giorni non riconosciuti: " + ", ".join(map(str,extra_days)))
+    return errors
+
+def confirm_next_plan_activation():
+    """Promote the edited draft only after a complete, validated draft exists.
+
+    A failed validation MUST leave the draft intact and the active plan untouched.
+    """
+    next_start=st.session_state.get("next_week_start")
+    if not next_start:
+        st.session_state.plan_generation_status="error"
+        st.session_state.plan_generation_message="✕ Nessuna bozza della prossima settimana disponibile."
+        st.session_state.plan_generation_message_week_start=None
+        return False
+
+    # While the editor is open, the authoritative draft is the editor's meal_plan.
+    # Save a deep copy before validating so a failure can never destroy the draft.
+    if st.session_state.get("_plan_editor_next"):
+        save_next_editor_context()
+    draft=copy.deepcopy(st.session_state.get("next_meal_plan") or {})
+    errors=_draft_validation_errors(draft)
+    if errors:
+        preview="; ".join(errors[:8])
+        if len(errors)>8:
+            preview += f"; … e altri {len(errors)-8}"
+        st.session_state.plan_generation_status="error"
+        st.session_state.plan_generation_message=f"✕ Impossibile confermare la bozza: {preview}. La bozza è stata mantenuta e il piano attuale non è stato modificato."
+        st.session_state.plan_generation_message_week_start=next_start
+        return False
+
+    # Return to the real active-week context before archiving it.
+    restore_current_plan_context()
+    archive_current_plan(reason="Nuovo piano confermato dall'utente")
+
+    # Promote the validated, edited draft.
+    st.session_state.meal_plan=copy.deepcopy(draft)
+    st.session_state.plan_week_start=next_start
+    st.session_state.overrides=copy.deepcopy(st.session_state.get("next_overrides", {}) or {})
+    st.session_state.out_lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days", []))
+    st.session_state.out_dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days", []))
+    st.session_state.mensa_menus=copy.deepcopy(st.session_state.get("next_mensa_menus", {}))
+
+    # Clear the draft only after promotion is complete.
+    st.session_state.next_meal_plan=None
+    st.session_state.next_overrides={}
+    st.session_state.next_week_start=None
+    st.session_state.next_out_lunch_days=[]
+    st.session_state.next_out_dinner_days=[]
+    st.session_state.next_mensa_menus={}
+    st.session_state.next_pantry_preview=None
+    st.session_state.eaten={}
+    st.session_state.registered_meals={}
+    st.session_state._plan_editor_next=False
+    st.session_state.plan_view_mode="current"
+    st.session_state.plan_edit_meal=None
+    st.session_state.plan_generation_status="success"
+    st.session_state.plan_generation_message=f"✓ Piano {week_label(next_start)} confermato e attivato. Il piano precedente è stato archiviato nello Storico."
+    st.session_state.plan_generation_message_week_start=next_start
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("eat_"):
+            st.session_state.pop(key,None)
+    _db_save_plan_state()
+    _persist_app_state()
+    return True
+
+
+def maybe_rollover_to_current_week():
+    """Promote an arrived next-week draft when the calendar has moved on.
+    Never invents a new plan: if no prepared draft exists, it only leaves the
+    current plan untouched so the user can explicitly prepare one.
+    """
+    current_week=week_start(datetime.now(ROME).date())
+    active_start=st.session_state.get("plan_week_start")
+    next_start=st.session_state.get("next_week_start")
+    next_plan=st.session_state.get("next_meal_plan")
+    if not active_start or not next_start or not next_plan:
+        return False
+    try:
+        if date.fromisoformat(active_start) < date.fromisoformat(current_week) and date.fromisoformat(next_start) <= date.fromisoformat(current_week):
+            return bool(maybe_activate_next_plan())
+    except Exception:
+        return False
+    return False
+
+
+def archive_current_plan(reason="Nuovo piano"):
+    ensure_plan_metadata()
+    start=st.session_state.plan_week_start
+    if not st.session_state.meal_plan:
+        return None
+    archive_id=f"{start}_{datetime.now(ROME).strftime('%Y%m%d%H%M%S')}"
+    st.session_state.plan_history[archive_id]={
+        "week_start":start,
+        "label":week_label(start),
+        "created_at":datetime.now(ROME).isoformat(),
+        "reason":reason,
+        "out_lunch_days":copy.deepcopy(st.session_state.get("out_lunch_days", [])),
+        "out_dinner_days":copy.deepcopy(st.session_state.get("out_dinner_days", [])),
+        "plan":copy.deepcopy(st.session_state.meal_plan),
+    }
+    return archive_id
+
+
+def normalize_ai_plan(raw):
+    """Normalize the AI weekly-plan JSON into the internal MyDiet structure."""
+    if isinstance(raw, str):
+        raw=raw.strip()
+        if raw.startswith("```"):
+            raw=raw.replace("```json","").replace("```","").strip()
+        raw=json.loads(raw)
+
+    if isinstance(raw, dict):
+        # Accept common top-level wrappers and case variants.
+        wrapper_map={str(k).strip().lower():k for k in raw.keys()}
+        for wrapper in ("piano","plan","days","settimana","weekly_plan","week","meal_plan"):
+            key=wrapper_map.get(wrapper)
+            candidate=raw.get(key) if key is not None else None
+            if isinstance(candidate,(dict,list)):
+                raw=candidate
+                break
+
+    day_names=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+    # AI providers may return Italian, English, accented/unaccented, or
+    # numbered weekday names. Normalize all common variants to MyDiet's
+    # canonical Italian keys before validating completeness.
+    day_aliases={
+        "lunedì":"Lunedì", "lunedi":"Lunedì", "monday":"Lunedì", "mon":"Lunedì", "1":"Lunedì",
+        "martedì":"Martedì", "martedi":"Martedì", "tuesday":"Martedì", "tue":"Martedì", "2":"Martedì",
+        "mercoledì":"Mercoledì", "mercoledi":"Mercoledì", "wednesday":"Mercoledì", "wed":"Mercoledì", "3":"Mercoledì",
+        "giovedì":"Giovedì", "giovedi":"Giovedì", "thursday":"Giovedì", "thu":"Giovedì", "4":"Giovedì",
+        "venerdì":"Venerdì", "venerdi":"Venerdì", "friday":"Venerdì", "fri":"Venerdì", "5":"Venerdì",
+        "sabato":"Sabato", "saturday":"Sabato", "sat":"Sabato", "6":"Sabato",
+        "domenica":"Domenica", "sunday":"Domenica", "sun":"Domenica", "7":"Domenica",
+    }
+    out={}
+
+    def normalize_meal(meal):
+        if not isinstance(meal,dict):
+            raise ValueError("Un pasto AI non è un oggetto JSON valido.")
+        ingredients=meal.get("ingredients",[])
+        if ingredients is None:
+            ingredients=[]
+        if not isinstance(ingredients,list):
+            raise ValueError("Gli ingredienti di un pasto devono essere una lista.")
+        normalized=[]
+        for x in ingredients:
+            if not isinstance(x,dict):
+                continue
+            normalized.append({
+                "id":sid(),
+                "name":str(x.get("name","Alimento")).strip() or "Alimento",
+                "qty":float(x.get("qty",1)),
+                "unit":str(x.get("unit","g")),
+                "kcal":round(float(x.get("kcal",0))),
+                # Optional AI-estimated macronutrients per ingredient; absent values stay unknown.
+                "protein_g":round(float(x["protein_g"]),2) if x.get("protein_g") not in (None, "") else None,
+                "carbs_g":round(float(x["carbs_g"]),2) if x.get("carbs_g") not in (None, "") else None,
+                "fat_g":round(float(x["fat_g"]),2) if x.get("fat_g") not in (None, "") else None,
+            })
+        return {
+            "name":str(meal.get("name","Pasto")).strip() or "Pasto",
+            "ingredients":normalized,
+        }
+
+    if isinstance(raw,dict):
+        for raw_day, raw_meals in raw.items():
+            canonical=day_aliases.get(str(raw_day).strip().lower())
+            if not canonical or not isinstance(raw_meals,dict):
+                continue
+            out[canonical]={}
+            meal_aliases={
+                "☕ colazione":"☕ Colazione", "colazione":"☕ Colazione", "breakfast":"☕ Colazione",
+                "🍎 spuntino":"🍎 Spuntino", "spuntino":"🍎 Spuntino", "snack":"🍎 Spuntino",
+                "🍽️ pranzo":"🍽️ Pranzo", "🍽 pranzo":"🍽️ Pranzo", "pranzo":"🍽️ Pranzo", "lunch":"🍽️ Pranzo",
+                "🌙 cena":"🌙 Cena", "cena":"🌙 Cena", "dinner":"🌙 Cena",
+            }
+            for mn,m in raw_meals.items():
+                if isinstance(m,dict):
+                    raw_mn=str(mn).strip()
+                    canonical_meal=meal_aliases.get(raw_mn.lower(), raw_mn)
+                    out[canonical][canonical_meal]=normalize_meal(m)
+
+    elif isinstance(raw,list):
+        for entry in raw:
+            if not isinstance(entry,dict):
+                continue
+            raw_day=entry.get("day") or entry.get("giorno") or entry.get("name")
+            canonical=day_aliases.get(str(raw_day).strip().lower()) if raw_day else None
+            raw_meals=entry.get("meals") or entry.get("pasti") or entry.get("plan")
+            if canonical and isinstance(raw_meals,dict):
+                meal_aliases={
+                    "☕ colazione":"☕ Colazione", "colazione":"☕ Colazione", "breakfast":"☕ Colazione",
+                    "🍎 spuntino":"🍎 Spuntino", "spuntino":"🍎 Spuntino", "snack":"🍎 Spuntino",
+                    "🍽️ pranzo":"🍽️ Pranzo", "🍽 pranzo":"🍽️ Pranzo", "pranzo":"🍽️ Pranzo", "lunch":"🍽️ Pranzo",
+                    "🌙 cena":"🌙 Cena", "cena":"🌙 Cena", "dinner":"🌙 Cena",
+                }
+                out[canonical]={meal_aliases.get(str(mn).strip().lower(), str(mn).strip()):normalize_meal(m) for mn,m in raw_meals.items() if isinstance(m,dict)}
+            elif canonical:
+                meal_map={}
+                labels={
+                    "breakfast":"☕ Colazione","colazione":"☕ Colazione",
+                    "snack":"🍎 Spuntino","spuntino":"🍎 Spuntino",
+                    "lunch":"🍽️ Pranzo","pranzo":"🍽️ Pranzo",
+                    "dinner":"🌙 Cena","cena":"🌙 Cena",
+                }
+                for k,v in entry.items():
+                    label=labels.get(str(k).strip().lower())
+                    if label and isinstance(v,dict):
+                        meal_map[label]=normalize_meal(v)
+                if meal_map:
+                    out[canonical]=meal_map
+
+    missing=[d for d in day_names if d not in out]
+    if missing:
+        raise ValueError("L'AI ha restituito un piano incompleto. Giorni mancanti: "+", ".join(missing))
+
+    meal_order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
+    for day in day_names:
+        normalized_day={}
+        for mn in meal_order:
+            if mn in out[day]:
+                normalized_day[mn]=out[day][mn]
+        for mn,m in out[day].items():
+            if mn not in normalized_day:
+                normalized_day[mn]=m
+        missing_meals=[m for m in meal_order if m not in normalized_day]
+        if missing_meals:
+            raise ValueError(f"Il giorno {day} non contiene tutti i 4 pasti previsti. Mancano: {', '.join(missing_meals)}")
+        out[day]=normalized_day
+
+    return out
+
+def adjust_plan_calories_to_target(plan, target_kcal):
+    """Bring each generated day close to the user's target by scaling ingredient quantities.
+
+    This is a consistency safeguard, not a nutrition analysis: it preserves the generated
+    foods and recipe structure, and proportionally scales quantities and ingredient kcal.
+    Days containing outside-home meals or no usable ingredient calories are left unchanged
+    because scaling their remaining meals would be misleading.
+    """
+    try:
+        target = int(round(float(target_kcal)))
+    except (TypeError, ValueError):
+        return plan, []
+    if target <= 0:
+        return plan, []
+
+    adjusted_days = []
+    meal_order = ["☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena"]
+    for day, meals in plan.items():
+        if not isinstance(meals, dict):
+            continue
+        if any("FUORI CASA" in str(meals.get(m, {}).get("name", "")).upper() for m in meal_order):
+            continue
+        items = [item for m in meal_order for item in (meals.get(m, {}).get("ingredients", []) or [])]
+        total = sum(max(0.0, float(item.get("kcal", 0) or 0)) for item in items)
+        if total <= 0 or not items:
+            continue
+        # Only intervene when the generated day misses the target by more than 8%.
+        if abs(total - target) / target <= 0.08:
+            continue
+        factor = target / total
+        # Avoid extreme automatic portion changes; those need a fresh AI generation instead.
+        if factor < 0.75 or factor > 1.40:
+            continue
+        for item in items:
+            qty = float(item.get("qty", 0) or 0)
+            kcal = float(item.get("kcal", 0) or 0)
+            item["qty"] = round(qty * factor, 2)
+            item["kcal"] = max(0, int(round(kcal * factor)))
+            for macro_key in ("protein_g", "carbs_g", "fat_g"):
+                macro_value = item.get(macro_key)
+                if macro_value is not None:
+                    item[macro_key] = round(max(0.0, float(macro_value) * factor), 2)
+        adjusted_days.append(day)
+    return plan, adjusted_days
+
+
+def historical_food_library(limit=None):
+    foods={}
+    def add_from_plan(plan, source):
+        for day, ms in plan.items():
+            for meal_name, meal in ms.items():
+                for item in meal.get("ingredients",[]):
+                    name=str(item.get("name","Alimento")).strip()
+                    if not name: continue
+                    key=(name.lower(),str(item.get("unit","g")))
+                    if key not in foods:
+                        foods[key]={"name":name,"qty":float(item.get("qty",1)),"unit":str(item.get("unit","g")),"kcal":float(item.get("kcal",0)),"uses":0,"sources":set()}
+                    foods[key]["uses"]+=1; foods[key]["sources"].add(source)
+    add_from_plan(st.session_state.meal_plan,"Piano attuale")
+    for rec in st.session_state.plan_history.values(): add_from_plan(rec.get("plan",{}),f"Storico {rec.get('label','')}")
+    vals=list(foods.values())
+    vals.sort(key=lambda x:(-x["uses"],x["name"].lower()))
+    for x in vals: x["sources"]=list(x["sources"])
+    return vals[:limit] if limit else vals
+
+ensure_plan_metadata()
+_db_load_plan_once()
+
+# V87.3 — remove the legacy Thursday out-of-home default. Older builds used
+# Giovedì as a hard-coded default and that value was persisted into PostgreSQL.
+# Only migrate when both lunch and dinner still contain that exact legacy pair
+# AND the loaded Thursday meals are ordinary planned meals (not FUORI CASA).
+def _db_migrate_legacy_thursday_out_flags():
+    if st.session_state.get("_v873_legacy_thursday_migrated", False):
+        return
+    st.session_state["_v873_legacy_thursday_migrated"] = True
+    lunch = list(st.session_state.get("out_lunch_days", []) or [])
+    dinner = list(st.session_state.get("out_dinner_days", []) or [])
+    if lunch != ["Giovedì"] or dinner != ["Giovedì"]:
+        return
+    thu = st.session_state.get("meal_plan", {}).get("Giovedì", {}) or {}
+    lunch_name = str((thu.get("🍽️ Pranzo") or {}).get("name", ""))
+    dinner_name = str((thu.get("🌙 Cena") or {}).get("name", ""))
+    if "FUORI CASA" in lunch_name.upper() or "FUORI CASA" in dinner_name.upper():
+        return
+    st.session_state.out_lunch_days = []
+    st.session_state.out_dinner_days = []
+    _db_save_plan_state()
+
+_db_migrate_legacy_thursday_out_flags()
+# V90: a freshly loaded DB plan may contain a next-week draft whose start date has arrived.
+if maybe_rollover_to_current_week():
+    _db_save_plan_state()
+
+def item_multiplier(item):
+    return float(st.session_state.overrides.get(item["id"],{}).get("multiplier",1))
+
+def item_qty(item):
+    return float(item.get("qty",0)) * item_multiplier(item)
+
+def item_kcal(item):
+    return float(item.get("kcal",0)) * item_multiplier(item)
+
+def quantity_mode():
+    return st.session_state.get("p_quantity_mode", "porzioni")
+
+def quantity_label(item):
+    """Human-friendly quantity according to the user's preferred display mode.
+    Internal grams/ml/units remain available to the calculation engine.
+    """
+    mode = quantity_mode()
+    q = item_qty(item)
+    unit = str(item.get("unit", "g")).lower()
+    if mode == "precise":
+        return f"{q:g}{unit}"
+    portions = item_multiplier(item)
+    if abs(portions - 1) < 0.01:
+        return "1 porzione"
+    if abs(portions - 0.5) < 0.01:
+        return "½ porzione"
+    if abs(portions - 1.5) < 0.01:
+        return "1½ porzioni"
+    if abs(portions - 2) < 0.01:
+        return "2 porzioni"
+    return f"{portions:g} porzioni"
+
+def quantity_caption(item):
+    mode = quantity_mode()
+    label = quantity_label(item)
+    if mode == "both":
+        return f"{label} · {item_qty(item):g}{item.get('unit','g')}"
+    return label
+
+def qty_step(unit, qty):
+    """Return a human-friendly increment for the selected unit.
+    Pieces/confezioni are always whole numbers; kg/l use 0.1; g/ml stay fine-grained.
+    """
+    unit=str(unit).strip().lower()
+    if unit in ("pz", "confezioni"):
+        return 1.0
+    if unit in ("kg", "l"):
+        return 0.1
+    if unit in ("ml", "g"):
+        return 10.0 if float(qty) >= 20 else 1.0
+    return 1.0
+
+def set_item_qty(item, new_qty):
+    base=float(item.get("qty",0))
+    if base <= 0: return
+    minimum=1.0 if str(item.get("unit","g")).lower()=="pz" else 0.1
+    q=max(minimum, float(new_qty))
+    st.session_state.overrides[item["id"]]={
+        "multiplier": q/base
+    }
+
+def active_items(meal):
+    out=[]
+    for item in meal.get("ingredients",[]):
+        ov=st.session_state.overrides.get(item["id"],{})
+        if ov.get("removed"): continue
+        x=dict(item); x["qty"]=item_qty(item); x["kcal"]=item_kcal(item); out.append(x)
+    return out
+
+def eaten_kcal():
+    """Return calories actually registered/eaten for TODAY only.
+
+    ``st.session_state.eaten`` is a legacy ingredient-level map that can contain
+    flags for several days of the weekly plan. Summing that map globally would
+    incorrectly add calories from previous test days to today's Home total.
+    Restrict the calculation to the current day's meal ingredients, while still
+    respecting ingredient-level checkboxes and quantity overrides.
+    """
+    day=current_day_name()
+    total=0.0
+    plan=st.session_state.get("meal_plan",{}) or {}
+    day_meals=plan.get(day,{}) or {}
+    eaten_map=st.session_state.get("eaten",{}) or {}
+    overrides=st.session_state.get("overrides",{}) or {}
+
+    for meal in day_meals.values():
+        for item in meal.get("ingredients",[]):
+            iid=item.get("id")
+            if not iid or not eaten_map.get(iid,False):
+                continue
+            ov=overrides.get(iid,{}) or {}
+            if ov.get("removed"):
+                continue
+            mult=float(ov.get("multiplier",1) or 1)
+            total += float(item.get("kcal",0) or 0)*mult
+
+    total += sum(float(x.get("kcal",0) or 0) for x in (st.session_state.get("manual_foods",[]) or []) if x.get("date")==today())
+    return round(total)
+
+def plan_food_suggestions(current_day=None, current_meal=None, limit=8):
+    """Suggest foods from current and historical plans, preferring current plan and recent reuse."""
+    foods={}
+    def collect(plan, source_rank, source_label):
+        for day, ms in plan.items():
+            for meal_name, meal in ms.items():
+                for item in meal.get("ingredients",[]):
+                    if source_rank==0 and day==current_day and meal_name==current_meal: continue
+                    name=str(item.get("name","Alimento")).strip()
+                    if not name: continue
+                    key=(name.lower(),str(item.get("unit","g")))
+                    if key not in foods:
+                        foods[key]={"name":name,"qty":float(item.get("qty",1)),"unit":str(item.get("unit","g")),"kcal":float(item.get("kcal",0)),"current":source_rank==0,"uses":0}
+                    foods[key]["uses"]+=1
+                    if source_rank==0: foods[key]["current"]=True
+    collect(st.session_state.meal_plan,0,"Piano attuale")
+    for rec in sorted(st.session_state.plan_history.values(), key=lambda x:x.get("created_at", ""), reverse=True):
+        collect(rec.get("plan",{}),1,rec.get("label","Storico"))
+    values=list(foods.values())
+    values.sort(key=lambda x:(not x["current"],-x["uses"],x["name"].lower()))
+    return values[:limit]
+
+
+def _food_name_key(name):
+    return re.sub(r"\s+", " ", str(name or "").strip().lower())
+
+def _known_food_kcal(name, unit, qty):
+    """Reuse a previously known food value when the same food/unit exists in a plan."""
+    key_name=_food_name_key(name)
+    unit=str(unit or "g").strip()
+    try:
+        qty=float(qty)
+    except Exception:
+        return None
+    if qty <= 0:
+        return None
+    candidates=[]
+    def collect(plan):
+        for ms in plan.values():
+            for meal in ms.values():
+                for item in meal.get("ingredients",[]):
+                    if _food_name_key(item.get("name")) != key_name:
+                        continue
+                    if str(item.get("unit","g")).strip() != unit:
+                        continue
+                    iq=float(item.get("qty",0) or 0)
+                    ik=float(item.get("kcal",0) or 0)
+                    if iq > 0 and ik >= 0:
+                        candidates.append((iq,ik))
+    collect(st.session_state.meal_plan)
+    for rec in st.session_state.plan_history.values():
+        collect(rec.get("plan",{}))
+    if not candidates:
+        return None
+    iq,ik=candidates[0]
+    return round(ik * qty / iq)
+
+def estimate_food_kcal(name, qty, unit):
+    """Estimate total kcal for a newly added food. Prefer known plan data, then the AI engine."""
+    name=str(name or "").strip()
+    unit=str(unit or "g").strip()
+    qty=float(qty or 0)
+    if not name or qty <= 0:
+        raise ValueError("Inserisci alimento e quantità validi.")
+
+    known=_known_food_kcal(name,unit,qty)
+    if known is not None:
+        return {"kcal":known,"source":"database MyDiet","assumption":"Valore già presente nel piano/storico MyDiet, proporzionato alla quantità."}
+
+    cache_key=f"{_food_name_key(name)}|{qty:g}|{unit}"
+    cached=st.session_state.get("food_kcal_cache",{}).get(cache_key)
+    if cached:
+        return cached
+
+    prompt=f"""Stima le calorie dell'alimento che sto aggiungendo a un piano alimentare.
+Alimento: {name}
+Quantità: {qty:g} {unit}
+
+Regole:
+- Restituisci SOLO JSON valido con le chiavi: total_kcal, assumption.
+- total_kcal deve essere un numero intero ed è il totale per la quantità indicata, NON kcal per 100 g.
+- Usa una stima realistica di un alimento comune in Italia.
+- Se l'alimento è 'pizza' e non ci sono altre specifiche, considera una pizza tonda italiana standard da pizzeria (30-32 cm), tipo margherita.
+- Se la quantità è in pezzi (pz), usa una porzione standard coerente con il nome.
+- Non inventare precisione: arrotonda a una stima ragionevole.
+- Nell'assumption indica in poche parole quale porzione/tipologia hai assunto.
+"""
+    raw=openai_interaction(prompt, thinking_level="low", feature="food_kcal")
+    try:
+        match=re.search(r"\{.*\}",raw,re.S)
+        data=json.loads(match.group(0) if match else raw)
+        kcal=max(0,int(round(float(data.get("total_kcal",0)))))
+        if kcal <= 0:
+            raise ValueError("Calorie non valide")
+        result={"kcal":kcal,"source":"stima AI","assumption":str(data.get("assumption") or "Stima standard").strip()}
+    except Exception:
+        raise ValueError(f"MyDiet non è riuscita a stimare le calorie per '{name}'. Puoi inserirle manualmente modificando il pasto.")
+    st.session_state.setdefault("food_kcal_cache",{})[cache_key]=result
+    return result
+
+
+def _meal_kcal_for_day(day, meal_name):
+    ms=st.session_state.meal_plan.get(day,{})
+    meal=ms.get(meal_name)
+    if not meal:
+        return 0
+    return round(sum(item_kcal(i) for i in active_items(meal)))
+
+
+def meal_kcal_total(meal):
+    """Single display-level calorie calculation used by Home and Piano."""
+    if not meal:
+        return 0
+    return round(sum(item_kcal(i) for i in active_items(meal)))
+
+
+def _planned_remaining_after_meal(day, meal_name):
+    """Calories planned for meals after the selected meal, in displayed order."""
+    order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
+    if meal_name not in order:
+        return 0
+    idx=order.index(meal_name)
+    return sum(_meal_kcal_for_day(day, name) for name in order[idx+1:])
+
+
+def out_of_home_meal_configured(day, meal_name):
+    """Return True when the selected weekday/meal is configured as fuori casa."""
+    if meal_name == "🍽️ Pranzo":
+        return day in st.session_state.get("out_lunch_days", [])
+    if meal_name == "🌙 Cena":
+        return day in st.session_state.get("out_dinner_days", [])
+    return False
+
+def meal_recommendation(day, meal_name, balance_data=None):
+    """Build a deterministic recommendation from the active plan and live calorie budget."""
+    ms=st.session_state.meal_plan.get(day,{})
+    meal=ms.get(meal_name)
+    if not meal:
+        return None
+
+    b=balance_data or balance()
+    items=active_items(meal)
+    planned_kcal=round(sum(item_kcal(i) for i in items))
+    planned_name=str(meal.get("name") or meal_name)
+    remaining=max(0,int(b.get("remaining") or 0))
+    future_planned=_planned_remaining_after_meal(day, meal_name)
+    budget_for_meal=max(0, remaining-future_planned)
+    after_meal=max(0, remaining-planned_kcal)
+    out_of_home=out_of_home_meal_configured(day, meal_name) or "UFFICIO" in planned_name.upper() or "FUORI CASA" in planned_name.upper()
+
+    if out_of_home:
+        status="mensa"
+        advice="Il piano prevede un pasto fuori casa: se hai un menu disponibile, possiamo confrontarlo con il piano e con il budget di oggi."
+    elif planned_kcal <= 0:
+        status="unknown"
+        advice="Il piano non contiene ancora calorie per questo pasto: usa il budget disponibile come riferimento."
+    elif planned_kcal <= budget_for_meal:
+        status="good"
+        advice=f"🟢 Segui il piano: questo pasto rientra nel budget disponibile. Dopo il pasto resteranno circa {after_meal:,} kcal per il resto della giornata.".replace(",",".")
+    elif planned_kcal <= remaining:
+        status="adapt"
+        advice=f"🟡 Il pasto rientra ancora nel budget giornaliero, ma lascia meno spazio ai pasti successivi. Se vuoi restare più vicino al piano della giornata, valuta una porzione leggermente più leggera." 
+    else:
+        status="over"
+        advice=f"🔴 Il pasto supera di circa {planned_kcal-remaining} kcal il budget ancora disponibile. Meglio ridurre una componente calorica oppure scegliere un'alternativa."
+
+    return {
+        "name":planned_name,
+        "planned_kcal":planned_kcal,
+        "remaining":remaining,
+        "future_planned":future_planned,
+        "budget_for_meal":budget_for_meal,
+        "after_meal":after_meal,
+        "advice":advice,
+        "status":status,
+        "out_of_home":out_of_home,
+        "items":items,
+        "registered": bool(items) and all(st.session_state.eaten.get(i["id"],False) for i in items),
+    }
+
+
+def eaten_items_today():
+    """Return foods actually registered as eaten today, for the smart assistant context."""
+    d=current_day_name()
+    out=[]
+    for meal_name, meal in st.session_state.meal_plan.get(d, {}).items():
+        for item in active_items(meal):
+            if st.session_state.eaten.get(item["id"], False):
+                out.append({"meal":meal_name,"name":item["name"],"kcal":round(item_kcal(item)),"quantity":quantity_caption(item)})
+    for x in st.session_state.manual_foods:
+        if x.get("date")==today():
+            out.append({"meal":"Registrato manualmente","name":x.get("name","Alimento"),"kcal":round(float(x.get("kcal",0))),"quantity":""})
+    return out
+
+
+def _meal_key(day, meal_name):
+    return f"{day}::{meal_name}"
+
+def _meal_is_registered(day, meal_name):
+    """Single canonical meal-level state shared by Home and Piano."""
+    meal=st.session_state.meal_plan.get(day,{}).get(meal_name)
+    if not meal:
+        return False
+
+    key=_meal_key(day,meal_name)
+
+    # Explicit meal registration is authoritative.
+    if key in st.session_state.registered_meals:
+        return bool(st.session_state.registered_meals[key])
+
+    # Compatibility with state created before this version.
+    items=active_items(meal)
+    registered=bool(items) and all(
+        st.session_state.eaten.get(i["id"],False)
+        for i in items
+    )
+    st.session_state.registered_meals[key]=registered
+    return registered
+
+def _consume_meal_from_pantry(day, meal_name):
+    """Consume from pantry only what was actually available when the meal was registered.
+    The exact consumed quantities are snapshotted so Undo can restore the same stock.
+    """
+    meal_key=_meal_key(day,meal_name)
+    if meal_key in st.session_state.get("pantry_consumed_by_meal",{}):
+        return
+
+    consumed=[]
+    meal=st.session_state.meal_plan.get(day,{}).get(meal_name)
+    if not meal:
+        return
+
+    for item in active_items(meal):
+        name=str(item.get("name","Alimento")).strip()
+        unit=str(item.get("unit","g")).strip().lower()
+        remaining=max(0.0,float(item.get("qty",0) or 0))
+        if remaining<=0:
+            continue
+
+        # First consume an exact-unit pantry entry. Then use a known household
+        # conversion (for example banana: pz -> g) if the plan uses another unit.
+        exact_key=_pantry_key(name,unit)
+        exact_stock=max(0.0,float(st.session_state.get("pantry",{}).get(exact_key,{}).get("qty",0) or 0))
+        exact_used=min(exact_stock,remaining)
+        if exact_used>0:
+            set_pantry_qty(name,unit,exact_stock-exact_used)
+            consumed.append({"name":name,"unit":unit,"qty":exact_used})
+            remaining-=exact_used
+
+        if remaining<=0:
+            continue
+
+        for source_key, source_item in list(st.session_state.get("pantry",{}).items()):
+            if not isinstance(source_item,dict):
+                continue
+            if str(source_item.get("name","")).strip().lower()!=name.lower():
+                continue
+            source_unit=str(source_item.get("unit","g")).strip().lower()
+            if source_unit==unit:
+                continue
+            source_stock=max(0.0,float(source_item.get("qty",0) or 0))
+            converted_stock=_convert_qty(name,source_stock,source_unit,unit)
+            if converted_stock is None or converted_stock<=0:
+                continue
+            converted_used=min(converted_stock,remaining)
+            # Convert the consumed plan quantity back to the pantry unit so we
+            # never create fractional or impossible inventory changes.
+            source_used=_convert_qty(name,converted_used,unit,source_unit)
+            if source_used is None:
+                continue
+            source_used=min(source_stock,source_used)
+            if source_used<=0:
+                continue
+            set_pantry_qty(name,source_unit,source_stock-source_used)
+            consumed.append({"name":name,"unit":source_unit,"qty":source_used})
+            remaining-=converted_used
+            if remaining<=0:
+                break
+
+    st.session_state.setdefault("pantry_consumed_by_meal",{})[meal_key]=consumed
+
+def _restore_meal_to_pantry(day, meal_name):
+    """Restore exactly the pantry quantities consumed when this meal was registered."""
+    meal_key=_meal_key(day,meal_name)
+    consumed=st.session_state.get("pantry_consumed_by_meal",{}).pop(meal_key,None)
+    if consumed is None:
+        return
+    for item in consumed:
+        add_pantry_qty(item["name"],item["unit"],float(item["qty"]))
+
+def set_meal_registered(day, meal_name, registered):
+    """Register or undo an entire meal from either Home and Piano."""
+    meal=st.session_state.meal_plan.get(day,{}).get(meal_name)
+    if not meal:
+        return
+
+    value=bool(registered)
+    meal_key=_meal_key(day,meal_name)
+    current=bool(st.session_state.registered_meals.get(meal_key,False))
+
+    # Avoid consuming/restoring pantry twice if the same state is requested again.
+    if not st.session_state.get("_plan_editor_next", False):
+        if value and not current:
+            _consume_meal_from_pantry(day,meal_name)
+        elif not value and current:
+            _restore_meal_to_pantry(day,meal_name)
+
+    st.session_state.registered_meals[meal_key]=value
+
+    # Keep ingredient state synchronized with the meal state.
+    for item in active_items(meal):
+        iid=item["id"]
+        st.session_state.eaten[iid]=value
+        st.session_state.pop(f"eat_{iid}",None)
+
+def _sync_eaten_from_widget(iid):
+    """Copy an ingredient checkbox into eaten and update its meal state."""
+    value=bool(st.session_state.get(f"eat_{iid}",False))
+    st.session_state.eaten[iid]=value
+
+    for day, meal_name, meal in meals():
+        items=active_items(meal)
+        if any(item["id"]==iid for item in items):
+            registered=bool(items) and all(
+                st.session_state.eaten.get(item["id"],False)
+                for item in items
+            )
+            meal_key=_meal_key(day,meal_name)
+            previous=bool(st.session_state.registered_meals.get(meal_key,False))
+            if not st.session_state.get("_plan_editor_next", False):
+                if registered and not previous:
+                    _consume_meal_from_pantry(day,meal_name)
+                elif not registered and previous:
+                    _restore_meal_to_pantry(day,meal_name)
+            st.session_state.registered_meals[meal_key]=registered
+            break
+
+_db_load_meal_logs_once()
+
+def _next_meal_for_today(day):
+    """Return the first planned meal that has not actually been registered.
+
+    The clock must never imply that a meal was eaten. Registration is the
+    authoritative state, so even in the evening the app will not jump to
+    dinner when breakfast/lunch have not been registered yet.
+    """
+    ms=st.session_state.meal_plan.get(day,{})
+    order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
+    if not ms:
+        return None
+
+    for name in order:
+        if name in ms and not _meal_is_registered(day,name):
+            return ms[name] | {"_meal_name":name}
+
+    return None
+
+
+def _next_meal_context(day, balance_data):
+    b=balance_data or balance()
+    next_meal=_next_meal_for_today(day)
+    if not next_meal:
+        return {"meal":None,"meal_budget_kcal":max(0,int(b.get("remaining",0))),"future_planned_kcal":0}
+    meal_name=next_meal.get("_meal_name")
+    planned_kcal=round(sum(item_kcal(i) for i in active_items(next_meal)))
+    future_planned=round(_planned_remaining_after_meal(day,meal_name))
+    meal_budget=max(0,int(b.get("remaining",0))-future_planned)
+    return {
+        "meal":meal_name,
+        "name":str(next_meal.get("name") or meal_name),
+        "planned_kcal":planned_kcal,
+        "meal_budget_kcal":meal_budget,
+        "future_planned_kcal":future_planned,
+        "out_of_home":out_of_home_meal_configured(day,meal_name) or "FUORI CASA" in str(next_meal.get("name","")).upper() or "UFFICIO" in str(next_meal.get("name","")).upper(),
+        "items":[i.get("name") for i in active_items(next_meal)],
+    }
+
+
+def smart_assistant_context(balance_data=None):
+    """Build factual context. Python determines budget and next meal; the AI engine only interprets it."""
+    b=balance_data or balance()
+    d=current_day_name()
+    ms=st.session_state.meal_plan.get(d,{})
+    planned=[]
+    for meal_name in ["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]:
+        meal=ms.get(meal_name)
+        if not meal: continue
+        items=active_items(meal)
+        planned.append({
+            "meal":meal_name,
+            "name":meal.get("name",meal_name),
+            "kcal":round(sum(item_kcal(i) for i in items)),
+            "registered":_meal_is_registered(d,meal_name),
+            "out_of_home":out_of_home_meal_configured(d,meal_name) or "FUORI CASA" in str(meal.get("name","")).upper() or "UFFICIO" in str(meal.get("name","")).upper()
+        })
+    next_ctx=_next_meal_context(d,b)
+    return {
+        "day":d,
+        "budget_is_dynamic":bool(b.get("using_observed")),
+        "budget_label":"budget dinamico da Health Connect" if b.get("using_observed") else "target alimentare stimato dal profilo",
+        "remaining_kcal":int(b.get("remaining",0)),
+        "daily_food_target":int(b.get("live_target") or b.get("target") or 0),
+        "eaten_kcal":int(b.get("eaten",0)),
+        "deficit_target":int(b.get("deficit",0)),
+        "observed_burn":int(b.get("observed_burn",0) or 0),
+        "projected_burn":int(b.get("projected_burn",0) or 0),
+        "steps":int(b.get("steps",0) or 0),
+        "next_meal":next_ctx,
+        "planned_meals":planned,
+        "eaten_items":eaten_items_today(),
+    }
+
+
+def run_smart_food_advice(balance_data=None):
+    """Ask the AI engine to explain a deterministic next-meal decision; never let it recalculate the budget."""
+    ctx=smart_assistant_context(balance_data)
+    next_ctx=ctx.get("next_meal", {})
+
+    # Fully registered day: this is a terminal state, not an AI recommendation.
+    if not next_ctx.get("meal"):
+        remaining=int(ctx.get("remaining_kcal", 0))
+        eaten=int(ctx.get("eaten_kcal", 0))
+        source_label="budget dinamico residuo" if ctx.get("budget_is_dynamic") else "target stimato residuo"
+        return (
+            "🍽️ GIORNATA ALIMENTARE COMPLETATA: tutti i pasti principali previsti per oggi risultano già registrati.\n"
+            "💡 CONSIGLIO: Non devi mangiare altro per 'recuperare' le calorie rimaste. "
+            "Se hai fame puoi scegliere liberamente uno spuntino leggero; se non hai fame, puoi semplicemente chiudere la giornata.\n"
+            f"🔥 MARGINE: {remaining} kcal {('di budget dinamico' if ctx.get('budget_is_dynamic') else 'rispetto al target alimentare stimato')}.\n"
+            f"📌 OGGI: circa {eaten} kcal registrate e nessun altro pasto pianificato da completare."
+        )
+
+    prompt=f'''Sei l'assistente alimentare di MyDietApp. Devi dare un consiglio pratico sul PROSSIMO pasto, usando esclusivamente il contesto fornito.
+
+CONTESTO CALCOLATO DA MYDIETAPP:
+{json.dumps(ctx,ensure_ascii=False,indent=2)}
+
+REGOLE NON NEGOZIABILI:
+- MyDietApp calcola gia tutti i numeri. NON ricalcolare, correggere o inventare calorie.
+- "remaining_kcal" e il numero di kcal alimentari che restano oggi secondo MyDietApp.
+- Se "budget_is_dynamic" e false, il valore e un TARGET STIMATO dal profilo: chiamalo sempre "target stimato" o "target alimentare stimato", MAI "budget dinamico" e MAI dire che deriva da Health Connect.
+- Se "budget_is_dynamic" e true, puoi chiamare il valore BUDGET DINAMICO e collegarlo al consumo Health osservato.
+- Non chiamare mai "disponibili" le kcal del target stimato come se fossero un dato misurato dal dispositivo.
+- Il campo "next_meal" identifica il pasto piu rilevante in questo momento: NON scegliere un altro pasto.
+- Se non esiste un prossimo pasto, dillo chiaramente.
+- Se il prossimo pasto e gia registrato, dillo chiaramente invece di suggerire di mangiarlo di nuovo.
+- Confronta "planned_kcal" con "meal_budget_kcal". Se rientra, consiglia semplicemente di seguire il piano.
+- Se supera il budget del pasto, proponi una modifica semplice usando gli alimenti gia presenti nel piano quando possibile.
+- Se "out_of_home" e true, non inventare un piatto: suggerisci di usare **Pasto fuori** per scegliere dal menu reale.
+- L'utente odia pesare gli alimenti: usa SOLO concetti come porzione normale, mezza porzione, porzione abbondante. MAI grammi.
+- Se l'utente ha gia registrato un alimento manualmente (es. pizza), consideralo nel consiglio.
+- Non inventare proteine o altri valori nutrizionali non presenti.
+- Non dare consigli medici.
+
+Rispondi in massimo 5 righe, in questo formato:
+🍽️ PROSSIMO PASTO: ...
+💡 CONSIGLIO: ...
+🔥 BUDGET DINAMICO: ... kcal  (solo se budget_is_dynamic=true)
+🔥 TARGET STIMATO: ... kcal  (solo se budget_is_dynamic=false)
+📌 MOTIVO: ...'''
+    cache_key=json.dumps(ctx, ensure_ascii=False, sort_keys=True, default=str)
+    return ai_cached_text("next_meal_advice", cache_key, lambda: openai_interaction(prompt, thinking_level="minimal", feature="next_meal_advice"))
+
+def show_daily_meal_recommendation(meal_name, day, balance_data):
+    rec=meal_recommendation(day,meal_name,balance_data)
+    if not rec:
+        return
+    title="Pranzo" if meal_name=="🍽️ Pranzo" else "Cena"
+    icon="📍" if rec["out_of_home"] else ("🍽️" if meal_name=="🍽️ Pranzo" else "🌙")
+    status_labels={"good":"🟢 Segui il piano","adapt":"🟡 Adatta leggermente","over":"🔴 Da adattare","mensa":"📍 Fuori casa","unknown":"⚪ Calorie non definite"}
+    with st.container(border=True):
+        st.markdown(f"### {icon} {title}")
+        if rec["out_of_home"]:
+            st.markdown("**📍 Oggi mangi fuori casa**")
+            st.info("Se hai un menu, analizzalo in **Pasto fuori**: confronteremo le proposte con il tuo piano e con il budget calorico disponibile.")
+            source_label="Budget dinamico" if balance_data.get("using_observed") else "Target stimato"
+            if rec["planned_kcal"]:
+                st.caption(f"Pasto previsto dal piano: circa {rec['planned_kcal']} kcal · {source_label} giornaliero rimasto: {rec['remaining']} kcal")
+            else:
+                st.caption(f"{source_label} giornaliero rimasto: {rec['remaining']} kcal")
+        else:
+            st.markdown(f"**{rec['name']}**")
+            if rec["items"]:
+                st.caption(" · ".join(f"{i['name']} {item_qty(i):g}{i['unit']}" for i in rec["items"]))
+            st.caption(f"Piano: {rec['planned_kcal']} kcal · Budget per questo pasto: circa {rec['budget_for_meal']} kcal")
+            if rec["registered"]:
+                st.success("✅ Questo pasto risulta già registrato come mangiato.")
+        st.markdown(f"**{status_labels.get(rec['status'], '💡 Suggerimento')}**")
+        st.write("💡 " + rec["advice"])
+
+        # Primary registration action for the next meal.
+        # Home and Piano share the same canonical meal state.
+        if st.button(
+            "🍴 Ho mangiato",
+            key=f"home_recommendation_eat_{day}_{meal_name}",
+            use_container_width=True,
+            type="primary"
+        ):
+            set_meal_registered(day, meal_name, True)
+            _mydiet_rerun()
+
+def grocery():
+    """Aggregate quantities required by the active weekly plan."""
+    d=defaultdict(lambda:[0,"",""])
+    for _,_,m in meals():
+        for i in active_items(m):
+            key=(i["name"].strip().lower(),i["unit"]); d[key][0]+=float(i["qty"]); d[key][1]=i["unit"]; d[key][2]=i["name"]
+    return sorted(d.values(),key=lambda x:x[2].lower())
+
+def _pantry_key(name, unit):
+    return f"{str(name).strip().lower()}|{str(unit).strip().lower()}"
+
+def _pantry_unit_family(unit):
+    unit=str(unit).strip().lower()
+    if unit in ("g", "kg"):
+        return "mass"
+    if unit in ("ml", "l"):
+        return "volume"
+    if unit == "pz":
+        return "count"
+    return None
+
+def _pantry_convert_between_units(qty, from_unit, to_unit):
+    """Convert the three directly compatible pantry unit families."""
+    f=str(from_unit).strip().lower(); t=str(to_unit).strip().lower()
+    q=float(qty or 0)
+    if f==t:
+        return q
+    if _pantry_unit_family(f) != _pantry_unit_family(t):
+        return None
+    if f=="kg" and t=="g": return q*1000.0
+    if f=="g" and t=="kg": return q/1000.0
+    if f=="l" and t=="ml": return q*1000.0
+    if f=="ml" and t=="l": return q/1000.0
+    return None
+
+def _find_compatible_pantry_key(name, unit):
+    """Find an existing entry for the same food and compatible unit family."""
+    normalized=_normalized_food_name(name)
+    target=str(unit).strip().lower()
+    for key,item in st.session_state.get("pantry",{}).items():
+        if not isinstance(item,dict):
+            continue
+        if _normalized_food_name(item.get("name","")) != normalized:
+            continue
+        source=str(item.get("unit", "g")).strip().lower()
+        if _pantry_convert_between_units(1, source, target) is not None:
+            return key
+    return None
+
+def _package_lots(item):
+    """Return package metadata as a list, keeping compatibility with V91 fields."""
+    lots=item.get("pack_lots")
+    if isinstance(lots,list) and lots:
+        return [dict(x) for x in lots if isinstance(x,dict) and float(x.get("count",0) or 0)>0]
+    count=float(item.get("pack_count",0) or 0)
+    qty=float(item.get("pack_qty",0) or 0)
+    unit=str(item.get("pack_unit",item.get("unit","g")))
+    if count>0 and qty>0:
+        return [{"count":count,"qty":qty,"unit":unit}]
+    return []
+
+def _merge_pantry_entry_into(target_key, source_key):
+    """Merge compatible inventory entries without losing package information."""
+    if target_key==source_key:
+        return
+    target=st.session_state.get("pantry",{}).get(target_key)
+    source=st.session_state.get("pantry",{}).get(source_key)
+    if not isinstance(target,dict) or not isinstance(source,dict):
+        return
+    target_unit=str(target.get("unit","g")).strip().lower()
+    source_unit=str(source.get("unit","g")).strip().lower()
+    converted=_pantry_convert_between_units(float(source.get("qty",0) or 0),source_unit,target_unit)
+    if converted is None:
+        return
+    target["qty"]=float(target.get("qty",0) or 0)+converted
+
+    # Keep every package format instead of silently overwriting metadata when,
+    # for example, 500 g and 1 kg packs of the same food are both present.
+    lots=_package_lots(target)+_package_lots(source)
+    if lots:
+        target["pack_lots"]=lots
+        # Legacy fields remain populated for older UI/state readers.
+        first=lots[0]
+        target["pack_count"]=sum(float(x.get("count",0) or 0) for x in lots)
+        target["pack_qty"]=float(first.get("qty",0) or 0)
+        target["pack_unit"]=str(first.get("unit",target_unit))
+
+    # Track the portion that was not represented by packages in the merged entry.
+    source_total=converted
+    source_pack_total=0.0
+    for lot in _package_lots(source):
+        lot_total=_pantry_convert_between_units(
+            float(lot.get("count",0) or 0)*float(lot.get("qty",0) or 0),
+            str(lot.get("unit",source_unit)), target_unit
+        )
+        if lot_total is not None:
+            source_pack_total += lot_total
+    if "loose_qty" in target or "loose_qty" in source:
+        target["loose_qty"]=float(target.get("loose_qty",0) or 0)+max(0.0,source_total-source_pack_total)
+
+    st.session_state.pantry.pop(source_key,None)
+
+def _merge_compatible_pantry_entries():
+    """Collapse duplicate same-food entries such as 2.2 kg + 2500 g into one row."""
+    groups={}
+    for key,item in list(st.session_state.get("pantry",{}).items()):
+        if not isinstance(item,dict):
+            continue
+        family=_pantry_unit_family(item.get("unit","g"))
+        if not family:
+            continue
+        group=(_normalized_food_name(item.get("name","")),family)
+        groups.setdefault(group,[]).append(key)
+    for keys in groups.values():
+        if len(keys)<2:
+            continue
+        target=keys[0]
+        for source in keys[1:]:
+            _merge_pantry_entry_into(target,source)
+
+def pantry_items():
+    """Return pantry items as a sorted list with display names and quantities."""
+    _merge_compatible_pantry_entries()
+    out=[]
+    for key,item in st.session_state.get("pantry",{}).items():
+        if not isinstance(item,dict):
+            continue
+        q=float(item.get("qty",0) or 0)
+        if q <= 0:
+            continue
+        out.append({
+            "key":key, "name":str(item.get("name", "Alimento")),
+            "qty":q, "unit":str(item.get("unit", "g")),
+            "pack_count":float(item.get("pack_count", 0) or 0),
+            "pack_qty":float(item.get("pack_qty", 0) or 0),
+            "pack_unit":str(item.get("pack_unit", item.get("unit", "g"))),
+            "pack_lots":_package_lots(item),
+        })
+    return sorted(out,key=lambda x:x["name"].lower())
+
+def set_pantry_qty(name, unit, qty):
+    key=_pantry_key(name,unit)
+    q=max(0.0,float(qty))
+    if q <= 0:
+        st.session_state.pantry.pop(key,None)
+    else:
+        old=st.session_state.get("pantry",{}).get(key,{})
+        st.session_state.pantry[key]={
+            "name":str(name).strip(),
+            "unit":str(unit).strip(),
+            "qty":q,
+            # Preserve package metadata when a meal consumes part of a packaged product.
+            "pack_count":float(old.get("pack_count",0) or 0),
+            "pack_qty":float(old.get("pack_qty",0) or 0),
+            "pack_unit":str(old.get("pack_unit",unit)),
+            "pack_lots":_package_lots(old),
+            "loose_qty":float(old.get("loose_qty",0) or 0),
+        }
+
+def add_pantry_qty(name, unit, delta):
+    """Add loose stock, merging g/kg or ml/l entries for the same food."""
+    target_unit=str(unit).strip().lower()
+    key=_pantry_key(name,target_unit)
+    existing_key=key if key in st.session_state.get("pantry",{}) else _find_compatible_pantry_key(name,target_unit)
+    if existing_key and existing_key!=key:
+        item=st.session_state.pantry[existing_key]
+        existing_unit=str(item.get("unit",target_unit)).strip().lower()
+        converted=_pantry_convert_between_units(float(delta),target_unit,existing_unit)
+        if converted is not None:
+            item["qty"]=max(0.0,float(item.get("qty",0) or 0)+converted)
+            item["loose_qty"]=max(0.0,float(item.get("loose_qty",0) or 0)+converted)
+            if item["qty"]<=0:
+                st.session_state.pantry.pop(existing_key,None)
+            return
+    current=float(st.session_state.get("pantry",{}).get(key,{}).get("qty",0) or 0)
+    set_pantry_qty(name,target_unit,current+float(delta))
+    if key in st.session_state.pantry:
+        item=st.session_state.pantry[key]
+        item["loose_qty"]=float(item.get("loose_qty",0) or 0)+float(delta)
+
+def add_pantry_package(name, content_qty, content_unit, count):
+    """Add packages and merge them into an existing compatible food entry."""
+    name=str(name).strip(); unit=str(content_unit).strip().lower()
+    count=float(count or 0); content_qty=float(content_qty or 0)
+    if not name or count<=0 or content_qty<=0:
+        return
+
+    key=_pantry_key(name,unit)
+    existing_key=key if key in st.session_state.get("pantry",{}) else _find_compatible_pantry_key(name,unit)
+
+    if existing_key:
+        current=st.session_state.pantry[existing_key]
+        target_unit=str(current.get("unit",unit)).strip().lower()
+        added_qty=_pantry_convert_between_units(content_qty*count,unit,target_unit)
+        if added_qty is None:
+            return
+        current["qty"]=float(current.get("qty",0) or 0)+added_qty
+        lots=_package_lots(current)
+        lots.append({"count":count,"qty":content_qty,"unit":unit})
+        current["pack_lots"]=lots
+        current["pack_count"]=sum(float(x.get("count",0) or 0) for x in lots)
+        first=lots[0]
+        current["pack_qty"]=float(first.get("qty",0) or 0)
+        current["pack_unit"]=str(first.get("unit",target_unit))
+        # Existing loose stock remains loose; packages are tracked separately.
+        current.setdefault("loose_qty",max(0.0,float(current.get("qty",0) or 0)-sum(
+            (_pantry_convert_between_units(float(x.get("count",0) or 0)*float(x.get("qty",0) or 0),str(x.get("unit",target_unit)),target_unit) or 0)
+            for x in lots[:-1]
+        )))
+        return
+
+    st.session_state.pantry[key]={
+        "name":name, "unit":unit,
+        "qty":content_qty*count,
+        "pack_count":count,
+        "pack_qty":content_qty, "pack_unit":unit,
+        "pack_lots":[{"count":count,"qty":content_qty,"unit":unit}],
+        "loose_qty":0.0,
+    }
+
+def _pantry_loose_qty(item):
+    """Return the quantity not represented by package lots, in the item's stored unit."""
+    item_unit=str(item.get("unit","g")).strip().lower()
+    package_total=0.0
+    for lot in _package_lots(item):
+        converted=_pantry_convert_between_units(
+            float(lot.get("count",0) or 0)*float(lot.get("qty",0) or 0),
+            str(lot.get("unit",item_unit)), item_unit
+        )
+        if converted is not None:
+            package_total += converted
+    # Prefer the explicitly tracked loose quantity, but fall back to the
+    # difference for records created by older V91 versions.
+    if "loose_qty" in item:
+        return max(0.0, float(item.get("loose_qty",0) or 0))
+    return max(0.0, float(item.get("qty",0) or 0)-package_total)
+
+def _delete_pantry_entry(item_key):
+    """Delete one pantry row completely."""
+    st.session_state.get("pantry",{}).pop(item_key,None)
+
+def _replace_pantry_entry(item_key, name, mode, qty=None, unit="g", pack_count=None, pack_qty=None, pack_unit="g", loose_qty=0.0):
+    """Replace a pantry row after an explicit user edit.
+
+    Editing is intentionally a replace operation rather than an additive one,
+    so correcting a typo cannot accidentally double the stock.
+    """
+    pantry=st.session_state.get("pantry",{})
+    pantry.pop(item_key,None)
+    name=str(name).strip()
+    if not name:
+        return False
+    if mode=="Confezione":
+        pack_count=float(pack_count or 0)
+        pack_qty=float(pack_qty or 0)
+        pack_unit=str(pack_unit).strip().lower()
+        loose_qty=max(0.0,float(loose_qty or 0))
+        if pack_count<=0 or pack_qty<=0:
+            return False
+        # Recreate the package lot first, then add the loose quantity without
+        # changing the package metadata.
+        add_pantry_package(name,pack_qty,pack_unit,pack_count)
+        if loose_qty>0:
+            add_pantry_qty(name,pack_unit,loose_qty)
+        return True
+    qty=float(qty or 0)
+    if qty<=0:
+        return False
+    add_pantry_qty(name,str(unit).strip().lower(),qty)
+    return True
+
+def _replace_pantry_inventory(food_name, mode, qty=0.0, unit="g", pack_count=0.0, pack_qty=0.0, pack_unit="g", loose_qty=0.0, pack_lots=None):
+    """Idempotently set one food's complete inventory from onboarding.
+
+    Unlike add_pantry_qty/add_pantry_package, this function is safe to call
+    repeatedly: saving the onboarding form does not double the user's stock.
+    Existing entries for the same normalized food are replaced by the values
+    shown in the form.
+    """
+    name=str(food_name).strip()
+    if not name:
+        return False
+    pantry=st.session_state.get("pantry",{})
+    normalized=_normalized_food_name(name)
+    # Remove every existing representation of this food. This makes the
+    # onboarding screen the authoritative edit of the inventory for that food.
+    for key,item in list(pantry.items()):
+        if isinstance(item,dict) and _normalized_food_name(item.get("name",""))==normalized:
+            pantry.pop(key,None)
+
+    if mode=="Confezione":
+        pc=max(0.0,float(pack_count or 0))
+        pq=max(0.0,float(pack_qty or 0))
+        pu=str(pack_unit).strip().lower()
+        loose=max(0.0,float(loose_qty or 0))
+        if pc<=0 or pq<=0:
+            # Allow the user to leave the package fields empty and keep only
+            # an explicitly entered loose quantity.
+            if loose>0:
+                add_pantry_qty(name,pu,loose)
+                return True
+            return False
+        lots_to_restore=[]
+        if isinstance(pack_lots,list) and pack_lots:
+            for lot in pack_lots:
+                if not isinstance(lot,dict):
+                    continue
+                lc=float(lot.get("count",0) or 0); lq=float(lot.get("qty",0) or 0); lu=str(lot.get("unit",pu)).strip().lower()
+                if lc>0 and lq>0:
+                    lots_to_restore.append((lc,lq,lu))
+        if lots_to_restore:
+            for lc,lq,lu in lots_to_restore:
+                add_pantry_package(name,lq,lu,lc)
+        else:
+            add_pantry_package(name,pq,pu,pc)
+        if loose>0:
+            add_pantry_qty(name,pu,loose)
+        return True
+
+    q=max(0.0,float(qty or 0))
+    if q<=0:
+        return False
+    add_pantry_qty(name,str(unit).strip().lower(),q)
+    return True
+
+def pantry_package_step(item):
+    """Return one package expressed in the item's stored unit.
+
+    Example: a Pasta entry stored in kg with 500 g packages must use
+    0.5 kg as the +/- step, not 500 kg.
+    """
+    pq=float(item.get("pack_qty",0) or 0)
+    pu=str(item.get("pack_unit",item.get("unit","g"))).strip().lower()
+    iu=str(item.get("unit","g")).strip().lower()
+    if pq>0:
+        converted=_pantry_convert_between_units(pq,pu,iu)
+        if converted is not None:
+            return converted
+    return qty_step(iu,item.get("qty",0))
+
+def _adjust_first_package(item_key, delta_packages):
+    """Add/remove whole packages while keeping total quantity and lot metadata coherent."""
+    pantry=st.session_state.get("pantry",{})
+    item=pantry.get(item_key)
+    if not isinstance(item,dict):
+        return
+    lots=_package_lots(item)
+    if not lots:
+        add_pantry_qty(item.get("name",""),item.get("unit","g"),
+                       float(delta_packages)*qty_step(item.get("unit","g"),item.get("qty",0)))
+        return
+
+    # +/- acts on the first displayed package format. This keeps the behaviour
+    # deterministic when the same food contains multiple package sizes.
+    lot=lots[0]
+    count=float(lot.get("count",0) or 0)
+    if delta_packages<0 and count + delta_packages < 0:
+        return
+
+    lot_qty=float(lot.get("qty",0) or 0)
+    lot_unit=str(lot.get("unit",item.get("unit","g"))).strip().lower()
+    item_unit=str(item.get("unit","g")).strip().lower()
+    delta=_pantry_convert_between_units(lot_qty*float(delta_packages),lot_unit,item_unit)
+    if delta is None:
+        return
+
+    lot["count"]=count+float(delta_packages)
+    if lot["count"]<=0:
+        lots.pop(0)
+
+    item["qty"]=max(0.0,float(item.get("qty",0) or 0)+delta)
+    if item["qty"]<=0:
+        pantry.pop(item_key,None)
+        return
+
+    item["pack_lots"]=lots
+    if lots:
+        item["pack_count"]=sum(float(x.get("count",0) or 0) for x in lots)
+        first=lots[0]
+        item["pack_qty"]=float(first.get("qty",0) or 0)
+        item["pack_unit"]=str(first.get("unit",item_unit))
+    else:
+        item["pack_count"]=0.0
+        item["pack_qty"]=0.0
+        item["pack_unit"]=item_unit
+
+# Approximate household conversions used only when the pantry and the plan use
+# different units. They are intentionally limited to foods where a typical item
+# weight is reasonably predictable. Exact-unit inventory always has priority.
+PANTRY_UNIT_CONVERSIONS = {
+    "banana": {"pz": 120.0},
+    "banane": {"pz": 120.0},
+    "mela": {"pz": 180.0},
+    "mele": {"pz": 180.0},
+    "pera": {"pz": 170.0},
+    "pere": {"pz": 170.0},
+    "arancia": {"pz": 200.0},
+    "arance": {"pz": 200.0},
+    "kiwi": {"pz": 75.0},
+    "pesca": {"pz": 150.0},
+    "pesche": {"pz": 150.0},
+    "albicocca": {"pz": 40.0},
+    "albicocche": {"pz": 40.0},
+    "mandarino": {"pz": 80.0},
+    "mandarini": {"pz": 80.0},
+}
+
+def _normalized_food_name(name):
+    return " ".join(str(name).strip().lower().split())
+
+def _convert_qty(name, qty, from_unit, to_unit):
+    """Convert compatible pantry units; return None when the conversion is unknown."""
+    f=str(from_unit).strip().lower(); t=str(to_unit).strip().lower()
+    q=float(qty or 0)
+    if f==t:
+        return q
+
+    # Pure metric conversions are always safe.
+    if f=="kg" and t=="g":
+        return q*1000.0
+    if f=="g" and t=="kg":
+        return q/1000.0
+    if f=="l" and t=="ml":
+        return q*1000.0
+    if f=="ml" and t=="l":
+        return q/1000.0
+
+    conv=PANTRY_UNIT_CONVERSIONS.get(_normalized_food_name(name), {})
+    # Known pz -> grams.
+    if f=="pz" and t=="g" and "pz" in conv:
+        return q*float(conv["pz"])
+    # Known grams -> pieces.
+    if f=="g" and t=="pz" and "pz" in conv and conv["pz"]>0:
+        return q/float(conv["pz"])
+    # Never infer pz <-> ml, or confezioni <-> weight/volume, without a pack size.
+    return None
+
+def _pantry_stock_in_unit(name, target_unit):
+    """Return pantry stock expressed in the plan unit, plus a human-readable breakdown.
+
+    Matching uses the same normalized food identity used by the pantry merge
+    logic, so harmless differences in capitalization/spacing no longer make
+    the shopping engine report a stocked food as 0 g.
+    """
+    target=str(target_unit).strip().lower()
+    wanted=_normalized_food_name(name)
+    total=0.0
+    parts=[]
+    for key,item in st.session_state.get("pantry",{}).items():
+        if not isinstance(item,dict) or _normalized_food_name(item.get("name",""))!=wanted:
+            continue
+        unit=str(item.get("unit","g")).strip().lower()
+        q=float(item.get("qty",0) or 0)
+        if q<=0:
+            continue
+        converted=_convert_qty(name,q,unit,target)
+        if converted is not None and converted>0:
+            total+=converted
+            if unit==target:
+                parts.append(f"{q:g} {target}")
+            else:
+                parts.append(f"{q:g} {unit} ≈ {converted:g} {target}")
+    return total, parts
+
+def shopping_list():
+    """Return plan needs minus pantry stock, including known cross-unit equivalents."""
+    rows=[]
+    for required,unit,name in grocery():
+        stock,stock_parts=_pantry_stock_in_unit(name,unit)
+        need=max(0.0,float(required)-stock)
+        rows.append({"name":name,"unit":unit,"required":float(required),"pantry":stock,"pantry_parts":stock_parts,"need":need})
+    return rows
+
+def grocery_for_plan(plan):
+    """Aggregate ingredient quantities required by an arbitrary weekly plan."""
+    d=defaultdict(lambda:[0,"",""])
+    for day_meals in (plan or {}).values():
+        if not isinstance(day_meals,dict):
+            continue
+        for meal in day_meals.values():
+            for i in active_items(meal):
+                name=str(i.get("name","")).strip()
+                unit=str(i.get("unit","g")).strip()
+                if not name:
+                    continue
+                key=(name.lower(),unit.lower())
+                d[key][0]+=float(i.get("qty",0) or 0)
+                d[key][1]=unit
+                d[key][2]=name
+    return sorted(d.values(),key=lambda x:x[2].lower())
+
+def pantry_week_preview(plan):
+    """Compare a generated week with current pantry stock without changing either one."""
+    rows=[]
+    for required,unit,name in grocery_for_plan(plan):
+        stock,parts=_pantry_stock_in_unit(name,unit)
+        required=float(required or 0)
+        covered=min(required,max(0.0,stock))
+        missing=max(0.0,required-stock)
+        rows.append({"name":name,"unit":unit,"required":required,"stock":stock,"covered":covered,"missing":missing,"parts":parts})
+    fully=sum(1 for r in rows if r["missing"]<=0.000001)
+    partial=sum(1 for r in rows if r["missing"]>0 and r["stock"]>0)
+    missing=sum(1 for r in rows if r["stock"]<=0)
+    covered_qty=sum(r["covered"] for r in rows)
+    required_qty=sum(r["required"] for r in rows)
+    return {"rows":rows,"fully_covered":fully,"partial":partial,"not_in_pantry":missing,"covered_qty":covered_qty,"required_qty":required_qty}
+
+def pantry_prompt_snapshot(limit=80):
+    """Human-readable pantry snapshot for the AI planner; pantry is an input, not a diet constraint."""
+    entries=[]
+    seen=set()
+    for item in st.session_state.get("pantry",{}).values():
+        if not isinstance(item,dict):
+            continue
+        name=str(item.get("name","")).strip()
+        if not name:
+            continue
+        key=_normalized_food_name(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        qty=float(item.get("qty",0) or 0)
+        unit=str(item.get("unit","g")).strip()
+        if qty<=0:
+            continue
+        parts=[]
+        lots=_package_lots(item)
+        for lot in lots:
+            parts.append(f"{float(lot.get('count',0) or 0):g}x{float(lot.get('qty',0) or 0):g}{str(lot.get('unit',unit)).lower()}")
+        loose=_pantry_loose_qty(item)
+        if loose>0.000001:
+            parts.append(f"{loose:g}{unit} sfusi")
+        detail=f"{name}: {qty:g} {unit}"
+        if parts:
+            detail += " (" + " + ".join(parts) + ")"
+        entries.append(detail)
+    entries.sort(key=str.lower)
+    if not entries:
+        return "Nessun alimento attualmente presente in dispensa."
+    if len(entries)>limit:
+        entries=entries[:limit]+[f"... e altri {len(entries)-limit} alimenti"]
+    return "\n".join(f"- {x}" for x in entries)
+
+def shopping_opportunity(required, pantry, unit):
+    need=max(0.0,float(required)-float(pantry))
+    if need<=0:
+        return "covered"
+    # Heuristic only: until we have a verified price feed, rank products by how much
+    # of the planned requirement is still uncovered. Never invent a price.
+    ratio=need/max(float(required),1.0)
+    if ratio>=0.75:
+        return "high"
+    if ratio>=0.35:
+        return "medium"
+    return "low"
+
+def water_today_ml():
+    """Return today's water intake in ml, stored by calendar date."""
+    return int(st.session_state.water_history.get(today(), 0) or 0)
+
+def water_goal_ml():
+    return max(500, int(st.session_state.get("p_water_goal_ml", 2500) or 2500))
+
+def add_water_ml(delta):
+    d=today()
+    current=water_today_ml()
+    st.session_state.water_history[d]=max(0, current + int(delta))
+
+# V100.3: calorie targets are calculated from estimated TDEE, adjusted by the selected goal.
+# V32: fixed the out_of_home variable mismatch in meal_recommendation/show_daily_meal_recommendation.
+# V45: active-calorie display shows 'Non disponibili' when no reliable active value exists; energy engine unchanged.
+# ---------------- Energy model ----------------
+def bmr_mifflin(weight, height, age, sex):
+    # Mifflin-St Jeor. This is an estimate, not a medical measurement.
+    value=10*weight + 6.25*height - 5*age + (5 if sex=="male" else -161)
+    return round(value)
+
+ACTIVITY_FACTORS={"sedentaria":1.20,"leggera":1.375,"moderata":1.55,"alta":1.725}
+MIN_AUTOMATIC_TARGET_KCAL = 1500
+
+def calorie_target_for_goal(bmr, maintenance, goal, custom_target=0):
+    """Return a transparent planning target based on estimated TDEE.
+
+    This is a general estimate, not medical advice. Automatic weight-loss target
+    uses a moderate 15% reduction capped at 500 kcal/day. Maintenance uses TDEE;
+    weight gain and muscle gain use small, capped surpluses. The existing 1500 kcal
+    floor is retained for automatic/custom targets to avoid unexpectedly low values.
+    """
+    bmr=max(0, int(round(float(bmr or 0))))
+    maintenance=max(0, int(round(float(maintenance or 0))))
+    custom=int(float(custom_target or 0))
+    if goal == "🎯 Calorie personalizzate":
+        return max(MIN_AUTOMATIC_TARGET_KCAL, custom if custom > 0 else maintenance)
+    if goal == "🔻 Dimagrimento":
+        reduction=min(500, round(maintenance*0.15))
+        return max(MIN_AUTOMATIC_TARGET_KCAL, maintenance-reduction)
+    if goal == "⚖️ Mantenimento":
+        return max(MIN_AUTOMATIC_TARGET_KCAL, maintenance)
+    if goal == "🔺 Aumento di peso":
+        surplus=min(300, max(200, round(maintenance*0.10)))
+        return max(MIN_AUTOMATIC_TARGET_KCAL, maintenance+surplus)
+    if goal == "💪 Massa muscolare":
+        surplus=min(250, max(150, round(maintenance*0.07)))
+        return max(MIN_AUTOMATIC_TARGET_KCAL, maintenance+surplus)
+    return max(MIN_AUTOMATIC_TARGET_KCAL, maintenance)
+
+def energy_profile():
+    p={k:st.session_state["p_"+k] for k in ["weight","height","age","sex","activity_level"]}
+    bmr=bmr_mifflin(float(p["weight"]),float(p["height"]),int(p["age"]),p["sex"])
+    maintenance=round(bmr*ACTIVITY_FACTORS[p["activity_level"]])
+    goal=st.session_state.get("p_diet_goal","🔻 Dimagrimento")
+    custom=int(float(st.session_state.get("p_custom_calorie_target",0) or 0))
+    target=calorie_target_for_goal(bmr, maintenance, goal, custom)
+    adjustment=target-maintenance
+    deficit=max(0, maintenance-target)
+    surplus=max(0, target-maintenance)
+    return {
+        "bmr_est":bmr,"maintenance_est":maintenance,"target":target,
+        "deficit":deficit,"surplus":surplus,"adjustment":adjustment,
+        "factor":ACTIVITY_FACTORS[p["activity_level"]],
+        "diet_goal":goal,"diet_style":st.session_state.get("p_diet_style","🥗 Mediterranea"),
+    }
+
+def weight_projection():
+    """Build a clean weekly reference trajectory from today's weight to the goal.
+
+    This is only a planning reference based on the profile deficit (7700 kcal ≈ 1 kg).
+    It deliberately contains no invented real-weight readings. Later, Health Connect
+    measurements can be overlaid as the actual trajectory.
+    """
+    try:
+        current=float(st.session_state.get("p_weight",0) or 0)
+        goal=float(st.session_state.get("p_goal_weight",current) or current)
+        deficit=max(0,int(st.session_state.get("p_deficit",0) or 0))
+    except Exception:
+        return None
+
+    if current <= 0 or goal <= 0 or goal >= current or deficit <= 0:
+        return None
+
+    kg_per_week=(deficit*7)/7700.0
+    total_kg=current-goal
+    weeks=max(1,int((total_kg/kg_per_week)+0.999999))
+    start=datetime.now(ROME).date()
+
+    rows=[]
+    for w in range(weeks+1):
+        d=start+timedelta(days=7*w)
+        projected=max(goal,current-(kg_per_week*w))
+        if w==weeks:
+            projected=goal
+        rows.append({"Data":d,"Peso teorico":round(projected,1)})
+
+    return {
+        "current":current,
+        "goal":goal,
+        "deficit":deficit,
+        "kg_per_week":kg_per_week,
+        "weeks":weeks,
+        "target_date":start+timedelta(days=7*weeks),
+        "rows":rows,
+    }
+
+
+def activity_summary():
+    """Summarize activity already contained in the observed Health total.
+
+    Active calories and workouts are descriptive components of the observed day;
+    they must not be added again to total_calories because that would double count.
+    """
+    h=st.session_state.get("health",{})
+    details=h.get("workout_details_today") or []
+    normalized=[]
+    for w in details:
+        if not isinstance(w,dict):
+            continue
+        try:
+            normalized.append({
+                "name":str(w.get("name") or "Attività"),
+                "duration_minutes":round(float(w.get("duration_minutes") or 0)),
+                "start":str(w.get("start") or ""),
+                "end":str(w.get("end") or ""),
+            })
+        except Exception:
+            continue
+    native_active=round(float(h.get("active_calories_today") or 0))
+    native_active_verified=bool(h.get("active_calories_source_verified")) and native_active > 0
+    # If Health Connect does not expose active calories, use the same transparent
+    # estimate already used by the energy balance instead of displaying 0.
+    estimated_active=0
+    try:
+        b=balance()
+        estimated_active=int(b.get("active_observed") or 0) if b.get("using_observed") else 0
+    except Exception:
+        estimated_active=0
+    active=native_active if native_active_verified else estimated_active
+    active_source="Samsung Health/Watch verificato" if native_active_verified else ("stima" if estimated_active > 0 else "non disponibile")
+    return {
+        "steps":int(float(h.get("steps_today") or 0)),
+        "active_calories":active,
+        "active_source":active_source,
+        "distance_km":float(h.get("distance_today") or 0),
+        "workouts":int(float(h.get("workouts_today") or len(normalized) or 0)),
+        "details":normalized,
+    }
+
+def balance():
+    h=st.session_state.health
+    e=energy_profile()
+    eaten=eaten_kcal()
+
+    # Only a verified native Health Connect total from TODAY can drive the
+    # production budget. A stale snapshot or legacy/unverified value falls back
+    # to the profile estimate instead of silently presenting a false live budget.
+    snapshot_date=str(h.get("date") or "")
+    today_iso=today()
+    native_verified=bool(h.get("native_health_snapshot")) and bool(h.get("calories_source_verified"))
+    observed=float(h.get("calories_today") or 0) if native_verified and snapshot_date==today_iso else 0.0
+
+    # Samsung Health total calories are cumulative from local midnight to now.
+    # We therefore add ONLY the BMR/resting expenditure still expected until
+    # midnight. We never add active calories or workout calories again: they are
+    # already components of the observed total.
+    bmr_health=float(h.get("bmr")) if h.get("bmr") is not None else 0.0
+    bmr_for_projection=bmr_health if bmr_health > 0 else float(e["bmr_est"])
+    now=datetime.now(ROME)
+    midnight=(now+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)
+    day_start=now.replace(hour=0,minute=0,second=0,microsecond=0)
+    elapsed=max(0.0,(now-day_start).total_seconds())
+    remaining_seconds=max(0.0,(midnight-now).total_seconds())
+    remaining_rest=round(bmr_for_projection*(remaining_seconds/86400.0))
+    projected_burn=round(observed+remaining_rest) if observed > 0 else 0
+    live_target=e["target"]
+    native_active=float(h.get("active_calories_today") or 0)
+    active_verified=bool(h.get("active_calories_source_verified")) and native_active > 0
+    estimated_active=max(0,round(observed-bmr_for_projection*(elapsed/86400.0))) if observed > 0 else 0
+    active_observed=round(native_active) if active_verified else estimated_active
+
+    source="Health Connect nativo · Samsung Health/Watch verificato" if observed > 0 else "Profilo · stima Mifflin + livello attività"
+    return {
+        "target":e["target"], "live_target":live_target, "eaten":eaten,
+        "remaining":live_target-eaten, "observed_burn":round(observed),
+        "projected_burn":projected_burn, "remaining_rest":remaining_rest,
+        "active_observed":active_observed,
+        "active_verified":active_verified,
+        "bmr_est":e["bmr_est"], "bmr_health":round(bmr_health) if bmr_health > 0 else None,
+        "maintenance":e["maintenance_est"], "deficit":e["deficit"], "surplus":e.get("surplus",0),
+        "using_observed":observed > 0, "source":source,
+        "snapshot_date":snapshot_date, "snapshot_is_today":snapshot_date==today_iso,
+        "native_verified":native_verified
+    }
+
+def effective_bmr():
+    # Google Fit legacy BMR is not trusted for production energy calculations.
+    # Until Health Connect/native Android is active, use the profile estimate.
+    return energy_profile()["bmr_est"]
+
+def current_day_name():
+    return ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"][datetime.now(ROME).weekday()]
+
+# ---------------- Health provider architecture ----------------
+# The application consumes a normalized HealthProvider contract. The current
+# provider is Google Fit legacy for compatibility/debug; production will use
+# a native Android Health Connect bridge.
+HEALTH_METRICS = (
+    "steps", "total_calories", "active_calories", "distance",
+    "weight", "body_fat", "lean_mass", "workouts", "heart_rate", "sleep"
+)
+
+class HealthProvider:
+    key = "base"
+    name = "Health provider"
+    status = "unavailable"
+
+    def sync(self, days=14):
+        raise NotImplementedError
+
+    def info(self):
+        return {"key": self.key, "name": self.name, "status": self.status}
+
+class GoogleFitProvider(HealthProvider):
+    key = "google_fit_legacy"
+    name = "Google Fit (legacy REST) · diagnostica"
+    status = "legacy"
+
+    def sync(self, days=14):
+        return sync_google_fit_health(days)
+
+class HealthConnectProvider(HealthProvider):
+    key = "health_connect_native"
+    name = "Health Connect (Android nativo)"
+    status = "active"
+
+    def sync(self, days=14):
+        h = st.session_state.get("health", {})
+        if not h.get("native_health_snapshot"):
+            raise RuntimeError("Nessun snapshot Health Connect ricevuto dal bridge Android.")
+        return h, st.session_state.get("health_history", {}), st.session_state.get("diagnostics", {})
+
+def get_health_provider():
+    # Native Health Connect snapshot wins whenever the Android bridge has pushed
+    # data into this Streamlit session. Google Fit remains diagnostic fallback.
+    if st.session_state.get("health", {}).get("native_health_snapshot"):
+        return HealthConnectProvider()
+    return GoogleFitProvider()
+
+
+# ---------------- Google Fit legacy health layer ----------------
+def refresh_token():
+    rt=st.session_state.get("refresh_token")
+    if not rt:return False
+    r=requests.post("https://oauth2.googleapis.com/token",data={
+        "client_id":st.secrets["GOOGLE_CLIENT_ID"],"client_secret":st.secrets["GOOGLE_CLIENT_SECRET"],
+        "refresh_token":rt,"grant_type":"refresh_token"},timeout=20)
+    if r.status_code==200:
+        st.session_state.access_token=r.json()["access_token"]; return True
+    return False
+
+def fit(method,url,**kwargs):
+    headers=kwargs.pop("headers",{}); headers["Authorization"]=f"Bearer {st.session_state.access_token}"; headers["Content-Type"]="application/json"
+    r=requests.request(method,url,headers=headers,timeout=25,**kwargs)
+    if r.status_code==401 and refresh_token():
+        headers["Authorization"]=f"Bearer {st.session_state.access_token}"; r=requests.request(method,url,headers=headers,timeout=25,**kwargs)
+    return r
+
+def list_datasources(dtype=None):
+    params={"dataTypeName":dtype} if dtype else {}
+    r=fit("GET",FIT_BASE+"/dataSources",params=params)
+    if r.status_code!=200:
+        return None,r
+    return r.json().get("dataSource",[]),r
+
+def aggregate(dtype,start_ms,end_ms,data_source_id=None):
+    spec={"dataTypeName":dtype} if not data_source_id else {"dataSourceId":data_source_id}
+    body={"aggregateBy":[spec],"bucketByTime":{"durationMillis":86400000},"startTimeMillis":start_ms,"endTimeMillis":end_ms}
+    r=fit("POST",FIT_BASE+"/dataset:aggregate",json=body)
+    if r.status_code!=200:return None,r
+    return r.json(),r
+
+def read_raw_dataset(data_source_id,start_ms,end_ms):
+    """Legge i punti grezzi di una singola sorgente Google Fit."""
+    if not data_source_id:
+        return None, None
+    dataset_id=f"{int(start_ms)*1_000_000}-{int(end_ms)*1_000_000}"
+    url=FIT_BASE+"/dataSources/"+urllib.parse.quote(str(data_source_id),safe="")+"/datasets/"+dataset_id
+    r=fit("GET",url)
+    if r.status_code!=200:
+        return None,r
+    return r.json(),r
+
+def raw_points(payload):
+    out=[]
+    for p in (payload or {}).get("point",[]):
+        v=point_value(p)
+        if v is None:
+            continue
+        start_ns=int(p.get("startTimeNanos") or 0)
+        end_ns=int(p.get("endTimeNanos") or start_ns)
+        out.append({
+            "start":start_ns/1_000_000_000,
+            "end":end_ns/1_000_000_000,
+            "value":v
+        })
+    return out
+
+def compare_today_sources(catalogs, dtype, mode, day_start, day_end):
+    """Read every visible source independently for today's interval."""
+    rows=[]
+    start_ms=int(day_start.timestamp()*1000)
+    end_ms=int(day_end.timestamp()*1000)
+    for src in catalogs.get("steps" if dtype=="com.google.step_count.delta" else "calories",[]):
+        sid=src.get("id")
+        payload,r=read_raw_dataset(sid,start_ms,end_ms)
+        if payload is None:
+            rows.append({
+                "sorgente":src.get("name"),
+                "app":src.get("app"),
+                "device":src.get("device"),
+                "tipo":"—",
+                "punti":0,
+                "valore":None,
+                "http":r.status_code if r is not None else None
+            })
+            continue
+        pts=raw_points(payload)
+        pts=[p for p in pts if datetime.fromtimestamp(p["end"],ROME).date()==day_start.date()]
+        value=sum(p["value"] for p in pts) if mode=="sum" else (pts[-1]["value"] if pts else None)
+        rows.append({
+            "sorgente":src.get("name"),
+            "app":src.get("app"),
+            "device":src.get("device"),
+            "tipo":"delta" if mode=="sum" else "latest",
+            "punti":len(pts),
+            "valore":value,
+            "http":200
+        })
+    return rows
+
+def raw_point_rows(payload, day):
+    """Return today's raw points with local timestamps and values."""
+    rows=[]
+    for p in raw_points(payload):
+        start_dt=datetime.fromtimestamp(p["start"],ROME)
+        end_dt=datetime.fromtimestamp(p["end"],ROME)
+        if end_dt.date()==day:
+            rows.append({
+                "inizio":start_dt.strftime("%H:%M:%S"),
+                "fine":end_dt.strftime("%H:%M:%S"),
+                "valore":p["value"],
+                "durata_min":round((p["end"]-p["start"])/60,1)
+            })
+    return sorted(rows,key=lambda x:(x["fine"],x["inizio"]))
+
+def raw_today_sum(payload, day):
+    """Somma solo i punti delta che terminano nel giorno locale richiesto."""
+    pts=raw_points(payload)
+    total=0.0
+    used=0
+    for p in pts:
+        if datetime.fromtimestamp(p["end"],ROME).date()==day:
+            total += p["value"]
+            used += 1
+    return (total if used else None), used
+
+def source_label(src):
+    app=(src.get("application") or {}).get("packageName","")
+    dev=src.get("device") or {}
+    devtxt=" ".join(str(dev.get(k,"")) for k in ("manufacturer","model","uid") if dev.get(k))
+    name=src.get("dataStreamName") or src.get("dataStreamId") or "sorgente sconosciuta"
+    bits=[name]
+    if app: bits.append(app)
+    if devtxt: bits.append(devtxt)
+    return " · ".join(bits)
+
+def choose_preferred_source(dtype,sources):
+    """Choose a source without mislabeling phone data as Watch data.
+
+    The current Google Fit catalog exposes Samsung top_level sources with
+    phone model IDs (e.g. SM-S948B). These are not a verified Galaxy Watch
+    stream, so they must not become the app's authoritative Watch steps.
+    """
+    if dtype=="com.google.step_count.delta":
+        # Do not use Samsung top_level as the authoritative live Watch value.
+        # Keep Google derived streams available for diagnostics only.
+        preferred=[
+            "derived:com.google.step_count.delta:com.google.android.gms:estimated_steps",
+            "derived:com.google.step_count.delta:com.google.android.gms:merge_step_deltas",
+        ]
+        ids={s.get("id") for s in sources}
+        for p in preferred:
+            if p in ids:
+                return p, "Google Fit derived — solo diagnostica, non Watch verificato"
+        return None, "nessuna sorgente Watch verificata disponibile"
+
+    preferred={
+        "com.google.calories.expended":[
+            "derived:com.google.calories.expended:com.google.android.gms:merge_calories_expended",
+            "derived:com.google.calories.expended:com.google.android.gms:platform_calories_expended",
+        ],
+    }.get(dtype,[])
+    ids={s.get("id") for s in sources}
+    for p in preferred:
+        if p in ids:
+            return p, "stream derivato Google Fit"
+    return (sources[0].get("id"), "prima sorgente disponibile") if sources else (None,"nessuna sorgente disponibile")
+
+def source_catalog(dtype):
+    sources,r=list_datasources(dtype)
+    if sources is None:
+        return [], {"status":"error","http":r.status_code,"type":dtype,"detail":r.text[:500]}
+    rows=[]
+    for src in sources:
+        rows.append({
+            "id":src.get("dataStreamId",""),
+            "name":src.get("dataStreamName","") or "—",
+            "type":src.get("type","") or "—",
+            "app":(src.get("application") or {}).get("packageName","") or "—",
+            "device":(src.get("device") or {}).get("model","") or "—",
+        })
+    return rows,{"status":"available","http":200,"type":dtype,"count":len(rows)}
+
+def point_value(p):
+    for v in p.get("value",[]):
+        if "fpVal" in v:return float(v["fpVal"])
+        if "intVal" in v:return float(v["intVal"])
+    return None
+
+def points_from(payload):
+    points=[]
+    for bucket in payload.get("bucket",[]):
+        for ds in bucket.get("dataset",[]):
+            for p in ds.get("point",[]):
+                v=point_value(p)
+                if v is not None:
+                    ts=int(p.get("endTimeNanos") or p.get("startTimeNanos") or int(bucket.get("startTimeMillis",0))*1_000_000)/1_000_000_000
+                    points.append({"ts":ts,"value":v})
+    return points
+
+def points_today_detailed(payload):
+    """Return today's raw points with local start/end timestamps for debugging."""
+    out=[]
+    today_date=datetime.now(ROME).date()
+    for bucket in payload.get("bucket",[]):
+        for ds in bucket.get("dataset",[]):
+            for p in ds.get("point",[]):
+                v=point_value(p)
+                if v is None: continue
+                start_ns=int(p.get("startTimeNanos") or 0)
+                end_ns=int(p.get("endTimeNanos") or 0)
+                ts=end_ns/1_000_000_000 if end_ns else start_ns/1_000_000_000
+                dt_end=datetime.fromtimestamp(ts,ROME)
+                if dt_end.date()!=today_date: continue
+                dt_start=datetime.fromtimestamp(start_ns/1_000_000_000,ROME) if start_ns else dt_end
+                out.append({"start":dt_start.strftime("%H:%M:%S"),"end":dt_end.strftime("%H:%M:%S"),"value":v})
+    return sorted(out,key=lambda x:(x["end"],x["start"]))
+
+def daily_sum(payload):
+    # For cumulative quantities such as steps, calories and distance, sum points per local day.
+    d=defaultdict(float)
+    for p in points_from(payload):
+        day=datetime.fromtimestamp(p["ts"],ROME).date().isoformat(); d[day]+=p["value"]
+    return [{"date":k,"value":v} for k,v in sorted(d.items())]
+
+def daily_latest(payload):
+    # For body measurements, use the latest reading of each local day.
+    d={}
+    for p in points_from(payload):
+        day=datetime.fromtimestamp(p["ts"],ROME).date().isoformat()
+        if day not in d or p["ts"]>d[day]["ts"]: d[day]=p
+    return [{"date":k,"value":d[k]["value"]} for k in sorted(d)]
+
+def sync_google_fit_health(days=14):
+    now=datetime.now(ROME); start=(now-timedelta(days=days-1)).replace(hour=0,minute=0,second=0,microsecond=0)
+    sm=int(start.timestamp()*1000); em=int(now.timestamp()*1000)
+    specs={
+        "steps":("com.google.step_count.delta","sum"),
+        "calories":("com.google.calories.expended","sum"),
+        "distance":("com.google.distance.delta","sum"),
+        "weight":("com.google.weight","latest"),
+        "body_fat":("com.google.body.fat.percentage","latest"),
+        "bmr":("com.google.calories.bmr","latest")
+    }
+    data={}; hist={}; diag={}; catalogs={}; comparisons={}; source_values={}
+    source_keys={"steps","calories"}
+    for key,(dtype,mode) in specs.items():
+        try:
+            chosen=None; choice_reason=None
+            if key in source_keys:
+                sources,r=list_datasources(dtype)
+                if sources is not None:
+                    chosen,choice_reason=choose_preferred_source(dtype,sources)
+                    catalogs[key]=[
+                        {
+                            "id":x.get("dataStreamId",""),
+                            "name":x.get("dataStreamName","") or "—",
+                            "type":x.get("type","") or "—",
+                            "app":(x.get("application") or {}).get("packageName","") or "—",
+                            "device":(x.get("device") or {}).get("model","") or "—",
+                        } for x in sources
+                    ]
+                    # Debug: read EVERY visible source independently for today,
+                    # including the selected derived stream. Never sum these values.
+                    per_source=[]
+                    for src in sources:
+                        src_id=src.get("dataStreamId")
+                        if not src_id:
+                            continue
+                        try:
+                            spayload,sr=aggregate(dtype,sm,em,src_id)
+                            if spayload is not None:
+                                sh=daily_sum(spayload)
+                                sval=next((z["value"] for z in sh if z["date"]==today()),None)
+                                per_source.append({
+                                    "name":src.get("dataStreamName","") or "—",
+                                    "app":(src.get("application") or {}).get("packageName","") or "—",
+                                    "device":(src.get("device") or {}).get("model","") or "—",
+                                    "value":sval,
+                                    "id":src_id,
+                                    "selected":src_id==chosen,
+                                    "points_today":points_today_detailed(spayload)
+                                })
+                            else:
+                                per_source.append({
+                                    "name":src.get("dataStreamName","") or "—",
+                                    "app":(src.get("application") or {}).get("packageName","") or "—",
+                                    "device":(src.get("device") or {}).get("model","") or "—",
+                                    "value":None,
+                                    "id":src_id,
+                                    "selected":src_id==chosen,
+                                    "error":f"HTTP {sr.status_code}",
+                                    "points_today":[]
+                                })
+                        except Exception as se:
+                            per_source.append({
+                                "name":src.get("dataStreamName","") or "—",
+                                "app":(src.get("application") or {}).get("packageName","") or "—",
+                                "device":(src.get("device") or {}).get("model","") or "—",
+                                "value":None,
+                                "id":src_id,
+                                "selected":src_id==chosen,
+                                "error":str(se)[:150],
+                                "points_today":[]
+                            })
+                    source_values[key]=per_source
+                else:
+                    catalogs[key]=[]
+                    diag[key]={"status":"source_error","http":r.status_code,"type":dtype,"detail":r.text[:500]}
+            payload,r=aggregate(dtype,sm,em,chosen)
+            if payload is None:
+                # If a preferred derived stream is unavailable/forbidden, fall back
+                # to the dataType aggregate so the user still gets diagnostics.
+                fallback_used=False
+                if chosen:
+                    payload,r=aggregate(dtype,sm,em,None); fallback_used=True
+                if payload is None:
+                    data[key]=None; hist[key]=[]; diag[key]={"status":"error","http":r.status_code,"type":dtype,"detail":r.text[:500],"source_id":chosen}
+                    continue
+                choice_reason=(choice_reason or "sorgente selezionata")+" · fallback aggregate"
+            h=daily_sum(payload) if mode=="sum" else daily_latest(payload)
+            hist[key]=h
+            if key in source_keys:
+                # Keep the old all-source aggregate only as a diagnostic comparator.
+                # It is NOT used for the value shown by MyDietApp when a preferred
+                # derived stream is available.
+                all_payload,all_r=aggregate(dtype,sm,em,None)
+                if all_payload is not None:
+                    all_hist=daily_sum(all_payload) if mode=="sum" else daily_latest(all_payload)
+                    selected_today=next((z["value"] for z in h if z["date"]==today()),None)
+                    all_today=next((z["value"] for z in all_hist if z["date"]==today()),None)
+                    comparisons[key]={"selected":selected_today,"all_sources":all_today,"difference":(all_today-selected_today) if all_today is not None and selected_today is not None else None}
+                else:
+                    comparisons[key]={"selected":next((z["value"] for z in h if z["date"]==today()),None),"all_sources":None,"difference":None,"error":all_r.text[:300]}
+            # IMPORTANT: the aggregate endpoint is NOT used for the live
+            # value of steps/calories. In our account it returned 6267 steps
+            # even though that value represented a wider historical aggregate.
+            live_value = h[-1]["value"] if h else None
+            live_info = {}
+            if key in {"steps","calories"} and chosen:
+                live_start=datetime.now(ROME).replace(hour=0,minute=0,second=0,microsecond=0)
+                live_end=datetime.now(ROME)
+                lsm=int(live_start.timestamp()*1000)
+                lem=int(live_end.timestamp()*1000)
+                raw_payload,raw_r=read_raw_dataset(chosen,lsm,lem)
+                if raw_payload is not None:
+                    raw_rows=raw_point_rows(raw_payload,live_start.date())
+                    if mode=="sum":
+                        pts=[p for p in raw_points(raw_payload) if datetime.fromtimestamp(p["end"],ROME).date()==live_start.date()]
+                        raw_count=len(pts)
+                        raw_sum=sum(p["value"] for p in pts) if pts else None
+                        if key=="calories":
+                            # calories.expended can be cumulative/overlapping.
+                            # Do not blindly sum it for the live dashboard.
+                            live_value=pts[-1]["value"] if pts else None
+                        else:
+                            live_value=raw_sum
+                    else:
+                        pts=raw_points(raw_payload)
+                        live_value=pts[-1]["value"] if pts else None
+                        raw_count=len(pts)
+                        raw_sum=None
+                    live_info={
+                        "method":"raw_dataset",
+                        "points":raw_count,
+                        "start":live_start.strftime("%d/%m/%Y %H:%M:%S"),
+                        "end":live_end.strftime("%d/%m/%Y %H:%M:%S"),
+                        "value":live_value,
+                        "raw_sum":raw_sum,
+                        "raw_rows":raw_rows
+                    }
+                else:
+                    live_info={
+                        "method":"raw_dataset_failed",
+                        "http":raw_r.status_code if raw_r is not None else None,
+                        "detail":raw_r.text[:250] if raw_r is not None else "nessuna risposta"
+                    }
+
+            data[key]=live_value
+            diag[key]={
+                "status":"available" if h else "no_data",
+                "http":200,
+                "type":dtype,
+                "points":len(points_from(payload)),
+                "source_id":chosen,
+                "source_reason":choice_reason,
+                "source_label":next((f"{x['name']} · {x['app']} · {x.get('device') or 'device n/d'}" for x in catalogs.get(key,[]) if x["id"]==chosen), chosen or "aggregate di tutte le sorgenti"),
+                "live_query":live_info
+            }
+        except Exception as e:
+            data[key]=None; hist[key]=[]; diag[key]={"status":"error","type":dtype,"detail":str(e)}
+    # These are the exact live values calculated above from today's raw
+    # dataset for the selected Google Fit derived streams.
+    # V13: the Google derived step stream is retained for diagnostics, but is
+    # not treated as Galaxy Watch data. A phone Samsung top_level source is
+    # explicitly excluded from the authoritative dashboard value.
+    step_reason=str(diag.get("steps",{}).get("source_reason","") or "")
+    step_app=str(diag.get("steps",{}).get("source_label","") or "")
+    # No Google Fit legacy value is considered an authoritative Galaxy Watch
+    # value. A verified value will only be enabled by the native Health Connect
+    # provider, which will set steps_source_verified=True explicitly.
+    data["steps_today"]=None
+    data["steps_source_verified"]=False
+    data["steps_untrusted_value"]=data.get("steps")
+    data["steps_untrusted_reason"]=step_reason or "Google Fit legacy: sorgente Watch non verificata"
+    # Never expose an obviously impossible calorie value to the food budget.
+    # Keep the raw value in diagnostics for investigation.
+    cal=data.get("calories")
+    # Google Fit legacy calories.expended can contain cumulative/overlapping
+    # intervals. Until Health Connect provides a normalized total-calorie
+    # record, never use this value for the live food budget.
+    data["calories_today"]=None
+    data["calories_untrusted_value"]=cal if cal is not None else None
+    data["calories_source_verified"]=False
+    dist=next((x["value"] for x in hist["distance"] if x["date"]==today()),None)
+    data["distance_today"]=dist/1000 if dist is not None else None
+    data["source_catalogs"]=catalogs
+    data["source_comparisons"]=comparisons
+    data["source_values"]=source_values
+    # V11: compare every visible source independently for today's interval.
+    try:
+        live_start=datetime.now(ROME).replace(hour=0,minute=0,second=0,microsecond=0)
+        live_end=datetime.now(ROME)
+        diag["_source_compare_steps"]=compare_today_sources(
+            catalogs,"com.google.step_count.delta","sum",live_start,live_end
+        )
+        diag["_source_compare_calories"]=compare_today_sources(
+            catalogs,"com.google.calories.expended","sum",live_start,live_end
+        )
+    except Exception as e:
+        diag["_source_compare_error"]=str(e)
+
+    return data,hist,diag
+
+# ---------------- Onboarding / Navigation ----------------
+
+def _profile_complete():
+    return bool(st.session_state.get("profile_setup_complete", False))
+
+def _save_profile_values(values):
+    # Profile is the control center of MyDiet: compare the previous state first,
+    # and on the very first profile creation start the guided pantry inventory.
+    _was_profile_complete = bool(st.session_state.get("profile_setup_complete", False))
+    # then save the new one and record the consequences explicitly.
+    tracked = [
+        ("name", "Nome"), ("weight", "Peso attuale"), ("goal_weight", "Peso desiderato"),
+        ("height", "Altezza"), ("age", "Età"), ("sex", "Sesso"),
+        ("activity_level", "Attività abituale"), ("training_frequency", "Allenamento previsto"),
+        ("diet_goal", "Obiettivo"), ("diet_style", "Stile alimentare"),
+        ("custom_calorie_target", "Target calorie"), ("activity_tracking_mode", "Monitoraggio attività"),
+        ("water_goal_ml", "Obiettivo acqua"), ("quantity_mode", "Visualizzazione quantità"),
+        ("allergies", "Allergie / intolleranze"), ("excluded_foods", "Alimenti esclusi"),
+    ]
+    changes=[]
+    for key,label in tracked:
+        before=st.session_state.get("p_"+key)
+        after=values.get(key)
+        if before != after:
+            def fmt(v):
+                if key=="water_goal_ml": return f"{float(v)/1000:.2f} L" if v is not None else "—"
+                if key=="custom_calorie_target": return f"{int(v):,} kcal".replace(",", ".") if v else "automatico"
+                return str(v) if v not in (None, "") else "—"
+            changes.append({"label":label,"before":fmt(before),"after":fmt(after),"key":key})
+
+    for key, value in values.items():
+        st.session_state["p_"+key] = value
+
+    # Keep legacy deficit aligned for the weight projection and older state.
+    maintenance_for_save = round(
+        bmr_mifflin(float(values["weight"]), float(values["height"]), int(values["age"]), values["sex"])
+        * ACTIVITY_FACTORS[values["activity_level"]]
+    )
+    goal = values["diet_goal"]
+    bmr_save = bmr_mifflin(float(values["weight"]), float(values["height"]), int(values["age"]), values["sex"])
+    chosen_target = calorie_target_for_goal(
+        bmr_save, maintenance_for_save, goal, values.get("custom_calorie_target", 0)
+    )
+    st.session_state.p_deficit = max(0, maintenance_for_save - chosen_target)
+    st.session_state.profile_setup_complete = True
+    if not _was_profile_complete:
+        st.session_state.pantry_onboarding_complete = False
+
+    # Changes that affect the generated menu make the existing plan stale, but
+    # never overwrite it silently. The user gets an explicit regeneration action.
+    regeneration_keys={
+        "weight","goal_weight","height","age","sex","activity_level",
+        "training_frequency","diet_goal","diet_style","custom_calorie_target",
+        "allergies","excluded_foods"
+    }
+    if any(c["key"] in regeneration_keys for c in changes):
+        st.session_state.plan_needs_regeneration = True
+    st.session_state.profile_change_summary = changes
+    st.session_state.profile_change_time = datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+    # First successful profile save creates the anonymous browser identity.
+    if not _state_token():
+        st.query_params["mdid"] = uuid.uuid4().hex
+    _persist_app_state()
+
+    # V86: PostgreSQL is the durable source for profile data. The local /tmp
+    # snapshot above remains only as a transition fallback while DB is configured.
+    dsn = _database_url()
+    if dsn:
+        try:
+            db_ensure_schema(dsn)
+            db_save_profile(_state_token(), values, profile_setup_complete=True, url=dsn)
+            # Keep a durable plan aggregate linked to the new profile.
+            if st.session_state.get("_db_plan_loaded", False):
+                _db_save_plan_state()
+            st.session_state["_db_status"] = "salvato su PostgreSQL"
+        except Exception as e:
+            st.session_state["_db_status"] = "salvataggio DB non riuscito: " + str(e)[:300]
+
+
+if not _profile_complete():
+    # During onboarding the app must remain on the profile setup screen.
+    # A bottom-tab click must never create a misleading new app page before
+    # the minimum profile exists.
+    if st.session_state.get("page") != "Profilo":
+        st.session_state.page = "Profilo"
+    st.markdown("""
+    <div class="hero" style="margin-top:10px;padding:24px 20px;">
+      <div class="small">BENVENUTO IN MYDIET</div>
+      <div style="font-size:1.85rem;font-weight:850;margin:4px 0 6px;">Costruiamo il tuo profilo.</div>
+      <div class="muted">Prima di creare un piano, MyDiet deve conoscere il tuo obiettivo e quanto vuoi monitorare la tua giornata.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.form("first_profile_setup"):
+        st.subheader("👤 Tu")
+        c1,c2 = st.columns(2)
+        with c1:
+            name = st.text_input("Nome", st.session_state.p_name)
+            weight = st.number_input("Peso attuale (kg)", 30., 300., float(st.session_state.p_weight), .1)
+            goal_weight = st.number_input("Peso desiderato (kg)", 30., 300., float(st.session_state.p_goal_weight), .1)
+            height = st.number_input("Altezza (cm)", 100., 230., float(st.session_state.p_height), .5)
+        with c2:
+            age = st.number_input("Età", 13, 100, int(st.session_state.p_age))
+            sex = st.selectbox("Sesso", ["male","female"], index=0 if st.session_state.p_sex == "male" else 1, format_func=lambda x: "Uomo" if x == "male" else "Donna")
+            activity_options = list(ACTIVITY_FACTORS.keys())
+            activity = st.selectbox("Attività abituale", activity_options, index=activity_options.index(st.session_state.p_activity_level), format_func=lambda x: {
+                "sedentaria":"🛋️ Sedentaria", "leggera":"🚶 Leggera", "moderata":"🏃 Moderata", "alta":"🏋️ Alta"
+            }[x])
+            training_frequency = st.selectbox(
+                "Frequenza palestra / allenamento prevista",
+                ["Nessuna","1–2 giorni/settimana","3–4 giorni/settimana","5–6 giorni/settimana","Ogni giorno"],
+                index=["Nessuna","1–2 giorni/settimana","3–4 giorni/settimana","5–6 giorni/settimana","Ogni giorno"].index(st.session_state.get("p_training_frequency","5–6 giorni/settimana"))
+            )
+
+        st.divider()
+        st.subheader("🎯 Il tuo obiettivo")
+        goal_options = ["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"]
+        diet_goal = st.selectbox(
+            "Cosa vuoi ottenere?",
+            goal_options,
+            index=goal_options.index(st.session_state.p_diet_goal)
+        )
+        if diet_goal == "🎯 Calorie personalizzate":
+            custom_target = st.number_input(
+                "Target kcal personalizzato", 1500, 6000,
+                int(st.session_state.get("p_custom_calorie_target",0) or max(1500, energy_profile()["maintenance_est"])),
+                50
+            )
+            st.caption(f"BMR stimato: {energy_profile()['bmr_est']} kcal · mantenimento stimato (TDEE): {energy_profile()['maintenance_est']} kcal")
+        else:
+            custom_target = 0
+            preview = energy_profile()
+            st.info(f"🎯 Target calcolato automaticamente: **{preview['target']} kcal/giorno** · mantenimento stimato (TDEE): {preview['maintenance_est']} kcal. Il target viene adattato all'obiettivo scelto.")
+
+        st.subheader("🥗 Come vuoi mangiare?")
+        style_options = ["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"]
+        diet_style = st.selectbox(
+            "Stile alimentare",
+            style_options,
+            index=style_options.index(st.session_state.p_diet_style)
+        )
+        c1,c2 = st.columns(2)
+        with c1:
+            allergies = st.text_input("Allergie / intolleranze", value=st.session_state.get("p_allergies",""), placeholder="Es. lattosio, frutta secca")
+        with c2:
+            excluded_foods = st.text_input("Alimenti che non vuoi", value=st.session_state.get("p_excluded_foods",""), placeholder="Es. tonno, broccoli")
+
+        st.divider()
+        st.subheader("❤️ Quanto vuoi monitorare?")
+        tracking_options = [
+            "⌚ Smartwatch / dati automatici",
+            "✍️ Inserisco i valori manualmente",
+            "🚫 Solo dieta — non monitorare attività"
+        ]
+        tracking_mode = st.selectbox(
+            "Scegli il livello di monitoraggio",
+            tracking_options,
+            index=tracking_options.index(st.session_state.get("p_activity_tracking_mode", tracking_options[0])),
+            help="Puoi usare MyDiet anche senza smartwatch. L'attività reale non cambierà automaticamente il tuo piano alimentare."
+        )
+
+        water_options = list(range(1500,4001,250))
+        water_goal = st.selectbox(
+            "💧 Obiettivo acqua",
+            water_options,
+            index=water_options.index(int(st.session_state.p_water_goal_ml)),
+            format_func=lambda x:f"{x/1000:.2f} L/giorno"
+        )
+        quantity_options = ["porzioni","both","precise"]
+        quantity_mode = st.selectbox(
+            "Come vuoi vedere le quantità?",
+            quantity_options,
+            index=quantity_options.index(st.session_state.get("p_quantity_mode","porzioni")),
+            format_func=lambda x: {"porzioni":"👌 Porzioni","both":"⚖️ Porzioni + grammature","precise":"⚖️ Grammature precise"}[x]
+        )
+
+        submitted = st.form_submit_button("🚀 Crea il mio profilo", type="primary", use_container_width=True)
+
+    if submitted:
+        _save_profile_values({
+            "name":name, "weight":weight, "goal_weight":goal_weight, "height":height, "age":age, "sex":sex,
+            "activity_level":activity, "training_frequency":training_frequency, "diet_goal":diet_goal,
+            "diet_style":diet_style, "custom_calorie_target":int(custom_target),
+            "activity_tracking_mode":tracking_mode, "allergies":allergies.strip(), "excluded_foods":excluded_foods.strip(),
+            "water_goal_ml":water_goal, "quantity_mode":quantity_mode
+        })
+        st.success("Profilo creato. Ora possiamo costruire il tuo primo piano.")
+        st.session_state.page = "PantryOnboarding" if not st.session_state.get("pantry_onboarding_complete", True) else "Home"
+        _mydiet_rerun()
+
+    st.stop()
+
+# Main navigation is now rendered as a fixed bottom tab bar after page content.
+
+# ---------------- First-run pantry onboarding ----------------
+elif st.session_state.page=="PantryOnboarding":
+    st.markdown("""
+    <div class="hero" style="margin-top:10px;padding:24px 20px;">
+      <div class="small">BENVENUTO IN MYDIET</div>
+      <div style="font-size:1.85rem;font-weight:850;margin:4px 0 6px;">🏠 Cosa hai già in casa?</div>
+      <div class="muted">Prima di creare la tua prima settimana, facciamo un rapido inventario. Il piano continuerà a essere costruito sul tuo profilo e sui tuoi obiettivi: useremo quello che hai già per ottimizzare la settimana e ridurre gli acquisti.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    pantry_catalog={
+        "🍝 Pasta, riso e cereali":["Pasta","Riso basmati","Riso integrale","Farro","Orzo","Cous cous","Avena"],
+        "🥩 Carne e proteine":["Petto di pollo","Fesa di tacchino","Carne macinata magra","Tonno al naturale","Salmone","Merluzzo"],
+        "🥚 Uova e latticini":["Uova","Yogurt greco","Yogurt","Latte","Ricotta","Formaggio"],
+        "🥦 Frutta e verdura":["Mela","Banana","Pera","Frutta","Zucchine","Broccoli","Spinaci","Insalata mista","Verdure miste","Patate"],
+        "🫒 Oli e condimenti":["Olio EVO","Miele","Passata di pomodoro"],
+        "🥫 Dispensa e altro":["Pane integrale","Mandorle","Noci","Legumi in scatola","Crackers"]
+    }
+    unit_defaults={
+        "Uova":"pz","Pasta":"g","Riso basmati":"g","Riso integrale":"g","Farro":"g","Orzo":"g","Cous cous":"g","Avena":"g",
+        "Olio EVO":"ml","Latte":"ml","Yogurt":"pz","Yogurt greco":"pz","Pane integrale":"g","Patate":"g"
+    }
+    all_items=[x for vals in pantry_catalog.values() for x in vals]
+
+    # Existing pantry entries are part of the user's personal catalog. They
+    # must be visible here even if they were never in the built-in suggestions.
+    existing_pantry=pantry_items()
+    existing_by_name={_normalized_food_name(x["name"]):x for x in existing_pantry}
+    custom_items=st.session_state.setdefault("pantry_onboarding_custom_items", [])
+    for item in existing_pantry:
+        if item["name"] not in all_items and item["name"] not in custom_items:
+            custom_items.append(item["name"])
+    st.session_state.pantry_onboarding_custom_items=custom_items
+
+    with st.container(border=True):
+        st.markdown("### 🔎 Non trovi qualcosa che hai in casa?")
+        c_search,c_add=st.columns([2.2,1])
+        with c_search:
+            pantry_search=st.text_input("Cerca un alimento", placeholder="Es. ceci, pesto, lasagna...", key="pantry_onboarding_search")
+        with c_add:
+            st.caption("Puoi aggiungere qualsiasi alimento")
+        search_term=pantry_search.strip().lower()
+        selectable_source=[]
+        seen=set()
+        for x in all_items + custom_items:
+            k=_normalized_food_name(x)
+            if k not in seen and (not search_term or search_term in k):
+                selectable_source.append(x); seen.add(k)
+        filtered_items=[x for x in selectable_source if not search_term or search_term in x.lower()]
+        if search_term and any(_normalized_food_name(x)==_normalized_food_name(pantry_search.strip()) for x in selectable_source):
+            st.success(f"Trovato nel tuo catalogo: **{pantry_search.strip()}**")
+        elif search_term and not filtered_items:
+            st.warning(f"Non trovo **{pantry_search.strip()}** nel catalogo MyDiet.")
+        with st.expander("➕ Aggiungi alimento manualmente", expanded=bool(search_term and not filtered_items)):
+            c1,c2=st.columns([3,1])
+            with c1:
+                custom_food_name=st.text_input("Nome alimento", value=pantry_search.strip(), placeholder="Es. Ceci in scatola", key="pantry_onboarding_custom_name")
+            with c2:
+                if st.button("➕ Aggiungi", type="primary", use_container_width=True, key="pantry_onboarding_add_custom"):
+                    new_name=custom_food_name.strip()
+                    existing={_normalized_food_name(x) for x in all_items + custom_items}
+                    if not new_name:
+                        st.warning("Inserisci il nome dell'alimento.")
+                    elif _normalized_food_name(new_name) in existing:
+                        st.info("Questo alimento è già disponibile nel tuo catalogo.")
+                    else:
+                        custom_items.append(new_name)
+                        st.session_state.pantry_onboarding_custom_items=custom_items
+                        selected_now=list(st.session_state.get("pantry_onboarding_selected", []))
+                        if new_name not in selected_now:
+                            selected_now.append(new_name)
+                        st.session_state.pantry_onboarding_selected=selected_now
+                        _persist_app_state(); _mydiet_rerun()
+        if custom_items:
+            st.caption("Alimenti aggiunti da te: " + ", ".join(custom_items))
+            st.caption("Questi alimenti restano disponibili anche quando riapri l'inventario.")
+
+    selectable_items=[]; seen=set()
+    for x in all_items + custom_items:
+        k=_normalized_food_name(x)
+        if k not in seen:
+            selectable_items.append(x); seen.add(k)
+
+    # Preselect everything already present in the real pantry. This is an edit
+    # of the inventory, not a second list disconnected from Dispensa.
+    current_selected=list(st.session_state.get("pantry_onboarding_selected", []))
+    for item in existing_pantry:
+        if item["name"] not in current_selected:
+            current_selected.append(item["name"])
+    current_selected=[x for x in current_selected if _normalized_food_name(x) in {_normalized_food_name(y) for y in selectable_items}]
+    st.session_state.pantry_onboarding_selected=current_selected
+    selected=st.multiselect("Seleziona gli alimenti che hai già in casa", selectable_items, key="pantry_onboarding_selected", placeholder="Cerca e seleziona gli alimenti...")
+
+    if not selected:
+        st.info("Puoi selezionare anche solo gli alimenti che vuoi utilizzare nella prima settimana. Non serve inserire tutta la casa.")
+    else:
+        st.markdown("### 📦 Inserisci quantità e confezioni")
+        st.caption("Puoi avere contemporaneamente confezioni e prodotto già aperto/sfuso. Salvando di nuovo lo stesso alimento, MyDiet aggiorna il valore invece di sommarlo una seconda volta.")
+        for idx,name in enumerate(selected):
+            safe="".join(c if c.isalnum() else "_" for c in name.lower())
+            current=existing_by_name.get(_normalized_food_name(name),{})
+            lots=current.get("pack_lots",[]) if current else []
+            has_packages=bool(lots) or float(current.get("pack_qty",0) or 0)>0 if current else False
+            existing_loose=_pantry_loose_qty(current) if current else 0.0
+            with st.container(border=True):
+                st.markdown(f"**{name}**")
+                if current:
+                    st.caption(f"Attualmente in dispensa: **{current.get('qty',0):g} {current.get('unit','g')}**")
+                    if lots:
+                        st.caption(" · ".join(f"{float(x.get('count',0) or 0):g} confezioni × {float(x.get('qty',0) or 0):g} {x.get('unit',current.get('unit','g'))}" for x in lots))
+                mode=st.radio("Come lo hai?",["Quantità libera","Confezione + eventuale sfuso"],horizontal=True,index=1 if has_packages else 0,key=f"ob_mode_{safe}")
+                if mode=="Quantità libera":
+                    units=["g","kg","ml","l","pz"]
+                    default=current.get("unit",unit_defaults.get(name,"g")) if current else unit_defaults.get(name,"g")
+                    c1,c2=st.columns(2)
+                    with c1:
+                        unit=st.selectbox("Unità",units,index=units.index(default) if default in units else 0,key=f"ob_unit_{safe}")
+                    with c2:
+                        default_qty=float(current.get("qty",0) or 0) if current else 0.0
+                        qty=st.number_input("Quantità",min_value=0.0,value=default_qty,step=qty_step(unit,max(default_qty,20 if unit in ("g","ml") else 1)),key=f"ob_qty_{safe}")
+                else:
+                    first=lots[0] if lots else {"count":1,"qty":0,"unit":current.get("unit",unit_defaults.get(name,"g")) if current else unit_defaults.get(name,"g")}
+                    if len(lots)>1:
+                        st.warning("Questo alimento contiene più formati di confezione. L'inventario conserva i formati esistenti; per modificarli in dettaglio usa Modifica nella Dispensa.")
+                    c1,c2,c3=st.columns(3)
+                    with c1: pc=st.number_input("Confezioni",min_value=0.0,value=float(sum(float(x.get("count",0) or 0) for x in lots) or first.get("count",1) or 1),step=1.0,key=f"ob_pc_{safe}")
+                    with c2: pq=st.number_input("Contenuto",min_value=0.0,value=float(first.get("qty",0) or 0),step=0.1,key=f"ob_pq_{safe}")
+                    with c3:
+                        units=["g","kg","ml","l","pz"]
+                        default=str(first.get("unit",unit_defaults.get(name,"g"))).lower()
+                        pu=st.selectbox("Unità",units,index=units.index(default) if default in units else 0,key=f"ob_pu_{safe}")
+                    loose_default=existing_loose if current else 0.0
+                    loose=st.number_input(f"Quantità già sfusa ({pu})",min_value=0.0,value=float(loose_default if not current or current.get("unit")==pu else (_pantry_convert_between_units(loose_default,current.get("unit","g"),pu) or 0.0)),step=qty_step(pu,max(1.0,loose_default or 1)),key=f"ob_loose_{safe}")
+                    if pq>0:
+                        st.caption(f"📦 {pc:g} × {pq:g} {pu} + {loose:g} {pu} sfusi = **{pc*pq+loose:g} {pu} totali**")
+
+    c1,c2=st.columns(2)
+    with c1:
+        if st.button("⏭️ Salta per ora",use_container_width=True):
+            st.session_state.pantry_onboarding_complete=True
+            st.session_state.page="Home"
+            _persist_app_state(); _mydiet_rerun()
+    with c2:
+        if st.button("🏠 Salva inventario e continua",type="primary",use_container_width=True):
+            saved=0
+            for name in selected:
+                safe="".join(c if c.isalnum() else "_" for c in name.lower())
+                mode=st.session_state.get(f"ob_mode_{safe}","Quantità libera")
+                if mode=="Quantità libera":
+                    qty=float(st.session_state.get(f"ob_qty_{safe}",0) or 0)
+                    unit=st.session_state.get(f"ob_unit_{safe}",unit_defaults.get(name,"g"))
+                    if _replace_pantry_inventory(name,"Quantità libera",qty,unit): saved+=1
+                else:
+                    pc=float(st.session_state.get(f"ob_pc_{safe}",0) or 0)
+                    pq=float(st.session_state.get(f"ob_pq_{safe}",0) or 0)
+                    pu=st.session_state.get(f"ob_pu_{safe}",unit_defaults.get(name,"g"))
+                    loose=float(st.session_state.get(f"ob_loose_{safe}",0) or 0)
+                    existing_lots=(existing_by_name.get(_normalized_food_name(name),{}) or {}).get("pack_lots",[])
+                    preserve_lots=existing_lots if len(existing_lots)>1 else None
+                    if _replace_pantry_inventory(name,"Confezione",pack_count=pc,pack_qty=pq,pack_unit=pu,loose_qty=loose,pack_lots=preserve_lots): saved+=1
+            st.session_state.pantry_onboarding_complete=True
+            st.session_state.page="Home"
+            _persist_app_state()
+            st.success(f"Inventario aggiornato: {saved} alimenti.")
+            _mydiet_rerun()
+
+    st.caption("La Dispensa è la fonte di verità: puoi modificare, aggiungere o eliminare qualsiasi alimento in qualsiasi momento.")
+    st.stop()
+
+# ---------------- Home ----------------
+if st.session_state.page=="Home":
+    h=st.session_state.get("health",{})
+    b=balance(); d=current_day_name(); next_meal=_next_meal_for_today(d)
+    rem=b["remaining"]; target=int(b["target"] or 0); eaten=int(b["eaten"] or 0)
+    pct=min(max(eaten/max(target,1),0),1)
+    weekdays=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+    now_home=datetime.now(ROME)
+    date_label=f"{weekdays[now_home.weekday()]} {now_home.day:02d}/{now_home.month:02d}"
+    profile_name=str(st.session_state.get("p_name") or "").strip()
+    greeting=f"Ciao, {profile_name} 👋" if profile_name else "Ciao 👋"
+
+    # Compact welcome line: the global MyDiet header remains the brand anchor.
+    st.markdown(f'''<div class="mydiet-home-intro"><div><div class="mydiet-home-greeting">{greeting}</div><div class="mydiet-home-date">{date_label} · la tua giornata</div></div></div>''',unsafe_allow_html=True)
+
+    # Main calorie status: same underlying balance() logic, redesigned only visually.
+    st.markdown(f'''<div class="mydiet-kcal-card"><div class="mydiet-kcal-label">OBIETTIVO DI OGGI</div><div style="margin-top:9px;"><div class="mydiet-kcal-number">{eaten:,} <span style="font-size:.92rem;font-weight:750;color:#a8afba;letter-spacing:-.02em;">/ {target:,} kcal</span></div><div class="mydiet-kcal-sub">{'Ti restano' if rem>=0 else 'Sei sopra il target di'} <b>{abs(rem):,} kcal</b></div><div class="mydiet-kcal-target">Target alimentare di oggi</div></div></div>'''.replace(",","."),unsafe_allow_html=True)
+    st.markdown('<div class="mydiet-home-progress">',unsafe_allow_html=True)
+    st.progress(pct)
+    st.markdown('</div>',unsafe_allow_html=True)
+
+    # V97: Home focuses directly on the next action.
+    # Next meal: compact and actionable.
+    if next_meal:
+        mn=next_meal.get("_meal_name"); meal=st.session_state.meal_plan.get(d,{}).get(mn)
+        if meal:
+            items=active_items(meal); kcal=meal_kcal_total(meal); registered=_meal_is_registered(d,mn)
+            meal_icon=mn.split(" ",1)[0] if " " in mn else "🍽️"
+            meal_label=mn.split(" ",1)[1] if " " in mn else mn
+            st.markdown(f'''<div class="mydiet-home-section"><div class="mydiet-home-section-title">🍽️ Prossimo pasto</div><div class="mydiet-home-section-sub">{'✓ già registrato' if registered else 'da registrare'}</div></div><div class="mydiet-next-card"><div class="mydiet-next-top"><span>{meal_icon}</span><span>{meal_label}</span></div><div class="mydiet-next-name">{meal.get('name','Pasto')}</div><div class="mydiet-next-kcal">{kcal} kcal · {'✓ Registrato' if registered else 'Pronto da registrare'}</div></div>''',unsafe_allow_html=True)
+            if items:
+                with st.expander("Vedi ingredienti",expanded=False):
+                    st.caption(" · ".join(f"{i['name']} {quantity_caption(i)}" for i in items))
+            if not registered and st.button("🍴 Ho mangiato",key=f"home_next_eat_{d}_{mn}",use_container_width=True,type="primary"):
+                set_meal_registered(d,mn,True); _mydiet_rerun()
+            elif registered and st.button("↩ Annulla registrazione",key=f"home_next_undo_{d}_{mn}",use_container_width=True):
+                set_meal_registered(d,mn,False); _mydiet_rerun()
+
+    # Today's meals: compact list instead of large cards.
+    ms=st.session_state.meal_plan.get(d,{})
+    st.markdown('<div class="mydiet-home-section"><div class="mydiet-home-section-title">📋 Oggi</div><div class="mydiet-home-section-sub">Pasti previsti</div></div>',unsafe_allow_html=True)
+    meal_order=["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
+    ordered_meals=[(mn,ms[mn]) for mn in meal_order if mn in ms]
+    for idx,(mn,m) in enumerate(ordered_meals):
+        items=active_items(m); kcal=meal_kcal_total(m); registered=_meal_is_registered(d,mn)
+        meal_icon=mn.split(" ",1)[0] if " " in mn else "🍽️"
+        meal_label=mn.split(" ",1)[1] if " " in mn else mn
+        status_class="done" if registered else ""
+        status_text="✓ Registrato" if registered else "Da registrare"
+        st.markdown(f'''<div class="mydiet-compact-meal {status_class}"><div class="mydiet-compact-meal-icon">{meal_icon}</div><div class="mydiet-compact-meal-copy"><div class="mydiet-compact-meal-title">{meal_label}</div><div class="mydiet-compact-meal-name">{m.get('name','Pasto')}</div><div class="mydiet-compact-meal-status">{status_text}</div></div><div class="mydiet-compact-kcal"><b>{kcal}</b><span>kcal</span></div></div>''',unsafe_allow_html=True)
+        if registered and st.button("↩ Annulla",key=f"home_undo_{d}_{idx}",use_container_width=True):
+            set_meal_registered(d,mn,False); _mydiet_rerun()
+
+    # V97: hydration stays visible, but with simpler wording.
+    water=water_today_ml(); goal=water_goal_ml(); wp=min(max(water/max(goal,1),0),1)
+    st.markdown('<div class="mydiet-home-section"><div class="mydiet-home-section-title">💧 Acqua</div></div>',unsafe_allow_html=True)
+    with st.container(border=True):
+        c1,c2=st.columns([3,1]); c1.markdown(f"**{water/1000:.2f} L** / {goal/1000:.2f} L"); c1.progress(wp)
+        with c2:
+            if st.button("+ 250 ml",key="water_plus",use_container_width=True,type="primary"):
+                add_water_ml(250); _mydiet_rerun()
+
+    # V97: activity details live in Attività; Home stays focused.
+    # Shopping preview: no invented price/budget; current Smart Shopping remains in Dispensa.
+    try:
+        shopping_rows=[x for x in shopping_list() if float(x.get("need",0) or 0)>0]
+    except Exception:
+        shopping_rows=[]
+    st.markdown('<div class="mydiet-home-section"><div class="mydiet-home-section-title">🛒 Spesa della settimana</div><div class="mydiet-home-section-sub">dispensa + piano</div></div>',unsafe_allow_html=True)
+    if shopping_rows:
+        st.markdown(f'''<div class="mydiet-shopping"><div class="mydiet-shopping-title">{len(shopping_rows)} prodotti da acquistare</div><div class="mydiet-shopping-meta">Calcolata automaticamente dal piano e dalla tua dispensa.</div></div>''',unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="mydiet-shopping"><div class="mydiet-shopping-title">✓ Dispensa coperta</div><div class="mydiet-shopping-meta">Al momento non risultano prodotti mancanti per il piano.</div></div>',unsafe_allow_html=True)
+    if st.button("🛒 Apri spesa",key="home_open_shopping",use_container_width=True):
+        st.session_state.page="Dispensa"; _mydiet_rerun()
+
+    with st.expander("🍴 Ho mangiato qualcosa fuori dal piano",expanded=False):
+        c1,c2=st.columns([3,1]); n=c1.text_input("Alimento",placeholder="Pizza margherita",key="manual_food_name_home"); k=c2.number_input("kcal",0,3000,500,10,key="manual_food_kcal_home")
+        if st.button("Registra",type="primary",key="manual_food_register_home") and n.strip():
+            st.session_state.manual_foods.append({"name":n.strip(),"kcal":k,"date":today()}); _mydiet_rerun()
+
+    # Technical diagnostics stay available, but are no longer placed near the main calorie card.
+    with st.expander("🔧 Diagnostica calorie",expanded=False):
+        planned_eaten_kcal=0.0; eaten_item_count=0
+        day_plan_diag=(st.session_state.get("meal_plan",{}) or {}).get(d,{}) or {}
+        eaten_map_diag=st.session_state.get("eaten",{}) or {}; overrides_diag=st.session_state.get("overrides",{}) or {}
+        for meal0 in day_plan_diag.values():
+            for item0 in meal0.get("ingredients",[]):
+                iid0=item0.get("id")
+                if not iid0 or not eaten_map_diag.get(iid0,False): continue
+                ov0=overrides_diag.get(iid0,{}) or {}
+                if ov0.get("removed"): continue
+                mult0=float(ov0.get("multiplier",1) or 1)
+                planned_eaten_kcal += float(item0.get("kcal",0) or 0)*mult0; eaten_item_count += 1
+        manual_today=[x for x in (st.session_state.get("manual_foods",[]) or []) if x.get("date")==today()]
+        manual_kcal=sum(float(x.get("kcal",0) or 0) for x in manual_today); diag_total=round(planned_eaten_kcal+manual_kcal)
+        diag_registered_meals=[k for k,v in (st.session_state.get("registered_meals",{}) or {}).items() if v and k.startswith(d+"::")]
+        st.caption("Solo lettura · nessun dato viene modificato")
+        c1,c2,c3=st.columns(3); c1.metric("🍽️ Pasti registrati",f"{round(planned_eaten_kcal):,} kcal".replace(",",".")); c2.metric("➕ Alimenti manuali",f"{round(manual_kcal):,} kcal".replace(",",".")); c3.metric("Σ Totale",f"{diag_total:,} kcal".replace(",","."))
+        st.caption(f"Ingredienti registrati: {eaten_item_count} · Pasti segnati come registrati oggi: {len(diag_registered_meals)}")
+        if manual_today:
+            st.markdown("**Alimenti manuali di oggi:**")
+            for x in manual_today: st.write(f"• {x.get('name','Alimento')} — {round(float(x.get('kcal',0) or 0))} kcal")
+        else: st.caption("Nessun alimento manuale registrato oggi.")
+    if st.session_state.last_sync: st.caption("Health Connect · ultima sincronizzazione: "+st.session_state.last_sync)
+
+# ---------------- Piano ----------------
+elif st.session_state.page=="Piano":
+    ensure_plan_metadata()
+    st.title("🍽️ Piano")
+    if st.session_state.get("plan_needs_regeneration"):
+        st.warning("⚠️ Il profilo è cambiato: il piano attuale non è ancora aggiornato.")
+        st.caption("Puoi continuare a usare il piano attuale oppure rigenerarlo esplicitamente con i nuovi dati del profilo.")
+
+    days_week=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+    has_next=bool(st.session_state.get("next_meal_plan"))
+    current_start=st.session_state.plan_week_start
+    next_start=st.session_state.get("next_week_start") or ((date.fromisoformat(current_start)+timedelta(days=7)).isoformat() if current_start else (date.today()+timedelta(days=7)).isoformat())
+    editing_next=bool(st.session_state.get("_plan_editor_next",False))
+    new_view="next" if editing_next else "current"
+
+    # V96 UX: the user sees only two concepts on the main screen:
+    # "Questa settimana" and "Il tuo prossimo piano". Internal concepts such
+    # as draft/activation/history are deliberately kept out of the primary navigation.
+    if editing_next:
+        st.markdown(
+            f"<div class='plan-mode-banner'><div class='small'>IL TUO PROSSIMO PIANO</div><strong>✨ {week_label(next_start)}</strong></div>",
+            unsafe_allow_html=True
+        )
+        st.info("✏️ Puoi modificare il prossimo piano senza cambiare quello che stai usando adesso.")
+        c_confirm,c_cancel=st.columns(2)
+        with c_confirm:
+            if st.button("✅ Conferma questo piano",key="confirm_next_plan",use_container_width=True,type="primary"):
+                if confirm_next_plan_activation():
+                    _mydiet_rerun()
+                else:
+                    st.error(st.session_state.get("plan_generation_message") or "Impossibile confermare il piano.")
+        with c_cancel:
+            if st.button("↩️ Torna al piano attuale",key="cancel_next_plan",use_container_width=True):
+                save_next_editor_context()
+                restore_current_plan_context()
+                st.session_state.plan_view_mode="current"
+                st.session_state.plan_edit_meal=None
+                _mydiet_rerun()
+    else:
+        st.markdown(
+            f"<div class='plan-mode-banner'><div class='small'>PIANO ATTUALE</div><strong>📌 Questa settimana</strong><div class='muted'>{week_label(current_start)}</div></div>",
+            unsafe_allow_html=True
+        )
+
+        # One clear action for the next week. The technical "generate" wording is
+        # replaced by the user-facing concept "prepara".
+        with st.container(border=True):
+            st.markdown(f"### ✨ Il tuo prossimo piano")
+            st.markdown(f"**{week_label(next_start)}**")
+            if has_next:
+                st.success("Il prossimo piano è pronto. Puoi controllarlo e modificarlo prima di confermarlo.")
+                preview=st.session_state.get("next_pantry_preview") or {}
+                total=preview.get("fully_covered",0)+preview.get("partial",0)+preview.get("not_in_pantry",0)
+                if total:
+                    covered=preview.get("fully_covered",0)
+                    missing=preview.get("not_in_pantry",0)
+                    st.caption(f"🏠 Ho tenuto conto anche della tua Dispensa · {covered} alimenti già coperti · {missing} da acquistare")
+                a,b=st.columns([2.2,1])
+                with a:
+                    if st.button("✏️ Apri e modifica",key="open_next_compact",use_container_width=True,type="primary"):
+                        enter_next_plan_editor()
+                        st.session_state.plan_view_mode="next"
+                        st.session_state.plan_edit_meal=None
+                        _mydiet_rerun()
+                with b:
+                    if st.button("🔄 Rigenera",key="regen_next_compact",use_container_width=True):
+                        st.session_state.force_next_generation=True
+                        _mydiet_rerun()
+            else:
+                st.caption("Non è ancora stato preparato. Quando vuoi, posso organizzare per te pasti e spesa della settimana.")
+                with st.expander("🍴 Pasti fuori casa",expanded=False):
+                    next_lunch_set=set(st.session_state.get("next_out_lunch_days",[]))
+                    next_dinner_set=set(st.session_state.get("next_out_dinner_days",[]))
+                    for od in days_week:
+                        a,b=st.columns(2)
+                        with a:
+                            lunch_on=st.checkbox(f"{od[:3]} · Pranzo",value=od in next_lunch_set,key=f"prep_next_lunch_{od}")
+                        with b:
+                            dinner_on=st.checkbox(f"{od[:3]} · Cena",value=od in next_dinner_set,key=f"prep_next_dinner_{od}")
+                        (next_lunch_set.add if lunch_on else next_lunch_set.discard)(od)
+                        (next_dinner_set.add if dinner_on else next_dinner_set.discard)(od)
+                    st.session_state.next_out_lunch_days=sorted(next_lunch_set,key=days_week.index)
+                    st.session_state.next_out_dinner_days=sorted(next_dinner_set,key=days_week.index)
+                if st.button("✨ Prepara il mio prossimo piano",key="generate_next_compact",use_container_width=True,type="primary"):
+                    st.session_state.force_next_generation=True
+                    _mydiet_rerun()
+
+        # Keep history available, but remove it from the primary navigation.
+        with st.expander("📚 Piani passati",expanded=False):
+            st.caption("Le settimane concluse sono consultabili ma non modificabili.")
+            history_items=sorted(st.session_state.plan_history.values(),key=lambda x:x.get("created_at",""),reverse=True)
+            if not history_items:
+                st.info("Ancora nessun piano passato.")
+            else:
+                for rec in history_items:
+                    label=rec.get("label","Settimana")
+                    with st.expander(f"📅 {label}",expanded=False):
+                        created=rec.get("created_at","—")[:16].replace("T"," ")
+                        st.caption(f"Archiviato: {created}")
+                        for hday,hms in rec.get("plan",{}).items():
+                            day_kcal=round(sum(float(i.get("kcal",0)) for _,hm in hms.items() for i in hm.get("ingredients",[])))
+                            st.markdown(f"**{hday}** · {day_kcal} kcal")
+                            for hmn,hm in hms.items():
+                                names=", ".join(f"{i.get('name','Alimento')} · {i.get('qty',1):g}{i.get('unit','g')}" for i in hm.get("ingredients",[])) or "Fuori casa"
+                                st.caption(f"{hmn}: {names}")
+
+    if not editing_next and not has_next and st.session_state.get("plan_generation_status")=="success" and st.session_state.get("plan_generation_message_week_start") not in (None,current_start):
+        st.session_state.plan_generation_status=None
+        st.session_state.plan_generation_message=None
+        st.session_state.plan_generation_message_week_start=None
+    if st.session_state.plan_generation_status=="running":
+        st.info("🤖 Sto preparando il tuo prossimo piano…")
+    elif st.session_state.plan_generation_status=="success" and st.session_state.plan_generation_message:
+        _msg_week=st.session_state.get("plan_generation_message_week_start")
+        _show_generation_message=(
+            st.session_state.get("plan_generation_message_week_start") is None
+            or (st.session_state.get("next_week_start") and _msg_week==st.session_state.get("next_week_start"))
+            or (st.session_state.get("plan_week_start") and _msg_week==st.session_state.get("plan_week_start"))
+        )
+        if _show_generation_message:
+            st.success(st.session_state.plan_generation_message)
+    elif st.session_state.plan_generation_status=="error":
+        st.error(st.session_state.plan_generation_message or "La preparazione non è riuscita.")
+
+    # Generation happens only after the user explicitly asks for the next plan.
+    if st.session_state.pop("force_next_generation",False):
+        current_start=st.session_state.plan_week_start
+        next_start=(date.fromisoformat(current_start)+timedelta(days=7)) if current_start else (date.today()+timedelta(days=7))
+        st.session_state.plan_generation_status="running"
+        st.session_state.plan_generation_message="Sto preparando una nuova settimana…"
+        st.session_state.plan_generation_message_week_start=next_start.isoformat()
+        st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+        try:
+            ep=energy_profile()
+            lunch_days=copy.deepcopy(st.session_state.get("next_out_lunch_days",st.session_state.get("out_lunch_days",[])))
+            dinner_days=copy.deepcopy(st.session_state.get("next_out_dinner_days",st.session_state.get("out_dinner_days",[])))
+            pantry_snapshot=pantry_prompt_snapshot()
+            prompt=f"""Crea un piano alimentare italiano di 7 giorni per la settimana {week_label(next_start.isoformat())}. Deve essere una SETTIMANA NUOVA e variare chiaramente rispetto al piano attuale. Profilo: {st.session_state.p_weight} kg, {st.session_state.p_height} cm, {st.session_state.p_age} anni, sesso {st.session_state.p_sex}. Mantenimento stimato: {ep['maintenance_est']} kcal/giorno. Target: {ep['target']} kcal/giorno. Obiettivo: {ep['diet_goal']}. Stile: {ep['diet_style']}. Frequenza allenamento prevista: {st.session_state.get('p_training_frequency','non specificata')}. Allergie/intolleranze: {st.session_state.get('p_allergies','nessuna') or 'nessuna'}. Alimenti esclusi: {st.session_state.get('p_excluded_foods','nessuno') or 'nessuno'}. Il piano deve rispettare il target calorico giornaliero di {ep['target']} kcal con uno scarto massimo del 5%. Distribuisci indicativamente il target così: colazione 20%, spuntino 10%, pranzo 35%, cena 35%. Le kcal di ogni ingrediente devono essere coerenti con quantità e unità indicate; non ridurre arbitrariamente il totale giornaliero. Per ogni ingrediente restituisci anche protein_g, carbs_g e fat_g come grammi stimati per la quantità indicata. Se non puoi stimarli in modo ragionevole, usa null: non inventare precisione. Le kcal e i macronutrienti devono riferirsi alla stessa quantità e unità dell'ingrediente.
+
+DISPENSA ATTUALE DELL'UTENTE:
+{pantry_snapshot}
+
+REGOLE DISPENSA: la dispensa NON è un vincolo e NON deve determinare da sola la dieta. Costruisci prima una settimana nutrizionalmente coerente con profilo, obiettivo, stile, preferenze ed esclusioni. Poi, quando è sensato e compatibile con il pasto, PRIVILEGIA gli alimenti già presenti in dispensa per ridurre sprechi e acquisti. Non inserire un alimento solo perché è in dispensa se non è adatto al piano. Non eliminare varietà e non trasformare la settimana in una dieta composta solo dagli alimenti già disponibili. Usa i nomi degli alimenti presenti in dispensa in modo il più possibile identico per permettere a MyDiet di riconoscere correttamente le quantità.
+
+Per ogni giorno crea esattamente 4 pasti: "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena". Nei pasti fuori casa usa name="📍 FUORI CASA: scegli dal menu disponibile" e ingredients=[]. Negli altri pasti crea ricette domestiche reali. Varia ricette e alimenti rispetto a una settimana standard: non copiare gli stessi pasti in giorni equivalenti.
+
+RESTITUISCI SOLO JSON, senza markdown e senza testo fuori dal JSON. Usa ESATTAMENTE questa struttura concettuale: un oggetto con le 7 chiavi di giorno "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"; ogni giorno deve contenere esattamente le 4 chiavi "☕ Colazione", "🍎 Spuntino", "🍽️ Pranzo", "🌙 Cena"; ogni pasto deve avere "name" e "ingredients"; ogni ingrediente deve avere "name", "qty", "unit", "kcal", "protein_g", "carbs_g", "fat_g" (i tre macronutrienti in grammi per la quantità indicata; usa null se non stimabili). NON usare chiavi inglesi per i giorni. Devi includere TUTTI E 7 i giorni e TUTTI E 4 i pasti per ciascun giorno. GIORNI PRANZO FUORI CASA: {', '.join(lunch_days) if lunch_days else 'nessuno'}. GIORNI CENA FUORI CASA: {', '.join(dinner_days) if dinner_days else 'nessuno'}."""
+            with st.spinner("🤖 Sto preparando il piano…"):
+                raw=openai_interaction(prompt,thinking_level="low",feature="weekly_plan"); out=normalize_ai_plan(raw)
+            out, adjusted_calorie_days = adjust_plan_calories_to_target(out, ep["target"])
+            draft_errors=_draft_validation_errors(out)
+            if draft_errors:
+                raise ValueError("L'AI ha restituito una bozza incompleta: " + "; ".join(draft_errors[:8]))
+            st.session_state.next_meal_plan=copy.deepcopy(out)
+            st.session_state.next_overrides={}
+            st.session_state.next_week_start=next_start.isoformat()
+            st.session_state.next_out_lunch_days=copy.deepcopy(lunch_days)
+            st.session_state.next_out_dinner_days=copy.deepcopy(dinner_days)
+            st.session_state.next_mensa_menus={}
+            st.session_state.plan_view_mode="current"
+            preview=pantry_week_preview(out)
+            st.session_state.next_pantry_preview=preview
+            st.session_state["_next_draft_dirty"]=False
+            _db_save_plan_state()
+            _persist_app_state()
+            st.session_state.plan_generation_status="success"
+            st.session_state.plan_generation_message=f"✓ Il tuo prossimo piano ({week_label(next_start.isoformat())}) è pronto. Quello attuale non è stato modificato." + (f" Calorie riallineate al target nei giorni: {', '.join(adjusted_calorie_days)}." if adjusted_calorie_days else "")
+            st.session_state.plan_generation_message_week_start=next_start.isoformat()
+            st.session_state.plan_generation_time=datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+            st.session_state.eaten={}; st.session_state.registered_meals={}
+            _mydiet_rerun()
+        except Exception as e:
+            st.session_state.plan_generation_status="error"
+            st.session_state.plan_generation_message=f"✕ Non riesco a preparare il piano: {e}"
+
+    # IMPORTANT: while editing the next week, only the draft is rendered. Before
+    # generation, never fall back to the active week's meals.
+    canonical_days=["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+    if editing_next and not has_next:
+        active_days=[]
+    else:
+        active_days=[d for d in canonical_days if d in st.session_state.meal_plan]
+    if not active_days:
+        st.info("Nessun piano disponibile.")
+    else:
+        selected_day=st.session_state.get("plan_day_selector",active_days[0])
+        if selected_day not in active_days: selected_day=active_days[0]
+        day=st.selectbox("Giorno",active_days,index=active_days.index(selected_day),key="plan_day_selector")
+        day_meals=st.session_state.meal_plan.get(day,{})
+        day_total=round(sum(meal_kcal_total(m) for m in day_meals.values()))
+        # Display macros only when every active ingredient has all three values; never invent missing data.
+        macro_items=[item for meal in day_meals.values() for item in active_items(meal)]
+        macros_complete=bool(macro_items) and all(all(item.get(k) is not None for k in ("protein_g","carbs_g","fat_g")) for item in macro_items)
+        day_macros={k:round(sum(float(item.get(k,0) or 0) for item in macro_items),1) for k in ("protein_g","carbs_g","fat_g")} if macros_complete else None
+        registered_count=sum(1 for mn in day_meals if _meal_is_registered(day,mn)) if not editing_next else 0
+        day_status='BOZZA · non attiva' if editing_next else f'{registered_count}/{len(day_meals)} pasti registrati'
+        st.markdown(
+            f"<div class='mydiet-plan-day-head'><div><div class='mydiet-plan-day-title'>📅 {day}</div><div class='mydiet-plan-day-meta'>{day_status}</div></div><div class='mydiet-plan-meal-kcal'><b>{day_total}</b><span>kcal previste</span></div></div>",
+            unsafe_allow_html=True
+        )
+        if day_macros:
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric("Proteine stimate", f"{day_macros['protein_g']:.1f} g")
+            mc2.metric("Carboidrati stimati", f"{day_macros['carbs_g']:.1f} g")
+            mc3.metric("Grassi stimati", f"{day_macros['fat_g']:.1f} g")
+            st.caption("Macronutrienti stimati dal generatore AI, non verificati su una banca dati nutrizionale certificata.")
+        else:
+            st.caption("Macronutrienti non ancora disponibili per tutti gli ingredienti: non vengono inventati né mostrati come valori certi.")
+
+        edit_key=st.session_state.get("plan_edit_meal")
+        if edit_key and (edit_key[0]!=day or edit_key[1] not in day_meals):
+            st.session_state.plan_edit_meal=None; edit_key=None
+
+        ordered_day_meals=[(mn,day_meals[mn]) for mn in _PLAN_MEALS if mn in day_meals]
+        ordered_day_meals += [(mn,m) for mn,m in day_meals.items() if mn not in _PLAN_MEALS]
+        for mn,m in ordered_day_meals:
+            out_of_home=out_of_home_meal_configured(day,mn)
+            items=active_items(m)
+            kcal=meal_kcal_total(m)
+            meal_registered=False if editing_next else _meal_is_registered(day,mn)
+            status="📍 Fuori casa" if out_of_home else ("✓ Registrato" if meal_registered else "Da registrare")
+            with st.container(border=True):
+                left,right=st.columns([5.5,1.5])
+                with left:
+                    meal_icon='📍' if out_of_home else mn.split(' ',1)[0]
+                    meal_title=mn.split(' ',1)[1] if ' ' in mn else mn
+                    if out_of_home: display_name="Pasto fuori"
+                    elif items: display_name=m.get("name","Pasto")
+                    else: display_name="Nessun alimento inserito"
+                    st.markdown(f"<div class='mydiet-plan-meal-head'><div class='mydiet-plan-meal-icon'>{meal_icon}</div><div style='min-width:0;flex:1'><div class='mydiet-plan-meal-title'>{meal_title}</div><div class='mydiet-plan-meal-name'>{display_name}</div></div><div class='mydiet-plan-meal-kcal'><b>{kcal}</b><span>kcal · {status}</span></div></div>",unsafe_allow_html=True)
+                with right:
+                    if not editing_next and meal_registered:
+                        if st.button("↩",key=f"undo_{day}_{mn}",help="Annulla registrazione",use_container_width=True):
+                            set_meal_registered(day,mn,False); _mydiet_rerun()
+                if st.button("✏️ Modifica solo questo pasto",key=f"edit_meal_{day}_{mn}",use_container_width=True):
+                    st.session_state.plan_edit_meal=None if edit_key==(day,mn) else (day,mn)
+                    _mydiet_rerun()
+
+                if edit_key==(day,mn):
+                    st.markdown("**Modifica questo pasto**")
+                    if not editing_next: st.caption("Il piano attuale non viene modificato globalmente: stai modificando solo questo pasto.")
+                    if not out_of_home:
+                        if items:
+                            for item in items:
+                                mult=item_multiplier(item); current_qty=item_qty(item); current_kcal=item_kcal(item); step=qty_step(item.get("unit","g"),current_qty)
+                                a,b,c=st.columns([5,1,1])
+                                with a:
+                                    st.markdown(f"**{item['name']}**")
+                                    st.caption(f"{current_qty:g} {item.get('unit','g')} · {round(current_kcal)} kcal")
+                                    if item.get("kcal_source"): st.caption(f"Fonte calorie: {item.get('kcal_source')} · {item.get('kcal_assumption','')}")
+                                with b:
+                                    if st.button("−",key=f"edit_minus_{item['id']}",use_container_width=True):
+                                        if quantity_mode()=="precise": set_item_qty(item,current_qty-step)
+                                        else: set_item_qty(item,max(0.5,mult-0.5)*float(item.get('qty',1)))
+                                        if editing_next: save_next_editor_context()
+                                        _mydiet_rerun()
+                                with c:
+                                    if st.button("+",key=f"edit_plus_{item['id']}",use_container_width=True):
+                                        if quantity_mode()=="precise": set_item_qty(item,current_qty+step)
+                                        else: set_item_qty(item,(mult+0.5)*float(item.get('qty',1)))
+                                        if editing_next: save_next_editor_context()
+                                        _mydiet_rerun()
+                                with st.expander(f"⚙️ {item['name']}",expanded=False):
+                                    a,b,c,d=st.columns([3,1,1,1])
+                                    with a: new_name=st.text_input("Alimento",value=item['name'],key=f"rn_{item['id']}")
+                                    with b: new_qty=st.number_input("Qtà",min_value=.1,value=float(current_qty),step=step,key=f"rq_{item['id']}")
+                                    with c: new_unit=st.selectbox("Unità",["g","ml","pz"],index=["g","ml","pz"].index(item.get('unit','g')) if item.get('unit','g') in ["g","ml","pz"] else 0,key=f"ru_{item['id']}")
+                                    with d: new_kcal=st.number_input("kcal",min_value=0,value=int(round(current_kcal)),step=5,key=f"rk_{item['id']}")
+                                    x,y=st.columns(2)
+                                    with x:
+                                        if st.button("💾 Salva",key=f"save_{item['id']}",use_container_width=True,type="primary") and new_name.strip():
+                                            item['name']=new_name.strip(); item['unit']=new_unit; item['qty']=float(new_qty); item['kcal']=int(new_kcal)
+                                            if editing_next: st.session_state.next_overrides[item['id']]={"multiplier":1}; save_next_editor_context()
+                                            else: st.session_state.overrides[item['id']]={"multiplier":1}
+                                            st.session_state.eaten[item['id']]=False; st.session_state.registered_meals[_meal_key(day,mn)]=False; st.session_state.plan_edit_meal=None; _mydiet_rerun()
+                                    with y:
+                                        if st.button("✕ Rimuovi",key=f"remove_{item['id']}",use_container_width=True):
+                                            if editing_next: st.session_state.next_overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}; save_next_editor_context()
+                                            else: st.session_state.overrides[item['id']]={"removed":True,"multiplier":item_multiplier(item)}
+                                            st.session_state.eaten[item['id']]=False; st.session_state.registered_meals[_meal_key(day,mn)]=False; st.session_state.plan_edit_meal=None; _mydiet_rerun()
+                        else:
+                            st.info("Questo pasto non contiene ancora alimenti.")
+
+                    if out_of_home:
+                        menu=current_mensa_menu(day,mn)
+                        with st.expander("🍴 Menu associato",expanded=bool(menu)):
+                            if menu:
+                                st.success(f"Menu associato · {menu.get('analyzed_at','—')}")
+                                st.info(menu.get("result","Menu analizzato."))
+                            st.markdown("**📷 Menu del pasto fuori casa**")
+                            st.caption("Qui non devi modificare gli alimenti del piano: scegli cosa ordinare fotografando il menu reale.")
+                            img=st.camera_input("📸 Scatta una foto del menu",key=f"mensa_camera_{new_view}_{day}_{mn}") or st.file_uploader("🖼️ Oppure aggiungi una foto",type=["jpg","jpeg","png","webp"],key=f"mensa_upload_{new_view}_{day}_{mn}")
+                            if img:
+                                st.image(img,width=420)
+                                if st.button("✨ Analizza e associa",key=f"analyze_mensa_{new_view}_{day}_{mn}"):
+                                    try:
+                                        b=balance(); rec=meal_recommendation(day,mn,b); planned=rec["name"] if rec else "nessun piatto previsto"; planned_kcal=rec["planned_kcal"] if rec else 0
+                                        budget_label=f"target alimentare: {energy_profile()['target']} kcal/giorno" if editing_next else f"calorie ancora disponibili oggi: {b['remaining']} kcal"
+                                        prompt=f"Analizza questo menu fuori casa per {mn} del giorno {day}. Piano previsto: {planned}; calorie previste: {planned_kcal}; {budget_label}. Confronta solo ciò che compare nella foto. Rispondi con 🟢 COSA ORDINARE, 💡 PERCHÉ, ⚠️ COSA LIMITARE."
+                                        set_mensa_menu(day,mn,openai_interaction(prompt,image=img,thinking_level="low",feature="menu_image"))
+                                        if editing_next: save_next_editor_context()
+                                        _mydiet_rerun()
+                                    except Exception as e: st.error(f"Errore analisi menu: {e}")
+                    if not out_of_home:
+                        with st.expander("➕ Aggiungi alimento",expanded=False):
+                            suggestions=plan_food_suggestions(day,mn,limit=8)
+                            for idx,sug in enumerate(suggestions):
+                                a,b=st.columns([5,1.4])
+                                with a: st.markdown(f"**{sug['name']}** · {sug['qty']:g} {sug['unit']} · {round(sug['kcal'])} kcal")
+                                with b:
+                                    if st.button("+ Aggiungi",key=f"suggest_{day}_{mn}_{idx}",use_container_width=True):
+                                        st.session_state.meal_plan[day][mn]['ingredients'].append({"id":sid(),"name":sug['name'],"qty":sug['qty'],"unit":sug['unit'],"kcal":sug['kcal']})
+                                        if editing_next: save_next_editor_context()
+                                        _mydiet_rerun()
+                            a,b,c=st.columns([3.2,1,1])
+                            with a: n=st.text_input("Alimento",key=f"n_{day}_{mn}",placeholder="Es. pizza, banana, yogurt...")
+                            with b: q=st.number_input("Qtà",min_value=.1,value=1.,step=1.,key=f"q_{day}_{mn}")
+                            with c: u=st.selectbox("Unità",["g","ml","pz"],key=f"u_{day}_{mn}")
+                            st.caption("💡 Le calorie vengono stimate automaticamente quando aggiungi l'alimento. Potrai sempre correggerle dopo.")
+                            if st.button("✨ Aggiungi e calcola calorie",key=f"add_{day}_{mn}",type="primary",use_container_width=True) and n.strip():
+                                try:
+                                    with st.spinner("Calcolo delle calorie…"):
+                                        estimate=estimate_food_kcal(n,q,u)
+                                    new_item={"id":sid(),"name":n.strip(),"qty":float(q),"unit":u,"kcal":estimate["kcal"],"kcal_source":estimate["source"],"kcal_assumption":estimate["assumption"]}
+                                    st.session_state.meal_plan[day][mn]['ingredients'].append(new_item)
+                                    active_names=[x["name"] for x in st.session_state.meal_plan[day][mn].get('ingredients',[]) if not st.session_state.overrides.get(x["id"],{}).get('removed')]
+                                    st.session_state.meal_plan[day][mn]["name"]=", ".join(active_names[:3])
+                                    if editing_next: save_next_editor_context()
+                                    st.success(f"{n.strip()} aggiunto · circa {estimate['kcal']} kcal ({estimate['source']}).")
+                                    _mydiet_rerun()
+                                except Exception as e: st.error(str(e))
+
+    if editing_next:
+        save_next_editor_context()
+        if st.session_state.pop("_next_draft_dirty",False):
+            _db_save_plan_state()
+            _persist_app_state()
+
+# V90: stabilization — weekly rollover, canonical meal kcal rendering, pantry units/steps.
+# ---------------- Dispensa ----------------
+elif st.session_state.page=="Dispensa":
+    st.markdown("<div class=\"md-section-head\"><div><div class=\"md-eyebrow\">MYDIET · ORGANIZZA</div><div class=\"md-page-title\">Spesa & Dispensa</div><div class=\"md-page-sub\">Tieni sotto controllo quello che hai in casa e quello che manca per il tuo piano.</div></div><div class=\"md-section-icon\">🛒</div></div>", unsafe_allow_html=True)
+
+    rows=shopping_list()
+    to_buy=[r for r in rows if r["need"]>0]
+    covered=[r for r in rows if r["need"]<=0]
+    pantry=pantry_items()
+
+    c1,c2,c3=st.columns(3)
+    with c1:
+        st.markdown(f"<div class=\"md-stat md-stat-accent\"><div class=\"md-stat-icon\">🛒</div><div><div class=\"md-stat-value\">{len(to_buy)}</div><div class=\"md-stat-label\">Da comprare</div></div></div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"<div class=\"md-stat\"><div class=\"md-stat-icon\">📦</div><div><div class=\"md-stat-value\">{len(pantry)}</div><div class=\"md-stat-label\">In dispensa</div></div></div>", unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"<div class=\"md-stat md-stat-ok\"><div class=\"md-stat-icon\">✓</div><div><div class=\"md-stat-value\">{len(covered)}</div><div class=\"md-stat-label\">Già coperti</div></div></div>", unsafe_allow_html=True)
+
+    tab_shop, tab_smart, tab_pantry=st.tabs(["🛒 Da comprare","💰 Risparmio","📦 In casa"])
+
+    with tab_shop:
+        st.subheader("🛒 Lista della spesa")
+        if not rows:
+            st.info("Il piano non contiene ancora alimenti da acquistare.")
+        elif not to_buy:
+            st.success("🎉 Hai già tutto quello che serve per il piano.")
+            if covered: st.caption("I prodotti già disponibili in dispensa sono coperti automaticamente dal piano.")
+        else:
+            st.caption("La quantità da comprare tiene già conto di quello che hai in casa.")
+            for r in to_buy:
+                key=_pantry_key(r["name"],r["unit"])
+                with st.container(border=True):
+                    c1,c2=st.columns([4,1.35])
+                    with c1:
+                        st.markdown(f"**{r['name']}**")
+                        pantry_detail = " · ".join(r.get("pantry_parts", []))
+                        if pantry_detail:
+                            st.caption(f"Servono {r['required']:g} {r['unit']} · hai **{r['pantry']:g} {r['unit']}** ({pantry_detail}) · **mancano circa {r['need']:g} {r['unit']}**")
+                        else:
+                            st.caption(f"Servono {r['required']:g} {r['unit']} · hai {r['pantry']:g} {r['unit']} · **mancano circa {r['need']:g} {r['unit']}**")
+                    with c2:
+                        buy_open_key=f"shopping_buy_open_{key.replace('|','_')}"
+                        if not st.session_state.get(buy_open_key,False):
+                            if st.button("✓ Ho comprato",key="buy_"+key.replace("|","_"),use_container_width=True):
+                                st.session_state[buy_open_key]=True
+                                _mydiet_rerun()
+                        else:
+                            st.markdown("**Quanto hai comprato?**")
+                            default_qty=max(0.1,float(r["need"]))
+                            buy_step=qty_step(r["unit"], default_qty)
+                            buy_min=1.0 if r["unit"] in ("pz","confezioni") else (0.1 if r["unit"] in ("g","ml","kg","l") else 0.1)
+                            qty=st.number_input(
+                                f"Quantità ({r['unit']})",
+                                min_value=buy_min,
+                                value=max(buy_min, default_qty),
+                                step=buy_step,
+                                key="shopping_qty_"+key.replace("|","_"),
+                                label_visibility="collapsed"
+                            )
+                            b1,b2=st.columns(2)
+                            with b1:
+                                if st.button("Conferma",key="confirm_buy_"+key.replace("|","_"),use_container_width=True,type="primary"):
+                                    add_pantry_qty(r["name"],r["unit"],float(qty))
+                                    st.session_state.shopping_checked[key]=True
+                                    st.session_state[buy_open_key]=False
+                                    _mydiet_rerun()
+                            with b2:
+                                if st.button("Annulla",key="cancel_buy_"+key.replace("|","_"),use_container_width=True):
+                                    st.session_state[buy_open_key]=False
+                                    _mydiet_rerun()
+            st.divider()
+            st.caption("💡 La quantità indicata è solo il fabbisogno stimato: quando fai la spesa puoi inserire **meno, uguale o più** di quella quantità. MyDiet aggiungerà alla dispensa esattamente quanto hai acquistato.")
+
+    with tab_smart:
+        st.subheader("💰 Spesa intelligente")
+        st.caption("Confronta dati reali quando disponibili, senza inventare prezzi. MyDiet separa il fabbisogno del piano dall'acquisto reale.")
+
+        if not to_buy:
+            st.success("🎉 Nessun acquisto scoperto: il piano è già completamente coperto dalla dispensa.")
+        else:
+            pc1, pc2 = st.columns([2.2, 1])
+            with pc1:
+                strategy = st.selectbox(
+                    "Come vuoi risparmiare?",
+                    ["⚖️ Qualità / prezzo", "💰 Prezzo più basso", "⭐ Mantieni le marche preferite"],
+                    key="shopping_strategy",
+                    help="La strategia cambia il modo in cui MyDiet interpreta i risultati, non i dati ricevuti.",
+                )
+            with pc2:
+                radius = st.number_input(
+                    "📍 Raggio",
+                    min_value=1,
+                    max_value=30,
+                    value=int(st.session_state.get("shopping_radius", 5) or 5),
+                    step=1,
+                    key="shopping_radius",
+                )
+
+            st.markdown("### 🧺 Il tuo paniere")
+            total_need = len(to_buy)
+            high = [r for r in to_buy if shopping_opportunity(r["required"], r["pantry"], r["unit"]) == "high"]
+            medium = [r for r in to_buy if shopping_opportunity(r["required"], r["pantry"], r["unit"]) == "medium"]
+            m1, m2, m3 = st.columns(3)
+            with m1: st.metric("Prodotti da comprare", total_need)
+            with m2: st.metric("Priorità alta", len(high))
+            with m3: st.metric("Coperti", len(covered))
+
+            st.info(
+                "💡 **Ora MyDiet può interrogare dati pubblici aggiornati di Comprissimo.** "
+                "I risultati sono indicativi e vanno sempre verificati nel punto vendita; il prezzo al kg/litro è usato quando la fonte lo pubblica."
+            )
+
+            st.markdown("### 🔎 Confronto prezzi reale")
+            st.caption(f"Raggio preferito: {radius} km · fonte live: Comprissimo · cache di 15 minuti")
+
+            fetch_count = len(to_buy)
+            if st.button(f"🔄 Confronta tutta la spesa · {fetch_count} prodotti", type="primary", use_container_width=True):
+                with st.spinner(f"Sto confrontando tutti i {fetch_count} prodotti del tuo paniere…"):
+                    live = _shopping_live_for_items(to_buy)
+                st.session_state.shopping_live_results = live
+                st.session_state.shopping_live_time = datetime.now(ROME).strftime("%d/%m/%Y %H:%M")
+                _mydiet_rerun()
+
+            live_results = st.session_state.get("shopping_live_results", {})
+            live_time = st.session_state.get("shopping_live_time")
+            if live_time:
+                st.caption(f"Ultimo confronto: {live_time}")
+
+            if not live_results:
+                st.markdown(
+                    "<div class='card'><b>👆 Premi “Confronta tutta la spesa”</b><br>"
+                    "MyDiet cercherà i prodotti più rilevanti nel catalogo pubblico di Comprissimo e costruirà, quando i dati lo permettono, una lista per ogni catena con totale stimato.</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                matched_products = sum(1 for r in to_buy if live_results.get(r["name"]))
+
+                # Dopo il confronto live, costruisci automaticamente una lista per catena.
+                # La lista è volutamente mostrata PRIMA del dettaglio dei singoli prodotti,
+                # così l'utente vede subito cosa comprare e quanto spenderà.
+                store_carts = _shopping_all_store_carts(live_results, to_buy)
+                if store_carts:
+                    st.session_state.shopping_cart_summary = store_carts
+                    st.session_state.shopping_cart_time = live_time
+                    st.success(
+                        f"✅ Trovati risultati per **{matched_products}/{len(to_buy)}** prodotti. "
+                        "La lista della spesa è pronta."
+                    )
+
+                    st.markdown("### 🛒 La tua lista della spesa")
+                    st.caption(
+                        "Qui trovi subito la spesa stimata per ogni catena. "
+                        "Le confezioni vengono stimate dal rapporto prezzo/prezzo unitario."
+                    )
+
+                    ranked_carts = sorted(
+                        store_carts.values(),
+                        key=lambda c: (-c['matched'], c['total'])
+                    )
+                    best_cart = ranked_carts[0] if ranked_carts else None
+                    if best_cart:
+                        st.success(
+                            f"🏆 **Lista più conveniente tra quelle sufficientemente complete: "
+                            f"{best_cart['store']} · {best_cart['total']:.2f} €** · "
+                            f"{best_cart['matched']}/{len(to_buy)} prodotti"
+                        )
+
+                    # Riepilogo compatto: il costo si legge senza dover aprire ogni lista.
+                    summary_cols = st.columns(min(4, len(ranked_carts)))
+                    for col, cart in zip(summary_cols, ranked_carts[:4]):
+                        with col:
+                            st.metric(
+                                cart['store'],
+                                f"{cart['total']:.2f} €",
+                                f"{cart['matched']}/{len(to_buy)} prodotti"
+                            )
+
+                    store_names = [c['store'] for c in ranked_carts]
+                    tabs = st.tabs(store_names[:8])
+                    for tab, store in zip(tabs, store_names[:8]):
+                        cart = store_carts[store]
+                        with tab:
+                            st.markdown(
+                                f"### {store} · **{cart['total']:.2f} €**"
+                            )
+                            st.caption(
+                                f"{cart['matched']} prodotti valorizzati su {len(to_buy)} · "
+                                "stima basata sui prezzi disponibili"
+                            )
+
+                            # Lista compatta a righe, invece di un blocco verticale per prodotto.
+                            for line in cart['rows']:
+                                st.markdown(
+                                    f"**{line['name']}** · "
+                                    f"{line['packages']}× da circa {line['package_qty']:.3g} "
+                                    f"{line['unit_kind']} · "
+                                    f"{line['line_total']:.2f} €"
+                                )
+
+                            missing_store = [
+                                r['name'] for r in to_buy
+                                if not any(x['name'] == r['name'] for x in cart['rows'])
+                            ]
+                            if missing_store:
+                                with st.expander(
+                                    f"⚠️ {len(missing_store)} prodotti non valorizzati",
+                                    expanded=False
+                                ):
+                                    st.write(" · ".join(missing_store))
+
+                    # Il dettaglio completo resta disponibile, ma non occupa più tutta la pagina.
+                    with st.expander(
+                        f"🔎 Dettaglio confronto prezzi · {matched_products}/{len(to_buy)} prodotti",
+                        expanded=False
+                    ):
+                        for r in to_buy:
+                            product_name = str(r["name"]).strip()
+                            matches = live_results.get(product_name, [])
+                            with st.container(border=True):
+                                st.markdown(f"**{product_name}**")
+                                st.caption(
+                                    f"Da acquistare: **{r['need']:g} {r['unit']}** · "
+                                    f"in dispensa: {r['pantry']:g} {r['unit']}"
+                                )
+                                if not matches:
+                                    st.warning(
+                                        "Nessun abbinamento sufficientemente affidabile trovato nel catalogo live."
+                                    )
+                                    q = urllib.parse.quote_plus(product_name)
+                                    st.link_button(
+                                        "🔎 Apri ricerca Comprissimo",
+                                        f"https://comprissimo.ai/search?brand=&category=&has_price=True&on_sale=False&page=1&per_page=24&q={q}&sort=unit_price&supermarket=",
+                                        use_container_width=True,
+                                    )
+                                else:
+                                    best = sorted(
+                                        matches,
+                                        key=lambda x: (x["unit_price"], x["price"])
+                                    )[:3]
+                                    b = best[0]
+                                    st.markdown(
+                                        f"🏆 **Miglior prezzo unitario: "
+                                        f"{b['unit_price']:.2f} €/{b['unit_kind']}** · "
+                                        f"{b['price']:.2f} € · **{b['store'] or 'negozio non indicato'}**"
+                                    )
+                                    if len(best) > 1:
+                                        for idx, alt in enumerate(best[1:], start=2):
+                                            st.caption(
+                                                f"{idx}. {alt['unit_price']:.2f} €/{alt['unit_kind']} · "
+                                                f"{alt['price']:.2f} € · {alt['store'] or 'negozio non indicato'}"
+                                            )
+                                    if b.get("compare_url"):
+                                        st.link_button(
+                                            "📊 Vedi confronto completo",
+                                            b["compare_url"],
+                                            use_container_width=True,
+                                        )
+                                    else:
+                                        st.link_button(
+                                            "🔎 Verifica su Comprissimo",
+                                            b["search_url"],
+                                            use_container_width=True,
+                                        )
+                else:
+                    st.success(
+                        f"✅ Trovati risultati per **{matched_products}/{len(to_buy)}** prodotti analizzati."
+                    )
+                    with st.expander(
+                        "🔎 Dettaglio confronto prezzi",
+                        expanded=False
+                    ):
+                        for r in to_buy:
+                            product_name = str(r["name"]).strip()
+                            matches = live_results.get(product_name, [])
+                            st.markdown(f"**{product_name}** · da acquistare {r['need']:g} {r['unit']}")
+                            if not matches:
+                                st.warning("Nessun abbinamento sufficientemente affidabile trovato.")
+                            else:
+                                best = sorted(matches, key=lambda x: (x["unit_price"], x["price"]))[:3]
+                                for idx, item in enumerate(best, start=1):
+                                    st.caption(
+                                        f"{idx}. {item['unit_price']:.2f} €/{item['unit_kind']} · "
+                                        f"{item['price']:.2f} € · {item['store'] or 'negozio non indicato'}"
+                                    )
+
+            st.markdown("### 🧠 Strategia MyDiet")
+            if strategy == "💰 Prezzo più basso":
+                st.write("💰 Priorità al prezzo unitario pubblicato dalla fonte. Quando possibile, confronta €/kg, €/L o €/pz invece del solo prezzo della confezione.")
+            elif strategy == "⭐ Mantieni le marche preferite":
+                st.write("⭐ Quando il risultato contiene una marca riconoscibile, puoi privilegiarla; MyDiet non sostituisce automaticamente una marca con un'altra.")
+            else:
+                st.write("⚖️ Il miglior acquisto non è sempre il prezzo più basso: considera prezzo unitario, marca e presenza di un'offerta.")
+
+            if high:
+                names = ", ".join(r["name"] for r in high[:5])
+                st.success(f"🔥 **Priorità:** {names}. Sono i prodotti per cui una quota importante del fabbisogno è ancora scoperta.")
+
+            with st.expander("ℹ️ Come funzionano i prezzi", expanded=False):
+                st.write(
+                    "I dati live mostrati qui provengono dal catalogo pubblico di Comprissimo, che dichiara prezzi aggiornati quotidianamente e confronto tra più catene. "
+                    "Il prezzo può comunque variare per punto vendita, giorno e disponibilità. SpesaChiara resta disponibile come seconda verifica, ma MyDiet non ne effettua scraping automatico."
+                )
+                st.caption("Obiettivo successivo: collegare il paniere a negozi realmente vicini all'utente e calcolare un totale solo quando abbiamo quantità/confezioni confrontabili.")
+
+    with tab_pantry:
+        st.subheader("📦 Cosa hai in casa")
+        if pantry:
+            for item in pantry:
+                with st.container(border=True):
+                    c1,c2,c3,c4=st.columns([4,1.2,0.8,0.8])
+                    with c1:
+                        st.markdown(f"**{item['name']}**")
+                        matching=next((r for r in rows if str(r["name"]).strip().lower()==str(item["name"]).strip().lower()),None)
+                        if matching:
+                            stock_equiv=matching.get("pantry",0)
+                            if stock_equiv>=matching["required"]:
+                                st.caption("🟢 Sufficiente per il piano")
+                            else:
+                                missing=matching["required"]-stock_equiv
+                                st.caption(f"🟡 Per il piano ne servono ancora {missing:g} {matching['unit']}")
+                        else:
+                            st.caption("Non richiesto dal piano attuale")
+                    with c2:
+                        st.markdown(f"**{item['qty']:g} {item['unit']}**")
+                        lots=item.get("pack_lots",[])
+                        if lots:
+                            lot_labels=[f"{float(x.get('count',0) or 0):g} confezioni × {float(x.get('qty',0) or 0):g} {x.get('unit',item['unit'])}" for x in lots]
+                            st.caption(" · ".join(lot_labels))
+                            package_total=0.0
+                            for lot in lots:
+                                converted=_pantry_convert_between_units(
+                                    float(lot.get("count",0) or 0)*float(lot.get("qty",0) or 0),
+                                    str(lot.get("unit",item["unit"])),
+                                    str(item["unit"])
+                                )
+                                if converted is not None:
+                                    package_total += converted
+                            loose=max(0.0,float(item["qty"])-package_total)
+                            if loose>1e-9:
+                                st.caption(f"+ {loose:g} {item['unit']} già sfusi")
+                        elif item.get("pack_qty",0)>0:
+                            st.caption(f"{item['pack_count']:g} confezioni × {item['pack_qty']:g} {item['pack_unit']}")
+                    with c3:
+                        if st.button("−",key="pantry_minus_"+item["key"].replace("|","_"),use_container_width=True):
+                            key=item["key"]
+                            if item.get("pack_lots") or item.get("pack_qty",0)>0:
+                                _adjust_first_package(key,-1)
+                            else:
+                                add_pantry_qty(item["name"],item["unit"],-pantry_package_step(item))
+                            _mydiet_rerun()
+                    with c4:
+                        if st.button("+",key="pantry_plus_"+item["key"].replace("|","_"),use_container_width=True):
+                            key=item["key"]
+                            if item.get("pack_lots") or item.get("pack_qty",0)>0:
+                                _adjust_first_package(key,1)
+                            else:
+                                add_pantry_qty(item["name"],item["unit"],pantry_package_step(item))
+                            _mydiet_rerun()
+
+                    # V91.3: every pantry row can now be corrected or removed.
+                    edit_key="pantry_edit_"+item["key"].replace("|","_")
+                    delete_key="pantry_delete_"+item["key"].replace("|","_")
+                    ec1,ec2=st.columns(2)
+                    with ec1:
+                        if st.button("✏️ Modifica",key=edit_key,use_container_width=True):
+                            st.session_state["pantry_edit_open"] = item["key"]
+                            _mydiet_rerun()
+                    with ec2:
+                        if st.button("🗑️ Elimina",key=delete_key,use_container_width=True):
+                            st.session_state["pantry_delete_open"] = item["key"]
+                            _mydiet_rerun()
+
+                    if st.session_state.get("pantry_edit_open")==item["key"]:
+                        with st.container(border=True):
+                            st.markdown("**Modifica alimento**")
+                            edit_mode_default="Confezione" if item.get("pack_lots") or item.get("pack_qty",0)>0 else "Quantità libera"
+                            e_name=st.text_input("Alimento",value=item["name"],key="edit_name_"+item["key"].replace("|","_"))
+                            e_mode=st.radio("Come lo hai?",["Quantità libera","Confezione"],index=0 if edit_mode_default=="Quantità libera" else 1,horizontal=True,key="edit_mode_"+item["key"].replace("|","_"))
+                            if e_mode=="Quantità libera":
+                                e_unit=st.selectbox("Unità",["g","kg","ml","l","pz"],index=( ["g","kg","ml","l","pz"].index(item["unit"]) if item["unit"] in ["g","kg","ml","l","pz"] else 0),key="edit_unit_"+item["key"].replace("|","_"))
+                                e_qty=st.number_input("Quantità totale",min_value=0.0,value=float(item["qty"]),step=qty_step(e_unit,max(1.0,float(item["qty"]))),key="edit_qty_"+item["key"].replace("|","_"))
+                                st.caption("Salvando questa modalità, l'eventuale informazione sulle confezioni viene sostituita dalla quantità libera.")
+                                e_pack_count=e_pack_qty=e_loose=0.0; e_pack_unit=e_unit
+                            else:
+                                lots=item.get("pack_lots",[]) or []
+                                first=lots[0] if lots else {"count":item.get("pack_count",1) or 1,"qty":item.get("pack_qty",0) or 0,"unit":item.get("pack_unit",item["unit"])}
+                                if len(lots)>1:
+                                    st.warning("Questo alimento contiene più formati di confezione. La modifica li riunirà nel formato indicato qui sotto.")
+                                pc1,pc2,pc3=st.columns(3)
+                                with pc1: e_pack_count=st.number_input("Numero confezioni",min_value=0.0,value=float(sum(float(x.get("count",0) or 0) for x in lots) or first.get("count",1) or 1),step=1.0,key="edit_pack_count_"+item["key"].replace("|","_"))
+                                with pc2: e_pack_qty=st.number_input("Contenuto per confezione",min_value=0.0,value=float(first.get("qty",0) or 0),step=0.1,key="edit_pack_qty_"+item["key"].replace("|","_"))
+                                units=["g","kg","ml","l","pz"]
+                                first_unit=str(first.get("unit",item["unit"])).lower()
+                                with pc3: e_pack_unit=st.selectbox("Unità",units,index=(units.index(first_unit) if first_unit in units else 0),key="edit_pack_unit_"+item["key"].replace("|","_"))
+                                loose_unit=e_pack_unit
+                                loose_default=_pantry_loose_qty(item)
+                                e_loose=st.number_input(f"Quantità già sfusa ({loose_unit})",min_value=0.0,value=float(loose_default if item["unit"]==loose_unit else (_pantry_convert_between_units(loose_default,item["unit"],loose_unit) or 0)),step=qty_step(loose_unit,max(1.0,float(loose_default or 1))),key="edit_loose_"+item["key"].replace("|","_"))
+                            b1,b2=st.columns(2)
+                            with b1:
+                                if st.button("💾 Salva modifica",key="save_edit_"+item["key"].replace("|","_"),type="primary",use_container_width=True):
+                                    ok=_replace_pantry_entry(item["key"],e_name,e_mode,e_qty,e_unit,e_pack_count,e_pack_qty,e_pack_unit,e_loose)
+                                    if ok:
+                                        st.session_state["pantry_edit_open"]=None
+                                        _mydiet_rerun()
+                                    else:
+                                        st.error("Controlla i valori inseriti: quantità e confezione devono essere maggiori di zero.")
+                            with b2:
+                                if st.button("Annulla",key="cancel_edit_"+item["key"].replace("|","_"),use_container_width=True):
+                                    st.session_state["pantry_edit_open"]=None
+                                    _mydiet_rerun()
+
+                    if st.session_state.get("pantry_delete_open")==item["key"]:
+                        with st.container(border=True):
+                            st.warning(f"Vuoi eliminare **{item['name']} · {item['qty']:g} {item['unit']}** dalla dispensa?")
+                            d1,d2=st.columns(2)
+                            with d1:
+                                if st.button("🗑️ Conferma eliminazione",key="confirm_delete_"+item["key"].replace("|","_"),type="primary",use_container_width=True):
+                                    _delete_pantry_entry(item["key"])
+                                    st.session_state["pantry_delete_open"]=None
+                                    _mydiet_rerun()
+                            with d2:
+                                if st.button("Annulla",key="cancel_delete_"+item["key"].replace("|","_"),use_container_width=True):
+                                    st.session_state["pantry_delete_open"]=None
+                                    _mydiet_rerun()
+        else:
+            st.info("La dispensa è vuota. Puoi aggiungere qui quello che hai già in casa.")
+
+        st.divider()
+        with st.expander("➕ Aggiungi alimento alla dispensa",expanded=False):
+            suggestions=[{"name":r["name"],"unit":r["unit"]} for r in shopping_list()]
+            names=sorted({x["name"] for x in suggestions})
+            c1,c2=st.columns([3,2])
+            with c1: selected=st.selectbox("Alimento",["Nuovo alimento…"]+names,key="pantry_select")
+            with c2: mode=st.selectbox("Come lo hai?",["Quantità libera","Confezione"],key="pantry_add_mode")
+            if selected=="Nuovo alimento…":
+                custom_name=st.text_input("Nome alimento",placeholder="es. Pasta")
+            else:
+                custom_name=selected
+            if mode=="Quantità libera":
+                c1,c2=st.columns([1,1])
+                with c1: unit=st.selectbox("Unità",["g","kg","ml","l","pz"],key="pantry_unit")
+                with c2:
+                    qty_step_value=qty_step(unit, 20 if unit in ("g","ml") else 1)
+                    qty=st.number_input("Quantità",min_value=0.0,value=0.0,step=qty_step_value,key="pantry_qty")
+                if selected!="Nuovo alimento…":
+                    suggested_unit=next((x["unit"] for x in suggestions if x["name"]==selected),None)
+                    if suggested_unit in ("g","kg","ml","l","pz"): st.caption(f"Unità suggerita dal piano: **{suggested_unit}**")
+                if st.button("Salva in dispensa",type="primary",key="save_pantry_loose") and custom_name.strip() and qty>0:
+                    add_pantry_qty(custom_name.strip(),unit,qty); _mydiet_rerun()
+            else:
+                st.caption("Indica il contenuto di una singola confezione. MyDiet calcolerà automaticamente la quantità totale.")
+                c1,c2,c3=st.columns([1,1,1])
+                with c1: pack_count=st.number_input("Numero confezioni",min_value=1.0,value=1.0,step=1.0,key="pantry_pack_count")
+                with c2: pack_qty=st.number_input("Contenuto per confezione",min_value=0.0,value=0.0,step=0.1,key="pantry_pack_qty")
+                with c3: pack_unit=st.selectbox("Unità",["g","kg","ml","l","pz"],key="pantry_pack_unit")
+                if pack_qty>0:
+                    st.info(f"📦 {pack_count:g} confezioni × {pack_qty:g} {pack_unit} = **{pack_count*pack_qty:g} {pack_unit} totali**")
+                if st.button("📦 Aggiungi confezioni",type="primary",key="save_pantry_pack") and custom_name.strip() and pack_qty>0:
+                    add_pantry_package(custom_name.strip(),pack_qty,pack_unit,pack_count); _mydiet_rerun()
+
+    with st.expander("ℹ️ Come funziona la dispensa",expanded=False):
+        st.write("Quando registri un pasto come mangiato, MyDietApp scala dalla dispensa solo la quantità che era effettivamente presente. Se annulli il pasto, quella quantità viene ripristinata. Per i prodotti confezionati viene conservato anche il formato della confezione, così in futuro il barcode potrà aggiungere automaticamente prodotti come 2 × 500 g.")
+        st.write("Nella sezione **Risparmio**, MyDiet confronta il paniere intero quando premi il pulsante. Per alcuni alimenti freschi può anche convertire unità domestiche note, ad esempio **5 banane ≈ 600 g**, così la dispensa incide correttamente sulla lista della spesa.")
+
+# ---------------- Attività / Health ----------------
+elif st.session_state.page=="Attività":
+    st.title("🏃 Attività")
+    st.markdown("""
+    <style>
+    body:has(.activity-ui-v88) .activity-top {
+        background:linear-gradient(135deg,rgba(255,84,84,.18),rgba(116,78,255,.10) 52%,rgba(255,255,255,.035));
+        border:1px solid rgba(255,255,255,.09); border-radius:26px; padding:22px 22px 20px;
+        margin:2px 0 16px; box-shadow:0 14px 34px rgba(0,0,0,.16);
+    }
+    body:has(.activity-ui-v88) .activity-top-title {font-size:1.25rem;font-weight:800;margin-bottom:5px;}
+    body:has(.activity-ui-v88) .activity-top-sub {font-size:.88rem;opacity:.70;line-height:1.45;}
+    body:has(.activity-ui-v88) .activity-status {
+        display:flex;align-items:center;gap:8px;margin-top:15px;padding:9px 12px;border-radius:14px;
+        background:rgba(0,0,0,.16);border:1px solid rgba(255,255,255,.07);font-size:.82rem;
+    }
+    body:has(.activity-ui-v88) .activity-dot {width:9px;height:9px;border-radius:50%;display:inline-block;background:#8b8b8b;}
+    body:has(.activity-ui-v88) .activity-dot.ok {background:#35c77a;box-shadow:0 0 10px rgba(53,199,122,.55);}
+    body:has(.activity-ui-v88) .activity-dot.warn {background:#e5b83f;box-shadow:0 0 10px rgba(229,184,63,.35);}
+    body:has(.activity-ui-v88) .activity-section {
+        display:flex;align-items:center;justify-content:space-between;gap:12px;
+        font-size:1.03rem;font-weight:800;margin:22px 0 10px;
+    }
+    body:has(.activity-ui-v88) .activity-section-sub {font-size:.78rem;font-weight:500;opacity:.55;}
+    body:has(.activity-ui-v88) .activity-source-card {
+        border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:16px 17px;
+        background:rgba(255,255,255,.025);margin:8px 0 14px;
+    }
+    body:has(.activity-ui-v88) .activity-source-title {font-weight:800;font-size:.98rem;}
+    body:has(.activity-ui-v88) .activity-source-sub {font-size:.78rem;opacity:.62;margin-top:3px;}
+    body:has(.activity-ui-v88) .activity-chip {
+        display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;
+        font-size:.75rem;font-weight:700;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.07);margin-top:10px;
+    }
+    body:has(.activity-ui-v88) div[data-testid="stMetric"] {
+        background:linear-gradient(145deg,rgba(255,255,255,.055),rgba(255,255,255,.018));
+        border:1px solid rgba(255,255,255,.075);border-radius:18px;padding:12px 14px;min-height:92px;
+        box-shadow:0 8px 24px rgba(0,0,0,.11);
+    }
+    body:has(.activity-ui-v88) div[data-testid="stMetricLabel"] {font-size:.76rem;opacity:.70;}
+    body:has(.activity-ui-v88) div[data-testid="stMetricValue"] {font-size:1.42rem;font-weight:800;}
+    body:has(.activity-ui-v88) .activity-empty {
+        border:1px dashed rgba(255,255,255,.13);border-radius:20px;padding:18px;text-align:center;
+        background:rgba(255,255,255,.018);margin-top:8px;
+    }
+    body:has(.activity-ui-v88) .activity-empty-title {font-weight:800;margin-bottom:4px;}
+    body:has(.activity-ui-v88) .activity-empty-sub {font-size:.8rem;opacity:.60;line-height:1.45;}
+    @media (max-width:700px) {
+        body:has(.activity-ui-v88) .activity-top {padding:17px 16px;border-radius:21px;}
+        body:has(.activity-ui-v88) div[data-testid="stMetric"] {min-height:82px;padding:10px 11px;border-radius:16px;}
+        body:has(.activity-ui-v88) div[data-testid="stMetricValue"] {font-size:1.20rem;}
+    }
+    </style>
+    <div class="activity-ui-v88"></div>
+    """,unsafe_allow_html=True)
+
+    mode=st.session_state.get("p_activity_tracking_mode","🚫 Solo dieta — non monitorare attività")
+    h=st.session_state.get("health",{})
+    native=bool(h.get("native_health_snapshot")) if isinstance(h,dict) else False
+
+    if native:
+        p=h.get("provider",{})
+        last_sync=st.session_state.get("last_sync") or p.get("received_at") or "—"
+        # V98: user-facing status, with technical transport details hidden.
+        st.markdown(f"""
+        <div class="activity-top">
+          <div class="activity-top-title">🟢 Smartwatch collegato</div>
+          <div class="activity-top-sub">MyDiet riceve automaticamente i dati della tua attività.</div>
+          <div class="activity-status"><span class="activity-dot ok"></span><b>Dati sincronizzati</b><span style="opacity:.55">· ultimo aggiornamento {last_sync}</span></div>
+        </div>
+        """,unsafe_allow_html=True)
+    elif mode.startswith("⌚"):
+        st.markdown("""
+        <div class="activity-top">
+          <div class="activity-top-title">🟡 Smartwatch in attesa</div>
+          <div class="activity-top-sub">Hai scelto il monitoraggio automatico. MyDiet sta aspettando il primo dato dal tuo smartwatch.</div>
+          <div class="activity-status"><span class="activity-dot warn"></span><b>Nessun dato ricevuto ancora</b></div>
+        </div>
+        """,unsafe_allow_html=True)
+        if st.button("🔄 Aggiorna dati attività", use_container_width=True, key="activity_force_sync"):
+            _ingest_remote_health_sync(force=True)
+            _mydiet_rerun()
+    else:
+        st.markdown("""
+        <div class="activity-top">
+          <div class="activity-top-title">🏃 Attività</div>
+          <div class="activity-top-sub">Puoi usare MyDiet anche senza collegare uno smartwatch.</div>
+        </div>
+        """,unsafe_allow_html=True)
+
+    if mode.startswith("🚫"):
+        st.info("🥗 Modalità solo dieta: MyDiet non monitora l'attività. Il piano alimentare resta indipendente dagli allenamenti.")
+    elif mode.startswith("✍️"):
+        st.markdown('<div class="activity-section">✍️ Attività inserita manualmente <span class="activity-section-sub">non modifica automaticamente il piano</span></div>',unsafe_allow_html=True)
+        manual=st.session_state.setdefault("manual_activity_today",{})
+        c1,c2,c3=st.columns(3)
+        with c1: msteps=st.number_input("👣 Passi",0,100000,int(manual.get("steps",0)),500)
+        with c2: mcal=st.number_input("⚡ Calorie attività",0,10000,int(manual.get("active_calories",0)),50)
+        with c3: mw=st.number_input("🏋️ Allenamenti",0,10,int(manual.get("workouts",0)),1)
+        mdur=st.number_input("Durata allenamento (min)",0,1440,int(manual.get("duration_minutes",0)),5)
+        if st.button("💾 Salva attività di oggi",type="primary",use_container_width=True):
+            st.session_state.manual_activity_today={"date":today(),"steps":msteps,"active_calories":mcal,"workouts":mw,"duration_minutes":mdur}
+            _mydiet_rerun()
+        if manual:
+            st.success(f"✓ Attività manuale salvata · {int(manual.get('steps',0)):,} passi · {int(manual.get('active_calories',0)):,} kcal attive".replace(",","."))
+
+    # Google Fit is retained only as legacy diagnostics; it is not the productive path.
+    if mode.startswith("⌚") and not native:
+        with st.expander("🔧 Strumenti tecnici",expanded=False):
+            hs=st.session_state.get("health_sync_status", {})
+            if hs.get("status")=="ok":
+                st.success("✓ Health Sync raggiungibile e ultimo snapshot ricevuto.")
+            elif hs.get("status")=="snapshot_not_found":
+                st.warning("⚠️ Health Sync raggiungibile, ma non ha ancora uno snapshot per il profilo MyDiet corrente.")
+            elif hs.get("status")=="http_error":
+                st.warning(f"⚠️ Health Sync ha risposto HTTP {hs.get('http')}.")
+            elif hs.get("status")=="invalid_payload":
+                st.warning("⚠️ Health Sync risponde, ma non contiene uno snapshot valido.")
+            elif hs.get("status")=="not_configured":
+                st.info("Health Sync non configurato: il Bridge può usare il collegamento diretto via URL.")
+            else:
+                st.caption("Health Sync: nessun dato ricevuto in questa sessione.")
+            st.caption("Questi strumenti servono solo per la diagnosi. Per il funzionamento normale MyDiet usa Health Connect + Bridge Android.")
+            cid=st.secrets.get("GOOGLE_CLIENT_ID"); cs=st.secrets.get("GOOGLE_CLIENT_SECRET"); ru=st.secrets.get("REDIRECT_URI")
+            if not cid or not cs or not ru:
+                st.caption("Credenziali Google Fit non configurate: non necessarie per il percorso Health Connect.")
+            else:
+                if "code" in st.query_params:
+                    r=requests.post("https://oauth2.googleapis.com/token",data={"client_id":cid,"client_secret":cs,"code":st.query_params["code"],"grant_type":"authorization_code","redirect_uri":ru},timeout=20)
+                    if r.status_code==200:
+                        x=r.json(); st.session_state.access_token=x["access_token"]
+                        if x.get("refresh_token"): st.session_state.refresh_token=x["refresh_token"]
+                        _mdid=_state_token(); st.query_params.clear()
+                        if _mdid: st.query_params["mdid"]=_mdid
+                        _mydiet_rerun()
+                    else: st.error("Autorizzazione Google non riuscita: "+r.text[:500])
+                if "access_token" not in st.session_state:
+                    url="https://accounts.google.com/o/oauth2/v2/auth?client_id="+urllib.parse.quote(cid.strip())+"&redirect_uri="+urllib.parse.quote(ru.strip(),safe="")+"&response_type=code&scope="+urllib.parse.quote(FIT_SCOPES,safe="")+"&access_type=offline&prompt=consent"
+                    st.link_button("🔗 Apri collegamento Google Fit",url,use_container_width=True)
+                else:
+                    st.success("Account Google collegato in questa sessione")
+                    if st.button("🔄 Leggi dati Google Fit",type="secondary",use_container_width=True):
+                        try:
+                            provider=GoogleFitProvider(); data,hist,diag=provider.sync()
+                            data["provider"]=provider.info(); st.session_state.health=data; st.session_state.health_history=hist; st.session_state.diagnostics=diag
+                            st.session_state.last_sync=datetime.now(ROME).strftime("%d/%m/%Y %H:%M"); _mydiet_rerun()
+                        except Exception as e: st.error(f"Sincronizzazione fallita: {e}")
+
+    h=st.session_state.get("health",{})
+    provider_info=h.get("provider",{}) if isinstance(h,dict) else {}
+    if h:
+        st.markdown('<div class="activity-section">📊 Dati di oggi <span class="activity-section-sub">ricevuti da Health Connect</span></div>',unsafe_allow_html=True)
+        cards=[
+            ("👣 Passi",h.get("steps_today"),"passi"),
+            ("🔥 Calorie totali",h.get("calories_today"),"kcal"),
+            ("⚡ Calorie attive",h.get("active_calories_today"),"kcal"),
+            ("⚖️ Peso",h.get("weight"),"kg"),
+            ("🟠 Massa grassa",h.get("body_fat"),"%"),
+            ("📏 Distanza",h.get("distance_today"),"km"),
+            ("🧬 BMR",h.get("bmr"),"kcal/giorno"),
+            ("❤️ FC media",h.get("heart_rate_avg"),"bpm"),
+            ("😴 Sonno",h.get("sleep_minutes"),"min"),
+        ]
+        cc=st.columns(3)
+        for i,(lab,val,unit) in enumerate(cards):
+            with cc[i%3]:
+                if val is None:
+                    st.metric(lab,"—")
+                else:
+                    try:
+                        if unit in ("passi","kcal","min"): display=f"{float(val):,.0f} {unit}".replace(",",".")
+                        elif unit=="bpm": display=f"{float(val):.0f} {unit}"
+                        else: display=f"{float(val):.1f} {unit}"
+                    except Exception: display=f"{val} {unit}"
+                    st.metric(lab,display)
+
+        a=activity_summary()
+        st.markdown('<div class="activity-section">🏃 Movimento <span class="activity-section-sub">oggi</span></div>',unsafe_allow_html=True)
+        ac1,ac2,ac3=st.columns(3)
+        ac1.metric("👣 Passi",f"{a['steps']:,}".replace(",","."))
+        ac2.metric("⚡ Calorie attive" if a["active_source"]!="stima" else "⚡ Calorie attive stimate",f"{a['active_calories']:,} kcal".replace(",","."))
+        ac3.metric("📏 Distanza",f"{a['distance_km']:.2f} km")
+        if a["details"]:
+            for w in a["details"]: st.write(f"🏃 **{w['name']}** · {w['duration_minutes']} min")
+        else:
+            st.caption("Nessuna sessione di allenamento registrata oggi.")
+        st.caption("Le calorie attive sono già comprese nel consumo totale Health Connect e non vengono aggiunte due volte al bilancio.")
+
+        if native:
+            if h.get("calories_today") is not None and h.get("calories_source_verified"):
+                b=balance()
+                st.markdown('<div class="activity-section">🔥 Impatto energetico <span class="activity-section-sub">senza cambiare il target base</span></div>',unsafe_allow_html=True)
+                bc1,bc2,bc3=st.columns(3)
+                bc1.metric("Consumo osservato",f"{b['observed_burn']:,} kcal".replace(",","."))
+                bc2.metric("Stima fine giornata",f"{b['projected_burn']:,} kcal".replace(",","."))
+                bc3.metric("Target alimentare",f"{b['target']:,} kcal".replace(",","."))
+            elif h.get("calories_today") is not None:
+                st.warning("⚠️ Le calorie totali Health Connect sono ricevute, ma la loro provenienza non è ancora verificata per il bilancio produttivo.")
+
+        if h.get("weight") is not None and h.get("body_fat") is not None:
+            fat=float(h["weight"])*float(h["body_fat"])/100; lean=float(h["weight"])-fat
+            c1,c2=st.columns(2); c1.metric("🟠 Massa grassa stimata",f"{fat:.1f} kg"); c2.metric("💪 Massa magra stimata",f"{lean:.1f} kg")
+
+        if native:
+            payload=h.get("native_health_payload",{})
+            with st.expander("🔧 Dettagli tecnici",expanded=False):
+                st.write("**Schema:**",payload.get("schema","—"))
+                st.write("**Bridge:**",payload.get("bridge_version","—"))
+                st.write("**Data:**",payload.get("date","—"))
+                st.write("**Trust:**",payload.get("trust",{}))
+                st.caption("I dettagli tecnici servono per diagnostica; il percorso produttivo resta Samsung Health → Health Connect → MyDiet.")
+        else:
+            diag_view=st.session_state.get("diagnostics",{})
+            if diag_view:
+                with st.expander("🔎 Diagnostica tecnica",expanded=False):
+                    comp_steps=diag_view.get("_source_compare_steps",[]); comp_cal=diag_view.get("_source_compare_calories",[])
+                    if comp_steps: st.dataframe(pd.DataFrame(comp_steps),use_container_width=True,hide_index=True)
+                    if comp_cal: st.dataframe(pd.DataFrame(comp_cal),use_container_width=True,hide_index=True)
+                    if diag_view.get("_source_compare_error"): st.warning(f"⚠️ Errore confronto sorgenti: {diag_view['_source_compare_error']}")
+                    for k,x in diag_view.items():
+                        if k.startswith("_source_compare_"): continue
+                        if not isinstance(x,dict) or "status" not in x: continue
+                        if x["status"]=="available": st.success(f"✓ {k}: dati trovati · {x.get('type','')}")
+                        elif x["status"]=="no_data": st.warning(f"○ {k}: nessun dato restituito · {x.get('type','')}")
+                        else: st.error(f"✕ {k}: HTTP {x.get('http','')} · {x.get('detail','')}")
+    else:
+        st.markdown("""
+        <div class="activity-empty">
+          <div class="activity-empty-title">📡 In attesa del primo dato</div>
+          <div class="activity-empty-sub">Quando il Bridge Android invierà uno snapshot, qui compariranno passi, calorie, distanza, allenamenti e gli altri dati disponibili.</div>
+        </div>
+        """,unsafe_allow_html=True)
+
+# ---------------- Profilo ----------------
+
+else:
+    st.title("👤 Profilo")
+    st.caption("Il profilo guida il target e il piano. Il monitoraggio dell'attività è opzionale.")
+
+    # V93.2: make the initial home-inventory entry point impossible to miss.
+    # The guided inventory already has its own page; this button only navigates there.
+    st.markdown("### 🏠 Prima settimana: cosa hai già in casa?")
+    st.info("Prima di creare la tua settimana, puoi indicare manualmente gli alimenti che hai già in casa. MyDiet userà queste disponibilità per ottimizzare il piano e ridurre gli acquisti, senza limitare la dieta ai soli alimenti presenti.")
+    if st.button("🏠 Apri inventario iniziale", type="primary", use_container_width=True, key="profile_open_pantry_onboarding_top"):
+        st.session_state.pantry_onboarding_complete = False
+        st.session_state.page = "PantryOnboarding"
+        _mydiet_rerun()
+    db_status = st.session_state.get("_db_status", "non verificato")
+    if db_status == "profilo caricato":
+        st.success("🟢 PostgreSQL: profilo caricato da Supabase")
+    elif db_status.startswith("DB raggiunto"):
+        st.info("🟡 PostgreSQL raggiunto, ma nessun profilo trovato per questo mdid.")
+    elif db_status.startswith("errore") or db_status.startswith("salvataggio"):
+        st.error("🔴 " + db_status)
+    with st.expander("🔧 Diagnostica PostgreSQL", expanded=db_status.startswith("errore") or db_status.startswith("salvataggio")):
+        if st.button("Testa connessione PostgreSQL", key="db_diag_button"):
+            diag = _db_diagnostic()
+            if diag.get("ok"):
+                st.success("Connessione PostgreSQL OK")
+                st.write(f"Database: `{diag.get('database')}` · Utente: `{diag.get('user')}` · Schema: `{diag.get('schema')}`")
+                st.write(f"Tabella `public.profiles`: `{diag.get('table')}` · Righe: `{diag.get('rows')}`")
+                st.write(f"Tabella `public.meal_plans`: `{diag.get('plan_table')}` · Righe: `{diag.get('plan_rows')}`")
+                if st.session_state.get("_db_plan_incomplete"):
+                    st.error(f"⚠️ Il Piano salvato su PostgreSQL è incompleto ({st.session_state.get('_db_plan_db_days', 0)}/7 giorni). Non è stato caricato.")
+                elif st.session_state.get("_db_plan_status") == "vecchio piano locale recuperato e salvato su PostgreSQL":
+                    st.success("♻️ Il vecchio Piano completo è stato recuperato dallo snapshot locale e risalvato su PostgreSQL.")
+            else:
+                st.error("Test PostgreSQL fallito: " + str(diag.get("status", "errore sconosciuto")))
+
+
+    ep = energy_profile()
+
+    if st.session_state.get("profile_change_summary"):
+        changes=st.session_state.get("profile_change_summary",[])
+        st.markdown("### ✅ Profilo aggiornato")
+        for c in changes:
+            st.caption(f"**{c['label']}** · {c['before']} → **{c['after']}**")
+        if st.session_state.get("plan_needs_regeneration"):
+            st.warning("⚠️ Il piano attuale è ancora basato sui parametri precedenti. MyDiet non lo modifica automaticamente per non perdere le tue modifiche manuali.")
+            st.caption("Quando vuoi, vai in Piano e scegli esplicitamente di rigenerare il piano con il nuovo profilo.")
+
+    st.markdown(
+        f"<div class='hero' style='padding:18px 20px;margin:8px 0 12px;'>"
+        f"<div class='small'>TARGET DEL TUO PIANO</div>"
+        f"<div class='big'>{ep['target']:,} kcal</div>".replace(",",".") +
+        f"<div class='muted'>{ep['diet_goal']} · {ep['diet_style']}</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    with st.form("profile_edit"):
+        st.subheader("👤 Dati personali")
+        c1,c2=st.columns(2)
+        with c1:
+            name=st.text_input("Nome",st.session_state.p_name)
+            weight=st.number_input("Peso attuale (kg)",30.,300.,float(st.session_state.p_weight),.1)
+            goal_weight=st.number_input("Peso desiderato (kg)",30.,300.,float(st.session_state.p_goal_weight),.1)
+            height=st.number_input("Altezza (cm)",100.,230.,float(st.session_state.p_height),.5)
+        with c2:
+            age=st.number_input("Età",13,100,int(st.session_state.p_age))
+            sex=st.selectbox("Sesso",["male","female"],index=0 if st.session_state.p_sex=="male" else 1,format_func=lambda x:"Uomo" if x=="male" else "Donna")
+            activity_options=list(ACTIVITY_FACTORS.keys())
+            activity=st.selectbox("Attività abituale",activity_options,index=activity_options.index(st.session_state.p_activity_level),format_func=lambda x:{"sedentaria":"🛋️ Sedentaria","leggera":"🚶 Leggera","moderata":"🏃 Moderata","alta":"🏋️ Alta"}[x])
+            freq_options=["Nessuna","1–2 giorni/settimana","3–4 giorni/settimana","5–6 giorni/settimana","Ogni giorno"]
+            training_frequency=st.selectbox("Allenamento previsto",freq_options,index=freq_options.index(st.session_state.get("p_training_frequency","5–6 giorni/settimana")))
+
+        st.subheader("🎯 Obiettivo")
+        goal_options=["🔻 Dimagrimento","⚖️ Mantenimento","🔺 Aumento di peso","💪 Massa muscolare","🎯 Calorie personalizzate"]
+        diet_goal=st.selectbox("Cosa vuoi ottenere?",goal_options,index=goal_options.index(st.session_state.p_diet_goal))
+        if diet_goal == "🎯 Calorie personalizzate":
+            custom_target=st.number_input("Target kcal personalizzato",1500,6000,int(st.session_state.get("p_custom_calorie_target",0) or max(1500,ep["maintenance_est"])),50)
+            st.caption(f"BMR stimato: {ep['bmr_est']} kcal · mantenimento stimato (TDEE): {ep['maintenance_est']} kcal")
+        else:
+            custom_target=0
+            st.info(f"🎯 Target automatico: **{ep['target']} kcal/giorno** · mantenimento stimato (TDEE): {ep['maintenance_est']} kcal. Il target è adattato all’obiettivo selezionato.")
+
+        st.subheader("🥗 Stile alimentare")
+        style_options=["🥗 Mediterranea","💪 Iperproteica","🥩 Proteica","🔥 Low Carb","🌱 Vegetariana","🎯 Personalizzata"]
+        diet_style=st.selectbox("Come vuoi mangiare?",style_options,index=style_options.index(st.session_state.p_diet_style))
+        c1,c2=st.columns(2)
+        with c1: allergies=st.text_input("Allergie / intolleranze",value=st.session_state.get("p_allergies",""))
+        with c2: excluded_foods=st.text_input("Alimenti esclusi",value=st.session_state.get("p_excluded_foods",""))
+
+        st.subheader("❤️ Monitoraggio")
+        tracking_options=["⌚ Smartwatch / dati automatici","✍️ Inserisco i valori manualmente","🚫 Solo dieta — non monitorare attività"]
+        tracking_mode=st.selectbox("Come vuoi gestire l'attività?",tracking_options,index=tracking_options.index(st.session_state.get("p_activity_tracking_mode",tracking_options[0])))
+        water_options=list(range(1500,4001,250))
+        water_goal=st.selectbox("💧 Obiettivo acqua",water_options,index=water_options.index(int(st.session_state.p_water_goal_ml)),format_func=lambda x:f"{x/1000:.2f} L/giorno")
+        quantity_options=["porzioni","both","precise"]
+        quantity_mode=st.selectbox("Visualizzazione quantità",quantity_options,index=quantity_options.index(st.session_state.get("p_quantity_mode","porzioni")),format_func=lambda x:{"porzioni":"👌 Porzioni","both":"⚖️ Porzioni + grammature","precise":"⚖️ Grammature precise"}[x])
+
+        if st.form_submit_button("Salva modifiche",type="primary",use_container_width=True):
+            _save_profile_values({
+                "name":name,"weight":weight,"goal_weight":goal_weight,"height":height,"age":age,"sex":sex,
+                "activity_level":activity,"training_frequency":training_frequency,"diet_goal":diet_goal,"diet_style":diet_style,
+                "custom_calorie_target":int(custom_target),"activity_tracking_mode":tracking_mode,
+                "allergies":allergies.strip(),"excluded_foods":excluded_foods.strip(),"water_goal_ml":water_goal,"quantity_mode":quantity_mode
+            })
+            st.success("Profilo aggiornato")
+            _mydiet_rerun()
+
+    st.divider()
+    st.subheader("🏠 Inventario iniziale")
+    st.caption("Indica cosa hai già in casa: MyDiet lo userà per ottimizzare la prima settimana e ridurre gli acquisti, senza limitare il piano ai soli alimenti disponibili.")
+    if st.button("🏠 Configura / aggiorna ciò che ho in casa", type="secondary", use_container_width=True, key="profile_open_pantry_onboarding"):
+        st.session_state.pantry_onboarding_complete = False
+        st.session_state.page = "PantryOnboarding"
+        _mydiet_rerun()
+    st.caption("Potrai ripetere questo inventario in qualsiasi momento; gli alimenti già presenti verranno aggiornati/aggregati nella Dispensa.")
+
+    st.divider()
+    st.subheader("🎯 Percorso peso")
+    projection=weight_projection()
+    if projection:
+        target_date=projection["target_date"].strftime("%d/%m/%Y")
+        c1,c2,c3=st.columns(3)
+        c1.metric("Attuale",f"{projection['current']:.1f} kg")
+        c2.metric("Obiettivo",f"{projection['goal']:.1f} kg")
+        c3.metric("Data stimata",target_date)
+        chart_df=pd.DataFrame(projection["rows"]); chart_df["Data"]=pd.to_datetime(chart_df["Data"])
+        st.line_chart(chart_df,x="Data",y="Peso teorico",use_container_width=True,height=300)
+    else:
+        st.info("Imposta un peso desiderato inferiore al peso attuale per visualizzare il percorso di discesa.")
+
+    with st.expander("⚡ Dettagli energetici"):
+        st.write(f"**BMR stimato:** {ep['bmr_est']:,} kcal/giorno".replace(",","."))
+        st.write(f"**Mantenimento stimato:** {ep['maintenance_est']:,} kcal/giorno".replace(",","."))
+        st.write(f"**Target MyDiet:** {ep['target']:,} kcal/giorno".replace(",","."))
+        st.caption("Il piano viene generato sul Target MyDiet. Il BMR è il punto di partenza del calcolo, mentre il mantenimento tiene conto dell'attività abituale prevista.")
+
+    with st.expander("❤️ Monitoraggio attività"):
+        mode=st.session_state.get("p_activity_tracking_mode","🚫 Solo dieta — non monitorare attività")
+        if mode.startswith("⌚"):
+            st.info("Modalità automatica: MyDiet può usare i dati Health Connect quando disponibili.")
+        elif mode.startswith("✍️"):
+            st.info("Modalità manuale: puoi inserire i tuoi valori senza collegare uno smartwatch.")
+        else:
+            st.info("Modalità solo dieta: nessun monitoraggio dell'attività richiesto.")
+        st.caption("In ogni modalità, l'attività reale non modifica automaticamente il piano alimentare: contribuisce al bilancio della giornata.")
+
+def _show_ai_dev_panel():
+    if not AI_DEV_MODE:
+        return
+    usage=_ai_usage_init()
+    st.divider()
+    with st.expander("🧪 MyDiet AI Engine · DEV", expanded=False):
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric("Chiamate", usage["calls"])
+        c2.metric("Input token", f"{usage['input_tokens']:,}".replace(",", "."))
+        c3.metric("Output token", f"{usage['output_tokens']:,}".replace(",", "."))
+        c4.metric("Costo stimato", f"${usage['estimated_usd']:.4f}")
+        st.caption(f"Modello: {OPENAI_MODEL} · Errori: {usage['errors']}")
+        rows=[]
+        for feature, data in usage.get("by_feature", {}).items():
+            rows.append({"Funzione":feature,"Chiamate":data["calls"],"Input":data["input_tokens"],"Cached input":data["cached_input_tokens"],"Output":data["output_tokens"],"Costo USD":round(data["estimated_usd"],6)})
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        last=usage.get("last_call")
+        if last:
+            st.caption(f"Ultima: {last['feature']} · {last['elapsed_ms']} ms · {last['input_tokens']} input · {last['output_tokens']} output · ${last['estimated_usd']:.6f}")
+        if st.button("Azzera statistiche AI", key="reset_ai_dev_stats"):
+            st.session_state["ai_usage"]={"calls":0,"errors":0,"by_feature":{},"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"estimated_usd":0.0,"last_call":None}
+            st.session_state["ai_response_cache"]={}
+            _mydiet_rerun()
+
+
+_show_ai_dev_panel()
+
+# Persist the latest state at the end of a normal script run as well.
+_persist_app_state()
+
+# ---------------- Fixed bottom navigation ----------------
+# Use native Streamlit buttons: changing page stays in the same Streamlit
+# session instead of navigating to a URL/new document on mobile.
+def _navigate_to_page(target):
+    current=st.session_state.get("page","Home")
+    if current=="Piano" and target!="Piano":
+        restore_current_plan_context()
+    st.session_state.page=target
+    _persist_app_state()
+
+if _profile_complete():
+    _nav_current=st.session_state.get("page","Home")
+    with st.bottom:
+        with st.container(key="bottom_nav"):
+            _nav_cols=st.columns(len(APP_PAGES), gap="xxsmall", wrap=False)
+            for _col, (_name, _icon) in zip(_nav_cols, APP_PAGES.items()):
+                with _col:
+                    _label=f"{_icon}  {_name}"
+                    if _col.button(_label, key=f"nav_{_name.lower()}", use_container_width=True, type="primary" if _name==_nav_current else "secondary"):
+                        _navigate_to_page(_name)
+                        _mydiet_rerun()
+
