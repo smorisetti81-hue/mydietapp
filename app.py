@@ -34,7 +34,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp V100.8.3 · Home Visual Polish (CSS-only) · PostgreSQL profile + meal plan + meal logs persistence
+# MyDietApp V100.8 · Home Visual Refresh (CSS-only) · PostgreSQL profile + meal plan + meal logs persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -120,6 +120,41 @@ button,[data-testid="stBaseButton-secondary"],[data-testid="stBaseButton-primary
 .mydiet-kcal-details { min-width:0; }
 .mydiet-kcal-unit { font-size:.88rem; font-weight:750; color:#a8afba; letter-spacing:-.02em; }
 @media (max-width:520px) { .mydiet-kcal-layout { gap:15px; } .mydiet-kcal-ring { width:104px;height:104px;flex-basis:104px; } .mydiet-kcal-ring-inner { width:84px;height:84px; } .mydiet-kcal-ring-number { font-size:1.35rem; } .mydiet-kcal-card-v2 { padding:17px; } .mydiet-kcal-number { font-size:1.8rem; } }
+
+/* V100.9 HOME DASHBOARD — substantial layout polish, data remains derived from existing state */
+.mydiet-kcal-card-v2 { padding: 23px 25px 25px !important; border-radius: 28px !important; }
+.mydiet-kcal-layout { gap: 25px !important; margin-top: 19px !important; }
+.mydiet-kcal-ring { width: 146px !important; height: 146px !important; flex-basis: 146px !important; }
+.mydiet-kcal-ring-inner { width: 118px !important; height: 118px !important; }
+.mydiet-kcal-ring-number { font-size: 1.9rem !important; }
+.mydiet-kcal-number { font-size: 3rem !important; }
+.mydiet-kcal-card-v2:after { content: \"\"; position:absolute; left:0; top:0; bottom:0; width:4px; background:linear-gradient(180deg,#ff5364,#ff9a76); opacity:.9; }
+.mydiet-day-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:14px 0 20px; }
+.mydiet-day-summary-card { min-width:0; padding:13px 14px; border-radius:18px; border:1px solid rgba(255,255,255,.09); background:linear-gradient(145deg,#191e27,#12161c); }
+.mydiet-day-summary-label { color:#969eac; font-size:.72rem; font-weight:750; }
+.mydiet-day-summary-value { color:#f7f8fb; font-size:1.12rem; font-weight:900; margin-top:5px; letter-spacing:-.025em; }
+.mydiet-day-summary-note { color:#7f8998; font-size:.67rem; margin-top:3px; }
+.mydiet-next-card { position:relative; overflow:hidden; padding:19px 19px 17px !important; border-radius:22px !important; }
+.mydiet-next-card:before { content:\"\"; position:absolute; left:0; top:0; bottom:0; width:4px; background:#ff5364; }
+.mydiet-next-name { font-size:1.28rem !important; line-height:1.25; max-width:760px; }
+.mydiet-compact-meal { padding:13px 14px !important; border-radius:18px !important; }
+.mydiet-compact-meal.done { background:linear-gradient(100deg,rgba(53,199,123,.09),rgba(255,255,255,.018)) !important; }
+.mydiet-shopping { padding:17px 18px !important; border-radius:21px !important; }
+@media (max-width:700px) {
+ .mydiet-kcal-card-v2 { padding:18px 16px 20px !important; }
+ .mydiet-kcal-layout { gap:15px !important; }
+ .mydiet-kcal-ring { width:112px !important; height:112px !important; flex-basis:112px !important; }
+ .mydiet-kcal-ring-inner { width:90px !important; height:90px !important; }
+ .mydiet-kcal-ring-number { font-size:1.42rem !important; }
+ .mydiet-kcal-number { font-size:2.05rem !important; }
+ .mydiet-day-summary { gap:7px; margin:11px 0 16px; }
+ .mydiet-day-summary-card { padding:10px 9px; border-radius:15px; }
+ .mydiet-day-summary-label { font-size:.64rem; }
+ .mydiet-day-summary-value { font-size:.95rem; }
+ .mydiet-day-summary-note { font-size:.60rem; }
+ .mydiet-next-card { padding:15px 14px 14px !important; }
+ .mydiet-next-name { font-size:1.08rem !important; }
+}
 
 </style>
 """
@@ -1080,42 +1115,6 @@ div[data-testid="stAlert"] { color: var(--md-text) !important; }
         font-size:.78rem !important;
     }
     .stButton > button {min-height:44px;}
-}
-/* V100.8.3 HOME POLISH — visual-only refinement; preserves existing widgets and state logic */
-/* Clearer hierarchy without changing the existing layout or interaction flow. */
-.mydiet-home-intro { margin: 5px 1px 15px !important; }
-.mydiet-home-greeting { font-size: clamp(1.25rem, 2.5vw, 1.55rem) !important; font-weight: 900 !important; letter-spacing: -.035em !important; }
-.mydiet-home-date { color: #929baa !important; font-size: .78rem !important; }
-.mydiet-kcal-card-v2 { border-color: rgba(255,83,100,.25) !important; }
-.mydiet-kcal-ring { box-shadow: 0 0 0 8px rgba(255,83,100,.035), 0 0 32px rgba(255,83,100,.12) !important; }
-.mydiet-kcal-ring-inner { box-shadow: inset 0 1px 0 rgba(255,255,255,.025); }
-.mydiet-kcal-number { font-variant-numeric: tabular-nums; }
-.mydiet-kcal-unit { font-size: .78rem !important; font-weight: 700 !important; letter-spacing: 0 !important; }
-.mydiet-kcal-sub { font-size: .88rem !important; }
-.mydiet-home-section { margin-top: 23px !important; margin-bottom: 9px !important; }
-.mydiet-home-section-title { font-size: 1.08rem !important; }
-.mydiet-home-section-sub { color: #8f98a8 !important; }
-.mydiet-next-card { position: relative; overflow: hidden; border-color: rgba(255,255,255,.12) !important; }
-.mydiet-next-card:before { content: ''; position:absolute; left:0; top:0; bottom:0; width:3px; background:linear-gradient(180deg,#ff6873,#d71920); opacity:.9; }
-.mydiet-next-top { padding-left: 2px; }
-.mydiet-next-name { line-height: 1.28 !important; }
-.mydiet-next-kcal { line-height: 1.4 !important; }
-.mydiet-compact-meal { transition: border-color .18s ease, background .18s ease, transform .18s ease; }
-.mydiet-compact-meal:not(.done):hover { border-color: rgba(255,83,100,.24); background: rgba(255,83,100,.035); }
-.mydiet-compact-meal.done { background: linear-gradient(115deg,rgba(53,199,123,.075),rgba(255,255,255,.018)) !important; }
-.mydiet-compact-kcal b { font-variant-numeric: tabular-nums; }
-.mydiet-shopping { border-color: rgba(53,199,123,.25) !important; }
-.st-key-water_plus button, .st-key-home_next_eat button { box-shadow: 0 5px 16px rgba(255,75,75,.16); }
-/* More consistent contrast for secondary actions and expanders on the Home page. */
-div[data-testid="stExpander"] details { transition: border-color .18s ease, background .18s ease; }
-div[data-testid="stExpander"] details:hover { border-color: rgba(255,255,255,.16); }
-@media (max-width:700px) {
-  .mydiet-home-intro { margin-bottom: 12px !important; }
-  .mydiet-kcal-layout { gap: 17px !important; }
-  .mydiet-kcal-card-v2 { padding: 17px 16px 18px !important; }
-  .mydiet-home-section { margin-top: 19px !important; }
-  .mydiet-next-name { font-size: 1.08rem !important; }
-  .mydiet-compact-meal { padding: 11px 10px !important; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -4543,6 +4542,25 @@ if st.session_state.page=="Home":
       </div>
     </div>'''.replace(",","."),unsafe_allow_html=True)
     st.markdown('</div>',unsafe_allow_html=True)
+
+    # V100.9: compact live summary immediately below the calorie hero.
+    home_meal_state = st.session_state.meal_plan.get(d,{}) or {}
+    home_meal_order = ["☕ Colazione","🍎 Spuntino","🍽️ Pranzo","🌙 Cena"]
+    home_meals = [(name, home_meal_state[name]) for name in home_meal_order if name in home_meal_state]
+    home_done = sum(1 for name, _meal in home_meals if _meal_is_registered(d,name))
+    home_total = len(home_meals)
+    home_water_l = water_today_ml()/1000
+    home_water_goal_l = water_goal_ml()/1000
+    home_shopping_count = 0
+    try:
+        home_shopping_count = sum(1 for row in shopping_list() if float(row.get("need",0) or 0)>0)
+    except Exception:
+        pass
+    st.markdown(f'''<div class="mydiet-day-summary">
+      <div class="mydiet-day-summary-card"><div class="mydiet-day-summary-label">🍽️ Pasti completati</div><div class="mydiet-day-summary-value">{home_done}<span style="color:#858d9b;font-size:.78rem;font-weight:700"> / {home_total}</span></div><div class="mydiet-day-summary-note">registrati oggi</div></div>
+      <div class="mydiet-day-summary-card"><div class="mydiet-day-summary-label">💧 Acqua</div><div class="mydiet-day-summary-value">{home_water_l:.1f}<span style="color:#858d9b;font-size:.76rem;font-weight:700"> / {home_water_goal_l:.1f} L</span></div><div class="mydiet-day-summary-note">obiettivo giornaliero</div></div>
+      <div class="mydiet-day-summary-card"><div class="mydiet-day-summary-label">🛒 Da acquistare</div><div class="mydiet-day-summary-value">{home_shopping_count}</div><div class="mydiet-day-summary-note">prodotti in lista</div></div>
+    </div>''',unsafe_allow_html=True)
 
     # V97: Home focuses directly on the next action.
     # Next meal: compact and actionable.
