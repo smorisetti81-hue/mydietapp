@@ -34,7 +34,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp V100.8 · Home Visual Refresh (CSS-only) · PostgreSQL profile + meal plan + meal logs persistence
+# MyDietApp V100.8.3 · Home Visual Polish (CSS-only) · PostgreSQL profile + meal plan + meal logs persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -1080,6 +1080,42 @@ div[data-testid="stAlert"] { color: var(--md-text) !important; }
         font-size:.78rem !important;
     }
     .stButton > button {min-height:44px;}
+}
+/* V100.8.3 HOME POLISH — visual-only refinement; preserves existing widgets and state logic */
+/* Clearer hierarchy without changing the existing layout or interaction flow. */
+.mydiet-home-intro { margin: 5px 1px 15px !important; }
+.mydiet-home-greeting { font-size: clamp(1.25rem, 2.5vw, 1.55rem) !important; font-weight: 900 !important; letter-spacing: -.035em !important; }
+.mydiet-home-date { color: #929baa !important; font-size: .78rem !important; }
+.mydiet-kcal-card-v2 { border-color: rgba(255,83,100,.25) !important; }
+.mydiet-kcal-ring { box-shadow: 0 0 0 8px rgba(255,83,100,.035), 0 0 32px rgba(255,83,100,.12) !important; }
+.mydiet-kcal-ring-inner { box-shadow: inset 0 1px 0 rgba(255,255,255,.025); }
+.mydiet-kcal-number { font-variant-numeric: tabular-nums; }
+.mydiet-kcal-unit { font-size: .78rem !important; font-weight: 700 !important; letter-spacing: 0 !important; }
+.mydiet-kcal-sub { font-size: .88rem !important; }
+.mydiet-home-section { margin-top: 23px !important; margin-bottom: 9px !important; }
+.mydiet-home-section-title { font-size: 1.08rem !important; }
+.mydiet-home-section-sub { color: #8f98a8 !important; }
+.mydiet-next-card { position: relative; overflow: hidden; border-color: rgba(255,255,255,.12) !important; }
+.mydiet-next-card:before { content: ''; position:absolute; left:0; top:0; bottom:0; width:3px; background:linear-gradient(180deg,#ff6873,#d71920); opacity:.9; }
+.mydiet-next-top { padding-left: 2px; }
+.mydiet-next-name { line-height: 1.28 !important; }
+.mydiet-next-kcal { line-height: 1.4 !important; }
+.mydiet-compact-meal { transition: border-color .18s ease, background .18s ease, transform .18s ease; }
+.mydiet-compact-meal:not(.done):hover { border-color: rgba(255,83,100,.24); background: rgba(255,83,100,.035); }
+.mydiet-compact-meal.done { background: linear-gradient(115deg,rgba(53,199,123,.075),rgba(255,255,255,.018)) !important; }
+.mydiet-compact-kcal b { font-variant-numeric: tabular-nums; }
+.mydiet-shopping { border-color: rgba(53,199,123,.25) !important; }
+.st-key-water_plus button, .st-key-home_next_eat button { box-shadow: 0 5px 16px rgba(255,75,75,.16); }
+/* More consistent contrast for secondary actions and expanders on the Home page. */
+div[data-testid="stExpander"] details { transition: border-color .18s ease, background .18s ease; }
+div[data-testid="stExpander"] details:hover { border-color: rgba(255,255,255,.16); }
+@media (max-width:700px) {
+  .mydiet-home-intro { margin-bottom: 12px !important; }
+  .mydiet-kcal-layout { gap: 17px !important; }
+  .mydiet-kcal-card-v2 { padding: 17px 16px 18px !important; }
+  .mydiet-home-section { margin-top: 19px !important; }
+  .mydiet-next-name { font-size: 1.08rem !important; }
+  .mydiet-compact-meal { padding: 11px 10px !important; }
 }
 </style>
 """, unsafe_allow_html=True)
