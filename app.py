@@ -34,7 +34,7 @@ from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MyDietApp V100.8 · Home Visual Refresh (CSS-only) · PostgreSQL profile + meal plan + meal logs persistence
+# MyDietApp V100.8.1 · Home Visual Refresh (CSS-only) · PostgreSQL profile + meal plan + meal logs persistence
 # V57: next-week plan is a separate editable draft; active week stays untouched until activation.
 # V50 FIX: sincronizzazione Home/Piano dello stato pasti e reset checkbox robusto
 # V54: one primary meal-registration action in "Cosa mangio oggi?"; daily list is status/undo only.
@@ -1068,6 +1068,46 @@ div[data-testid="stAlert"] { color: var(--md-text) !important; }
         font-size:.78rem !important;
     }
     .stButton > button {min-height:44px;}
+}
+
+/* V100.8.1 — visibly updated Home surface; CSS only */
+.mydiet-home-intro {
+    padding: 7px 2px 12px;
+    border-bottom: 1px solid rgba(255,255,255,.07);
+}
+.mydiet-home-greeting {
+    background: linear-gradient(90deg, #ffffff 0%, #ffd9dc 70%, #ff858e 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent !important;
+}
+.mydiet-kcal-card {
+    border: 1px solid rgba(255,82,104,.48) !important;
+    background:
+      radial-gradient(ellipse at 100% 0%, rgba(255,66,100,.25), transparent 42%),
+      radial-gradient(ellipse at 0% 100%, rgba(99,102,241,.11), transparent 44%),
+      linear-gradient(135deg, #1d202b 0%, #111319 72%) !important;
+    box-shadow: 0 18px 42px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.06) !important;
+}
+.mydiet-kcal-number { font-variant-numeric: tabular-nums; }
+.mydiet-home-progress [data-testid="stProgressBar"] > div {
+    background: linear-gradient(90deg, #ff5268, #ff8a72) !important;
+    border-radius: 999px !important;
+}
+.mydiet-next-card {
+    border: 1px solid rgba(255,110,125,.27) !important;
+    background: linear-gradient(120deg, rgba(255,75,95,.10), rgba(255,255,255,.025) 70%) !important;
+    box-shadow: 0 10px 26px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.035) !important;
+}
+.mydiet-home-section-title { font-size: 1.08rem; font-weight: 900; }
+.mydiet-compact-meal {
+    border-color: rgba(255,255,255,.10) !important;
+    background: linear-gradient(110deg, #171a21, #111318) !important;
+}
+.mydiet-compact-meal.done { border-color: rgba(53,199,123,.34) !important; }
+@media (max-width:700px) {
+    .mydiet-home-intro { padding-bottom: 10px; }
+    .mydiet-kcal-card { padding: 18px 16px 16px !important; }
 }
 </style>
 """, unsafe_allow_html=True)
