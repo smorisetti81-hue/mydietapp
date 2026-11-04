@@ -1562,7 +1562,23 @@ def _db_diagnostic():
                 cur.execute("SELECT to_regclass('public.manual_food_logs')")
                 manual_food_table = cur.fetchone()[0]
                 manual_food_rows = None
+                manual_food_policies = []
+                manual_food_select = manual_food_insert = manual_food_update = False
                 if manual_food_table:
+                    cur.execute("""
+                        SELECT policyname, cmd
+                        FROM pg_policies
+                        WHERE schemaname='public' AND tablename='manual_food_logs'
+                        ORDER BY policyname
+                    """)
+                    manual_food_policies = [f"{row[0]} ({row[1]})" for row in cur.fetchall()]
+                    cur.execute("""
+                        SELECT
+                            has_table_privilege(current_user, 'public.manual_food_logs', 'SELECT'),
+                            has_table_privilege(current_user, 'public.manual_food_logs', 'INSERT'),
+                            has_table_privilege(current_user, 'public.manual_food_logs', 'UPDATE')
+                    """)
+                    manual_food_select, manual_food_insert, manual_food_update = cur.fetchone()
                     cur.execute("SELECT COUNT(*) FROM public.manual_food_logs")
                     manual_food_rows = cur.fetchone()[0]
                 cur.execute("SELECT to_regclass('public.profiles')")
@@ -1577,7 +1593,7 @@ def _db_diagnostic():
                 if plan_table:
                     cur.execute("SELECT COUNT(*) FROM public.meal_plans")
                     plan_rows = cur.fetchone()[0]
-        return {"ok": True, "database": dbname, "user": user, "schema": schema, "table": table, "rows": count, "plan_table": plan_table, "plan_rows": plan_rows, "is_superuser": bool(is_superuser), "bypass_rls": bool(bypass_rls), "manual_food_table": manual_food_table, "manual_food_rows": manual_food_rows}
+        return {"ok": True, "database": dbname, "user": user, "schema": schema, "table": table, "rows": count, "plan_table": plan_table, "plan_rows": plan_rows, "is_superuser": bool(is_superuser), "bypass_rls": bool(bypass_rls), "manual_food_table": manual_food_table, "manual_food_rows": manual_food_rows, "manual_food_policies": manual_food_policies, "manual_food_select": bool(manual_food_select), "manual_food_insert": bool(manual_food_insert), "manual_food_update": bool(manual_food_update)}
     except Exception as e:
         return {"ok": False, "status": str(e)[:500]}
 
@@ -5812,6 +5828,8 @@ else:
                 st.write(f"Database: `{diag.get('database')}` · Utente: `{diag.get('user')}` · Schema: `{diag.get('schema')}`")
                 st.write(f"Ruolo PostgreSQL: superuser=`{diag.get('is_superuser')}` · BYPASSRLS=`{diag.get('bypass_rls')}`")
                 st.write(f"Tabella manual_food_logs: `{diag.get('manual_food_table')}` · Righe: `{diag.get('manual_food_rows')}`")
+                st.write(f"Permessi tabella: SELECT=`{diag.get('manual_food_select')}` · INSERT=`{diag.get('manual_food_insert')}` · UPDATE=`{diag.get('manual_food_update')}`")
+                st.write("Policy RLS: " + (", ".join(diag.get("manual_food_policies") or []) or "nessuna policy rilevata"))
                 manual_status = st.session_state.get("_db_manual_foods_status")
                 if manual_status:
                     st.caption("Alimenti fuori menù: " + str(manual_status))
