@@ -313,3 +313,93 @@ def save_meal_logs(mdid: str, rows, url: Optional[str] = None) -> bool:
                 cur.execute(sql, (mdid, meal_date, meal_name, registered, _json_param(eaten_items), registered, mdid, meal_date, meal_name))
         conn.commit()
     return True
+
+
+# Durable manual-food diary
+MANUAL_FOOD_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS manual_food_logs (
+    mdid TEXT NOT NULL REFERENCES profiles(mdid) ON DELETE CASCADE,
+    food_id TEXT NOT NULL,
+    food_date DATE NOT NULL,
+    name TEXT NOT NULL,
+    kcal DOUBLE PRECISION NOT NULL DEFAULT 0,
+    quantity DOUBLE PRECISION,
+    unit TEXT,
+    source TEXT,
+    assumption TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (mdid, food_id)
+);
+CREATE INDEX IF NOT EXISTS idx_manual_food_logs_date ON manual_food_logs(mdid, food_date);
+ALTER TABLE manual_food_logs ENABLE ROW LEVEL SECURITY;
+"""
+
+
+def ensure_manual_food_schema(url: Optional[str] = None) -> bool:
+    with connection(url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(MANUAL_FOOD_SCHEMA_SQL)
+        conn.commit()
+    return True
+
+
+def load_manual_foods(mdid: str, url: Optional[str] = None):
+    mdid = str(mdid or "").strip()
+    if not mdid:
+        return []
+    sql = """
+        SELECT food_id, food_date, name, kcal, quantity, unit, source, assumption
+        FROM manual_food_logs WHERE mdid=%s
+        ORDER BY food_date, created_at, food_id
+    """
+    with connection(url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (mdid,))
+            rows = cur.fetchall()
+    keys = ("id", "date", "name", "kcal", "quantity", "unit", "source", "assumption")
+    result = []
+    for row in rows:
+        item = dict(zip(keys, row))
+        if hasattr(item.get("date"), "isoformat"):
+            item["date"] = item["date"].isoformat()
+        result.append(item)
+    return result
+
+
+def save_manual_foods(mdid: str, rows, url: Optional[str] = None) -> bool:
+    mdid = str(mdid or "").strip()
+    if not mdid:
+        return False
+    sql = """
+        INSERT INTO manual_food_logs (
+            mdid, food_id, food_date, name, kcal, quantity, unit, source, assumption,
+            created_at, updated_at
+        ) VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+        ON CONFLICT (mdid, food_id) DO UPDATE SET
+            food_date=EXCLUDED.food_date, name=EXCLUDED.name, kcal=EXCLUDED.kcal,
+            quantity=EXCLUDED.quantity, unit=EXCLUDED.unit, source=EXCLUDED.source,
+            assumption=EXCLUDED.assumption, updated_at=NOW()
+    """
+    with connection(url) as conn:
+        with conn.cursor() as cur:
+            for row in (rows or []):
+                food_id = str(row.get("id") or "").strip()
+                food_date = str(row.get("date") or "").strip()
+                name = str(row.get("name") or "").strip()
+                if not food_id or not food_date or not name:
+                    continue
+                try:
+                    kcal = max(0.0, float(row.get("kcal", 0) or 0))
+                    quantity = row.get("quantity")
+                    quantity = float(quantity) if quantity not in (None, "") else None
+                except (TypeError, ValueError):
+                    continue
+                cur.execute(sql, (
+                    mdid, food_id, food_date, name, kcal, quantity,
+                    str(row.get("unit") or "") or None,
+                    str(row.get("source") or "") or None,
+                    str(row.get("assumption") or "") or None,
+                ))
+        conn.commit()
+    return True
