@@ -1495,6 +1495,9 @@ def _db_load_manual_foods_once():
                 local_only.append(item)
         result = sorted(merged.values(), key=lambda x: (str(x.get("date") or ""), str(x.get("id") or "")))
         st.session_state["manual_foods"] = result
+        # Persist assigned UUIDs locally as well, so a legacy item is never
+        # assigned a fresh identity and migrated twice on a later session.
+        _persist_app_state()
         st.session_state["_db_manual_foods_loaded"] = True
         st.session_state["_db_manual_foods_status"] = "alimenti manuali caricati"
         if local_only:
