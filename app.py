@@ -30,6 +30,9 @@ from db import (
 db_ensure_meal_logs_schema = getattr(_db, "ensure_meal_logs_schema", None)
 db_load_meal_logs = getattr(_db, "load_meal_logs", None)
 db_save_meal_logs = getattr(_db, "save_meal_logs", None)
+db_ensure_manual_food_schema = getattr(_db, "ensure_manual_food_schema", None)
+db_load_manual_foods = getattr(_db, "load_manual_foods", None)
+db_save_manual_foods = getattr(_db, "save_manual_foods", None)
 from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1453,6 +1456,88 @@ def _db_load_profile_once():
 
 _db_load_profile_once()
 
+
+def _manual_foods_fingerprint(rows=None):
+    rows = st.session_state.get("manual_foods", []) if rows is None else rows
+    try:
+        return json.dumps(rows or [], ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        return ""
+
+
+def _db_load_manual_foods_once():
+    """Load DB diary and merge local-only records without deleting history."""
+    if st.session_state.get("_db_manual_foods_loaded", False):
+        return
+    mdid, dsn = _state_token(), _database_url()
+    if not mdid or not dsn:
+        return
+    try:
+        if not all((db_ensure_manual_food_schema, db_load_manual_foods, db_save_manual_foods)):
+            raise RuntimeError("db.py non aggiornato: funzioni manual_foods mancanti")
+        db_ensure_manual_food_schema(dsn)
+        local_rows = []
+        for raw in (st.session_state.get("manual_foods", []) or []):
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            item["id"] = str(item.get("id") or uuid.uuid4().hex)
+            item["date"] = str(item.get("date") or today())
+            item["name"] = str(item.get("name") or "Alimento")
+            local_rows.append(item)
+        db_rows = db_load_manual_foods(mdid, dsn) or []
+        merged = {str(x["id"]): dict(x) for x in db_rows if isinstance(x, dict) and x.get("id")}
+        local_only = []
+        for item in local_rows:
+            fid = str(item["id"])
+            if fid not in merged:
+                merged[fid] = item
+                local_only.append(item)
+        result = sorted(merged.values(), key=lambda x: (str(x.get("date") or ""), str(x.get("id") or "")))
+        st.session_state["manual_foods"] = result
+        st.session_state["_db_manual_foods_loaded"] = True
+        st.session_state["_db_manual_foods_status"] = "alimenti manuali caricati"
+        if local_only:
+            db_save_manual_foods(mdid, local_only, dsn)
+            st.session_state["_db_manual_foods_status"] = "alimenti locali migrati su PostgreSQL"
+        st.session_state["_db_manual_foods_last_saved_fingerprint"] = _manual_foods_fingerprint(result)
+    except Exception as e:
+        st.session_state["_db_manual_foods_status"] = "errore PostgreSQL alimenti manuali: " + str(e)[:300]
+
+
+def _db_save_manual_foods_state(force=False):
+    if not st.session_state.get("_db_manual_foods_loaded", False):
+        return False
+    mdid, dsn = _state_token(), _database_url()
+    if not mdid or not dsn:
+        return False
+    normalized = []
+    for raw in (st.session_state.get("manual_foods", []) or []):
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        item["id"] = str(item.get("id") or uuid.uuid4().hex)
+        item["date"] = str(item.get("date") or today())
+        item["name"] = str(item.get("name") or "Alimento")
+        normalized.append(item)
+    st.session_state["manual_foods"] = normalized
+    fingerprint = _manual_foods_fingerprint(normalized)
+    if not force and fingerprint == st.session_state.get("_db_manual_foods_last_saved_fingerprint", ""):
+        return False
+    try:
+        db_ensure_manual_food_schema(dsn)
+        db_save_manual_foods(mdid, normalized, dsn)
+        st.session_state["_db_manual_foods_last_saved_fingerprint"] = fingerprint
+        st.session_state["_db_manual_foods_status"] = "alimenti manuali salvati"
+        return True
+    except Exception as e:
+        st.session_state["_db_manual_foods_status"] = "salvataggio alimenti manuali non riuscito: " + str(e)[:300]
+        return False
+
+
+_db_load_manual_foods_once()
+
+
 def _db_diagnostic():
     """Safe connectivity/read test; never displays the database password."""
     dsn = _database_url()
@@ -1465,6 +1550,18 @@ def _db_diagnostic():
             with conn.cursor() as cur:
                 cur.execute("SELECT current_database(), current_user, current_schema()")
                 dbname, user, schema = cur.fetchone()
+                cur.execute("""
+                    SELECT COALESCE(rolsuper, FALSE), COALESCE(rolbypassrls, FALSE)
+                    FROM pg_roles WHERE rolname = current_user
+                """)
+                role_row = cur.fetchone()
+                is_superuser, bypass_rls = role_row if role_row else (False, False)
+                cur.execute("SELECT to_regclass('public.manual_food_logs')")
+                manual_food_table = cur.fetchone()[0]
+                manual_food_rows = None
+                if manual_food_table:
+                    cur.execute("SELECT COUNT(*) FROM public.manual_food_logs")
+                    manual_food_rows = cur.fetchone()[0]
                 cur.execute("SELECT to_regclass('public.profiles')")
                 table = cur.fetchone()[0]
                 count = None
@@ -1477,7 +1574,7 @@ def _db_diagnostic():
                 if plan_table:
                     cur.execute("SELECT COUNT(*) FROM public.meal_plans")
                     plan_rows = cur.fetchone()[0]
-        return {"ok": True, "database": dbname, "user": user, "schema": schema, "table": table, "rows": count, "plan_table": plan_table, "plan_rows": plan_rows}
+        return {"ok": True, "database": dbname, "user": user, "schema": schema, "table": table, "rows": count, "plan_table": plan_table, "plan_rows": plan_rows, "is_superuser": bool(is_superuser), "bypass_rls": bool(bypass_rls), "manual_food_table": manual_food_table, "manual_food_rows": manual_food_rows}
     except Exception as e:
         return {"ok": False, "status": str(e)[:500]}
 
@@ -1847,6 +1944,7 @@ def _mydiet_rerun():
     try:
         _db_maybe_save_plan_state()
         _db_save_meal_logs_state()
+        _db_save_manual_foods_state()
     except Exception:
         pass
     st.rerun()
@@ -4620,7 +4718,7 @@ if st.session_state.page=="Home":
     with st.expander("🍴 Ho mangiato qualcosa fuori dal piano",expanded=False):
         c1,c2=st.columns([3,1]); n=c1.text_input("Alimento",placeholder="Pizza margherita",key="manual_food_name_home"); k=c2.number_input("kcal",0,3000,500,10,key="manual_food_kcal_home")
         if st.button("Registra",type="primary",key="manual_food_register_home") and n.strip():
-            st.session_state.manual_foods.append({"name":n.strip(),"kcal":k,"date":today()}); _mydiet_rerun()
+            st.session_state.manual_foods.append({"id":uuid.uuid4().hex,"name":n.strip(),"kcal":k,"date":today()}); _mydiet_rerun()
 
     # Technical diagnostics stay available, but are no longer placed near the main calorie card.
     with st.expander("🔧 Diagnostica calorie",expanded=False):
@@ -5709,6 +5807,11 @@ else:
             if diag.get("ok"):
                 st.success("Connessione PostgreSQL OK")
                 st.write(f"Database: `{diag.get('database')}` · Utente: `{diag.get('user')}` · Schema: `{diag.get('schema')}`")
+                st.write(f"Ruolo PostgreSQL: superuser=`{diag.get('is_superuser')}` · BYPASSRLS=`{diag.get('bypass_rls')}`")
+                st.write(f"Tabella manual_food_logs: `{diag.get('manual_food_table')}` · Righe: `{diag.get('manual_food_rows')}`")
+                manual_status = st.session_state.get("_db_manual_foods_status")
+                if manual_status:
+                    st.caption("Alimenti fuori menù: " + str(manual_status))
                 st.write(f"Tabella `public.profiles`: `{diag.get('table')}` · Righe: `{diag.get('rows')}`")
                 st.write(f"Tabella `public.meal_plans`: `{diag.get('plan_table')}` · Righe: `{diag.get('plan_rows')}`")
                 if st.session_state.get("_db_plan_incomplete"):
