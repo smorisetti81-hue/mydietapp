@@ -4734,10 +4734,27 @@ if st.session_state.page=="Home":
     if st.button("🛒 Apri spesa",key="home_open_shopping",use_container_width=True):
         st.session_state.page="Dispensa"; _mydiet_rerun()
 
+    # A one-run confirmation survives the rerun triggered by saving the manual food.
+    manual_food_flash = st.session_state.pop("_manual_food_flash", None)
+    if manual_food_flash:
+        st.success(manual_food_flash)
     with st.expander("🍴 Ho mangiato qualcosa fuori dal piano",expanded=False):
-        c1,c2=st.columns([3,1]); n=c1.text_input("Alimento",placeholder="Pizza margherita",key="manual_food_name_home"); k=c2.number_input("kcal",0,3000,500,10,key="manual_food_kcal_home")
-        if st.button("Registra",type="primary",key="manual_food_register_home") and n.strip():
-            st.session_state.manual_foods.append({"id":uuid.uuid4().hex,"name":n.strip(),"kcal":k,"date":today()}); _mydiet_rerun()
+        st.caption("Registra qui ciò che hai mangiato fuori dal piano: lo ritroverai nell'elenco qui sotto e nel totale calorie di oggi.")
+        c1,c2=st.columns([3,1])
+        n=c1.text_input("Alimento",placeholder="Pizza margherita",key="manual_food_name_home")
+        k=c2.number_input("kcal",0,3000,500,10,key="manual_food_kcal_home")
+        if st.button("➕ Registra alimento",type="primary",key="manual_food_register_home") and n.strip():
+            st.session_state.manual_foods.append({"id":uuid.uuid4().hex,"name":n.strip(),"kcal":k,"date":today()})
+            st.session_state["_manual_food_flash"] = f"{n.strip()} registrato correttamente · {int(k)} kcal"
+            _mydiet_rerun()
+
+    manual_today_home=[x for x in (st.session_state.get("manual_foods",[]) or []) if x.get("date")==today()]
+    if manual_today_home:
+        manual_kcal_home=sum(float(x.get("kcal",0) or 0) for x in manual_today_home)
+        st.markdown("**➕ Alimenti fuori piano di oggi**")
+        for item in manual_today_home:
+            st.write(f"• {item.get('name','Alimento')} — {round(float(item.get('kcal',0) or 0))} kcal")
+        st.caption(f"{len(manual_today_home)} registrazioni · {round(manual_kcal_home)} kcal complessive")
 
     # Technical diagnostics stay available, but are no longer placed near the main calorie card.
     with st.expander("🔧 Diagnostica calorie",expanded=False):
